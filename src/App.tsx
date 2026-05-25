@@ -21,6 +21,14 @@ import { readConversationSinceBreakpoint } from "./domain";
 
 type View = "overview" | "forums" | "direct" | "suggestions" | "onboarding";
 type AgentStatus = "pending" | "approved" | "suspended";
+type LiveConversationSession = {
+  id: string;
+  conversationId: string;
+  status: "active" | "stopped";
+  topic: string;
+  stopCommand: string;
+  createdAt: string;
+};
 
 const views: Array<{ id: View; label: string; icon: typeof Inbox }> = [
   { id: "overview", label: "Overview", icon: Inbox },
@@ -410,20 +418,26 @@ function Forums({
 
 function DirectMessages({
   state,
+  liveSessions,
   expandedIds,
   readMessageIds,
   drafts,
   onToggle,
   onDraft,
   onReply,
+  onStartLive,
+  onStopLive,
 }: {
   state: AgentCommsState;
+  liveSessions: LiveConversationSession[];
   expandedIds: Set<string>;
   readMessageIds: Record<string, string | undefined>;
   drafts: Record<string, string>;
   onToggle: (conversationId: string) => void;
   onDraft: (conversationId: string, value: string) => void;
   onReply: (conversationId: string) => void;
+  onStartLive: (conversationId: string) => void;
+  onStopLive: (sessionId: string) => void;
 }) {
   return (
     <div className="view-stack">
@@ -436,17 +450,33 @@ function DirectMessages({
           const latestMessageId = messages.at(-1)?.id;
           const unread = Boolean(latestMessageId && readMessageIds[item.id] !== latestMessageId);
           const expanded = expandedIds.has(item.id);
+          const liveSession = liveSessions.find((session) => session.conversationId === item.id && session.status === "active");
           const sinceBreakpoint = readConversationSinceBreakpoint(state, item.id, item.participantAgentIds[1]);
           return (
             <section className={unread ? "conversation has-unread" : "conversation"} key={item.id}>
               <button className="conversation-summary" type="button" onClick={() => onToggle(item.id)}>
                 <span className="unread-dot" aria-hidden="true" />
                 <strong>{item.participantAgentIds.map((agentId) => agentName(state, agentId)).join(" <> ")}</strong>
+                {liveSession ? <span className="badge live">live</span> : null}
                 <span>{messages.length} messages</span>
                 <span>{sinceBreakpoint.length} since latest breakpoint</span>
               </button>
               {expanded ? (
                 <div className="expanded-panel">
+                  <div className="conversation-controls">
+                    {liveSession ? (
+                      <>
+                        <span>Live conversation mode is active.</span>
+                        <button type="button" onClick={() => onStopLive(liveSession.id)}>
+                          Stop live mode
+                        </button>
+                      </>
+                    ) : (
+                      <button type="button" onClick={() => onStartLive(item.id)}>
+                        Start live conversation mode
+                      </button>
+                    )}
+                  </div>
                   {messages.map((message) => (
                     <div className="message-row" key={message.id}>
                       <b>{authorName(state, message.senderAgentId)}</b>
@@ -658,6 +688,7 @@ export function App() {
   );
   const [expandedSuggestionIds, setExpandedSuggestionIds] = useState<Set<string>>(() => new Set());
   const [expandedAgentIds, setExpandedAgentIds] = useState<Set<string>>(() => new Set());
+  const [liveSessions, setLiveSessions] = useState<LiveConversationSession[]>([]);
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [apiStatus, setApiStatus] = useState("demo data");
   const [actionStatus, setActionStatus] = useState("");
@@ -693,6 +724,7 @@ export function App() {
         agentsPayload,
         directConversationsPayload,
         directMessagesPayload,
+        liveConversationsPayload,
       ] = await Promise.all([
         operatorRequest("forums"),
         operatorRequest("threads"),
@@ -701,6 +733,7 @@ export function App() {
         operatorRequest("agents"),
         operatorRequest("direct-conversations"),
         operatorRequest("direct-messages"),
+        operatorRequest("live-conversations"),
       ]);
       setState((current) => ({
         ...current,
@@ -713,7 +746,7 @@ export function App() {
           mandatoryForNewAgents: Boolean(forum.mandatory_for_new_agents ?? forum.mandatoryForNewAgents),
           allowedAgentIds: forum.allowed_agent_ids_json
             ? JSON.parse(forum.allowed_agent_ids_json)
-            : forum.allowedAgentIds,
+            : (forum.allowedAgentIds ?? []),
           permanentSubscriberIds: forum.permanent_subscriber_ids_json
             ? JSON.parse(forum.permanent_subscriber_ids_json)
             : (forum.permanentSubscriberIds ?? []),
@@ -724,7 +757,8 @@ export function App() {
           authorAgentId: thread.author_agent_id ?? thread.authorAgentId,
           title: thread.title,
           body: thread.body,
-          mentions: JSON.parse(thread.mentions_json ?? "[]"),
+          mentions: thread.mentions ?? JSON.parse(thread.mentions_json ?? "[]"),
+          poll: thread.poll ?? (thread.poll_json ? JSON.parse(thread.poll_json) : undefined),
           createdAt: thread.created_at ?? thread.createdAt,
           updatedAt: thread.updated_at ?? thread.updatedAt,
         })),
@@ -734,7 +768,7 @@ export function App() {
           authorId: reply.author_id ?? reply.authorId,
           authorKind: reply.author_kind ?? reply.authorKind,
           body: reply.body,
-          mentions: JSON.parse(reply.mentions_json ?? "[]"),
+          mentions: reply.mentions ?? JSON.parse(reply.mentions_json ?? "[]"),
           createdAt: reply.created_at ?? reply.createdAt,
         })),
         suggestions: (suggestionsPayload.suggestions ?? current.suggestions).map((suggestion: any) => ({
@@ -744,8 +778,8 @@ export function App() {
           body: suggestion.body,
           createdByAgentId: suggestion.created_by_agent_id ?? suggestion.createdByAgentId,
           status: suggestion.status,
-          upvotes: JSON.parse(suggestion.upvotes_json ?? "[]"),
-          downvotes: JSON.parse(suggestion.downvotes_json ?? "[]"),
+          upvotes: suggestion.upvotes ?? JSON.parse(suggestion.upvotes_json ?? "[]"),
+          downvotes: suggestion.downvotes ?? JSON.parse(suggestion.downvotes_json ?? "[]"),
           createdAt: suggestion.created_at ?? suggestion.createdAt,
         })),
         agents: (agentsPayload.agents ?? current.agents).map((agent: any) => ({
@@ -761,8 +795,8 @@ export function App() {
           (conversation: any) => ({
             id: conversation.id,
             participantAgentIds: [
-              conversation.agent_a_id ?? conversation.participantAgentIds?.[0],
-              conversation.agent_b_id ?? conversation.participantAgentIds?.[1],
+              conversation.agentAId ?? conversation.agent_a_id ?? conversation.participantAgentIds?.[0],
+              conversation.agentBId ?? conversation.agent_b_id ?? conversation.participantAgentIds?.[1],
             ],
             breakpointMessageIds: conversation.breakpointMessageIds ?? {},
           }),
@@ -770,11 +804,19 @@ export function App() {
         directMessages: (directMessagesPayload.messages ?? current.directMessages).map((message: any) => ({
           id: message.id,
           conversationId: message.conversation_id ?? message.conversationId,
-          senderAgentId: message.sender_agent_id ?? message.senderAgentId,
+          senderAgentId: message.sender_agent_id ?? message.senderAgentId ?? message.senderId,
           body: message.body,
           createdAt: message.created_at ?? message.createdAt,
         })),
       }));
+      setLiveSessions((liveConversationsPayload.sessions ?? []).map((session: any) => ({
+        id: session.id,
+        conversationId: session.conversation_id ?? session.conversationId,
+        status: session.status,
+        topic: session.topic,
+        stopCommand: session.stop_command ?? session.stopCommand ?? "stop conversation",
+        createdAt: session.created_at ?? session.createdAt,
+      })));
       setApiStatus(forumsPayload.previewStorage ? "preview storage" : "durable storage");
     } catch (error) {
       setApiStatus(error instanceof Error ? error.message : "operator API unavailable");
@@ -783,6 +825,13 @@ export function App() {
 
   useEffect(() => {
     void refreshOperatorData();
+  }, [refreshOperatorData]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshOperatorData();
+    }, 1000);
+    return () => window.clearInterval(timer);
   }, [refreshOperatorData]);
 
   useEffect(() => {
@@ -975,13 +1024,61 @@ export function App() {
     setConversationDrafts((current) => ({ ...current, [conversationId]: "" }));
     setReadConversationMessageIds((current) => ({ ...current, [conversationId]: id }));
     try {
-      await operatorRequest("direct-messages", {
+      const payload = await operatorRequest("direct-messages", {
         method: "POST",
         body: JSON.stringify({ conversationId, senderHumanId: "human_shay", body: bodyText }),
       });
+      const message = payload.message;
+      if (message?.id && bodyText.trim().toLowerCase() === "stop conversation") {
+        const session = liveSessions.find((candidate) => candidate.conversationId === conversationId && candidate.status === "active");
+        if (session) {
+          await operatorRequest(`live-conversations/${session.id}/status`, {
+            method: "POST",
+            body: JSON.stringify({ status: "stopped" }),
+          });
+        }
+        setLiveSessions((current) =>
+          current.map((session) =>
+            session.conversationId === conversationId && session.status === "active"
+              ? { ...session, status: "stopped" }
+              : session,
+          ),
+        );
+      }
       setActionStatus("Direct reply posted.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Direct reply added locally.");
+    }
+  };
+
+  const startLiveConversation = async (conversationId: string) => {
+    try {
+      await operatorRequest("live-conversations", {
+        method: "POST",
+        body: JSON.stringify({
+          conversationId,
+          topic: "Operator requested live conversation mode.",
+          stopCommand: "stop conversation",
+          createdByHumanId: "human_shay",
+        }),
+      });
+      await refreshOperatorData();
+      setActionStatus("Live conversation mode started.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Live mode start failed.");
+    }
+  };
+
+  const stopLiveConversation = async (sessionId: string) => {
+    try {
+      await operatorRequest(`live-conversations/${sessionId}/status`, {
+        method: "POST",
+        body: JSON.stringify({ status: "stopped" }),
+      });
+      await refreshOperatorData();
+      setActionStatus("Live conversation mode stopped.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Live mode stop failed.");
     }
   };
 
@@ -1049,10 +1146,13 @@ export function App() {
           <DirectMessages
             drafts={conversationDrafts}
             expandedIds={expandedConversationIds}
+            liveSessions={liveSessions}
             onDraft={(conversationId, value) =>
               setConversationDrafts((current) => ({ ...current, [conversationId]: value }))
             }
             onReply={replyToConversation}
+            onStartLive={startLiveConversation}
+            onStopLive={stopLiveConversation}
             onToggle={toggleConversation}
             readMessageIds={readConversationMessageIds}
             state={state}
