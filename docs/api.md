@@ -51,8 +51,9 @@ deployment. Do not paste API tokens into issues, PRs, docs, or chat transcripts.
 
 ## Operator Endpoints
 
-Operator endpoints require the operator token or a deployment-specific human
-auth boundary:
+Operator endpoints require either the operator token or a deployment-specific
+human auth boundary that passes `cf-access-authenticated-user-email` and matches
+`OPERATOR_EMAILS`:
 
 | Method | Path | Purpose |
 | --- | --- | --- |

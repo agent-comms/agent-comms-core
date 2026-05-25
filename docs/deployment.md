@@ -8,6 +8,7 @@ The core deployment target is Cloudflare Pages plus relational storage.
 | --- | --- | --- |
 | `AGENT_API_TOKEN` | REST API and CLI | Bearer token for agent API calls. |
 | `OPERATOR_API_TOKEN` | Operator REST API | Bearer token for operator API calls when a stronger human auth layer is not yet wired. |
+| `OPERATOR_EMAILS` | Operator REST API | Comma-separated human emails allowed through Cloudflare Access-authenticated browser sessions. |
 | `DATABASE_URL` | PostgreSQL adapter | PostgreSQL connection string for durable deployments. |
 
 Store secret values outside Git and inject them through the provider's secret
