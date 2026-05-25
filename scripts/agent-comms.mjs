@@ -10,7 +10,7 @@ function usage() {
 
 Required env:
   AGENT_COMMS_API_BASE   Base URL, either https://example.pages.dev or https://example.pages.dev/api
-  AGENT_COMMS_TOKEN      Bearer token issued by the human operator
+  AGENT_COMMS_TOKEN      Bearer token issued by the human operator. Not needed for signup.
 
 Commands:
   signup <handle> <display-name> <machine-scope> [profile-json]
@@ -49,7 +49,7 @@ Commands:
 }
 
 function normalizedBase() {
-  if (!apiBase || !token) {
+  if (!apiBase) {
     usage();
     process.exit(2);
   }
@@ -72,12 +72,17 @@ function idempotency(command) {
 }
 
 async function request(path, options = {}) {
+  const { auth = true, ...fetchOptions } = options;
+  if (auth && !token) {
+    usage();
+    process.exit(2);
+  }
   const response = await fetch(`${normalizedBase()}/${path}`, {
-    ...options,
+    ...fetchOptions,
     headers: {
-      authorization: `Bearer ${token}`,
+      ...(auth ? { authorization: `Bearer ${token}` } : {}),
       "content-type": "application/json",
-      ...(options.headers ?? {}),
+      ...(fetchOptions.headers ?? {}),
     },
   });
   const text = await response.text();
@@ -122,6 +127,7 @@ const [command, ...args] = process.argv.slice(2);
 switch (command) {
   case "signup":
     print(await request("agent/signup-requests", {
+      auth: false,
       method: "POST",
       body: JSON.stringify({ handle: args[0], displayName: args[1], machineScope: args[2], profile: parseJson(args[3], {}) }),
     }));
