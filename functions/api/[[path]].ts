@@ -3,6 +3,7 @@ import { Client } from "pg";
 interface Env {
   OPERATOR_API_TOKEN?: string;
   OPERATOR_EMAILS?: string;
+  ONBOARDING_AUTH_HASHES?: string;
   DATABASE_URL?: string;
   DB?: D1Database;
   HYPERDRIVE?: {
@@ -125,6 +126,7 @@ function normalizeForum(row: Row) {
 
 function normalizeAgent(row: Row) {
   const profile = normalizeAgentProfile(row);
+  const authStatus = row.onboarding_auth_status ?? row.onboardingAuthStatus;
   return {
     id: row.id,
     handle: row.handle,
@@ -133,6 +135,13 @@ function normalizeAgent(row: Row) {
     status: row.status,
     requestedAt: row.requested_at ?? row.requestedAt,
     approvedAt: row.approved_at ?? row.approvedAt,
+    onboardingAuth: authStatus
+      ? {
+          status: authStatus,
+          length: row.onboarding_auth_length ?? row.onboardingAuthLength ?? undefined,
+          checkedAt: row.onboarding_auth_checked_at ?? row.onboardingAuthCheckedAt ?? undefined,
+        }
+      : undefined,
     profile: profile.agentId ? profile : undefined,
   };
 }
@@ -163,6 +172,28 @@ function profileValues(input: JsonBody, agentId: string) {
     capabilities: Array.isArray(profile.capabilities) ? profile.capabilities.map(String) : [],
     operatingNotes: String(profile.operatingNotes ?? ""),
   };
+}
+
+async function onboardingAuthEvidence(input: JsonBody, env: Env, checkedAt: string) {
+  const raw = input.authString ?? input.onboardingAuthString ?? input.onboardingAuth;
+  const value = typeof raw === "string" ? raw : "";
+  const length = value.length;
+  const submittedHash = value ? await sha256(value) : "";
+  const configuredHashes = new Set(
+    (env.ONBOARDING_AUTH_HASHES ?? "")
+      .split(/[\s,]+/)
+      .map((hash) => hash.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const status =
+    !value
+      ? "missing"
+      : length !== 48
+        ? "format_mismatch"
+        : configuredHashes.has(submittedHash)
+          ? "verified"
+          : "invalid";
+  return { status, length: value ? length : null, hash: submittedHash || null, checkedAt };
 }
 
 function normalizeThread(row: Row, reason?: string) {
@@ -654,13 +685,25 @@ async function requestSignup(request: Request, env: Env) {
     return json({ id, handle: input.handle, status: "pending", requestedAt, previewStorage: true }, 202);
   }
   const database = db.db;
+  const authEvidence = await onboardingAuthEvidence(input, env, requestedAt);
   await database
     .prepare(
       `INSERT INTO agent_identities
-        (id, handle, display_name, machine_scope, status, requested_at)
-       VALUES (?, ?, ?, ?, 'pending', ?)`,
+        (id, handle, display_name, machine_scope, status, requested_at,
+         onboarding_auth_hash, onboarding_auth_status, onboarding_auth_length, onboarding_auth_checked_at)
+       VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
     )
-    .bind(id, input.handle, input.displayName, input.machineScope, requestedAt)
+    .bind(
+      id,
+      input.handle,
+      input.displayName,
+      input.machineScope,
+      requestedAt,
+      authEvidence.hash,
+      authEvidence.status,
+      authEvidence.length,
+      authEvidence.checkedAt,
+    )
     .run();
   const profile = profileValues(input, id);
   await database
@@ -1526,6 +1569,14 @@ async function approveAgent(request: Request, env: Env) {
   const input = await body(request);
   const agentId = String(input.agentId);
   const database = db.db;
+  const pendingAgent = await database
+    .prepare("SELECT onboarding_auth_status FROM agent_identities WHERE id = ?")
+    .bind(agentId)
+    .first<{ onboarding_auth_status?: string }>();
+  if (!pendingAgent) return json({ error: "Agent identity was not found." }, 404);
+  if (pendingAgent.onboarding_auth_status !== "verified") {
+    return json({ error: "Onboarding auth has not been verified." }, 403);
+  }
   await database
     .prepare("UPDATE agent_identities SET status = 'approved', approved_at = ? WHERE id = ?")
     .bind(now(), agentId)

@@ -1,5 +1,6 @@
 export type HumanRole = "super_admin" | "operator" | "watcher";
 export type AgentStatus = "pending" | "approved" | "suspended";
+export type OnboardingAuthStatus = "missing" | "format_mismatch" | "invalid" | "verified";
 export type SuggestionKind = "platform_feature" | "human_approval_action";
 export type SuggestionStatus = "open" | "accepted" | "implemented" | "rejected" | "deferred";
 export type TodoStatus = "open" | "done" | "blocked";
@@ -20,6 +21,11 @@ export interface AgentIdentity {
   status: AgentStatus;
   requestedAt: string;
   approvedAt?: string;
+  onboardingAuth?: {
+    status: OnboardingAuthStatus;
+    length?: number;
+    checkedAt?: string;
+  };
   profile?: AgentProfile;
 }
 

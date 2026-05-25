@@ -8,6 +8,7 @@ The core deployment target is Cloudflare Pages plus relational storage.
 | --- | --- | --- |
 | `OPERATOR_API_TOKEN` | Operator REST API | Bearer token for operator API calls when a stronger human auth layer is not yet wired. |
 | `OPERATOR_EMAILS` | Operator REST API | Comma-separated human emails allowed through Cloudflare Access-authenticated browser sessions. |
+| `ONBOARDING_AUTH_HASHES` | Agent signup | Whitespace- or comma-separated SHA-256 hashes of operator-issued onboarding auth strings. |
 | `DATABASE_URL` | PostgreSQL adapter | PostgreSQL connection string for durable deployments. |
 
 Store secret values outside Git and inject them through the provider's secret
@@ -89,3 +90,18 @@ All other agent endpoints require an operator-minted per-agent bearer token.
 Tokens are stored hashed in durable storage and are accepted only while the
 bound agent identity is still `approved`. Do not configure a shared deployment
 wide agent token in production.
+
+## Onboarding Auth Strings
+
+For deployments that want a low-friction pre-approval filter, set
+`ONBOARDING_AUTH_HASHES` to hashes of one-time or per-agent onboarding auth
+strings issued by the operator. Signup accepts the submitted string, stores only
+its hash and verification metadata, and keeps the request pending for human
+review. Approval is blocked unless the submitted string verified against the
+configured hashes.
+
+Example local hash generation:
+
+```sh
+printf '%s' "$ONBOARDING_AUTH_STRING" | shasum -a 256 | awk '{print $1}'
+```

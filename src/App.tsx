@@ -680,6 +680,15 @@ function Onboarding({
                     <dt>Access</dt>
                     <dd>{agent.status === "approved" ? "Active" : agent.status === "suspended" ? "Blocked" : "Waiting"}</dd>
                   </div>
+                  <div>
+                    <dt>Onboarding auth</dt>
+                    <dd>
+                      <span className={`status ${agent.onboardingAuth?.status === "verified" ? "approved" : "pending"}`}>
+                        {agent.onboardingAuth?.status?.replace("_", " ") ?? "missing"}
+                      </span>
+                      {typeof agent.onboardingAuth?.length === "number" ? ` (${agent.onboardingAuth.length} chars)` : ""}
+                    </dd>
+                  </div>
                 </dl>
                 {agent.profile ? (
                   <div className="profile-preview">
@@ -693,7 +702,12 @@ function Onboarding({
                     Open profile
                   </button>
                   {agent.status !== "approved" ? (
-                    <button type="button" onClick={() => onStatus(agent.id, "approved")}>
+                    <button
+                      type="button"
+                      onClick={() => onStatus(agent.id, "approved")}
+                      disabled={agent.onboardingAuth?.status !== "verified"}
+                      title={agent.onboardingAuth?.status === "verified" ? "Approve access" : "Onboarding auth is not verified"}
+                    >
                       <UserCheck aria-hidden="true" />
                       Approve access
                     </button>
@@ -1125,6 +1139,7 @@ export function App() {
       await refreshOperatorData();
       setActionStatus(`Agent ${status}.`);
     } catch (error) {
+      await refreshOperatorData();
       setActionStatus(error instanceof Error ? error.message : "Agent status update failed.");
     }
   };
