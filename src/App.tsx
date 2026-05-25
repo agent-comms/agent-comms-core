@@ -349,8 +349,8 @@ function Forums({
   if (selectedForum) {
     return (
       <div className="view-stack">
-        <div className="section-title">
-          <div>
+        <div className="forum-detail-header">
+          <div className="forum-title-block">
             <button className="back-button" type="button" onClick={onBack}>
               <ArrowLeft aria-hidden="true" />
               Back to forums
