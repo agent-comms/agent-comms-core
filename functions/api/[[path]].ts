@@ -1,7 +1,13 @@
+import { Client } from "pg";
+
 interface Env {
   AGENT_API_TOKEN?: string;
   OPERATOR_API_TOKEN?: string;
+  DATABASE_URL?: string;
   DB?: D1Database;
+  HYPERDRIVE?: {
+    connectionString: string;
+  };
 }
 
 type JsonBody = Record<string, unknown>;
@@ -16,6 +22,59 @@ declare class D1PreparedStatement {
   all<T = unknown>(): Promise<{ results: T[] }>;
   first<T = unknown>(): Promise<T | null>;
   run(): Promise<unknown>;
+}
+
+class PgDatabase {
+  constructor(private readonly connectionString: string) {}
+
+  prepare(query: string): PgPreparedStatement {
+    return new PgPreparedStatement(this.connectionString, query);
+  }
+}
+
+class PgPreparedStatement {
+  private values: unknown[] = [];
+
+  constructor(
+    private readonly connectionString: string,
+    private readonly sqlText: string,
+  ) {}
+
+  bind(...values: unknown[]): PgPreparedStatement {
+    this.values = values;
+    return this;
+  }
+
+  async all<T = unknown>(): Promise<{ results: T[] }> {
+    return { results: (await this.execute<T>()).rows as T[] };
+  }
+
+  async first<T = unknown>(): Promise<T | null> {
+    const rows = (await this.execute<T>()).rows as T[];
+    return rows[0] ?? null;
+  }
+
+  async run(): Promise<unknown> {
+    return this.execute();
+  }
+
+  private async execute<T = unknown>() {
+    const client = new Client({
+      connectionString: this.connectionString,
+      application_name: "agent-comms-core",
+    });
+    await client.connect();
+    try {
+      return await client.query(toPostgresPlaceholders(this.sqlText), this.values);
+    } finally {
+      await client.end();
+    }
+  }
+}
+
+function toPostgresPlaceholders(query: string): string {
+  let index = 0;
+  return query.replace(/\?/g, () => `$${++index}`);
 }
 
 const json = (payload: unknown, status = 200) =>
@@ -76,6 +135,7 @@ const memory = {
       created_at: "2026-05-25T10:05:00.000Z",
     },
   ] as Row[],
+  todos: [] as Row[],
 };
 
 function requireAuth(request: Request, env: Env, scope: "agent" | "operator") {
@@ -92,8 +152,12 @@ async function body(request: Request): Promise<JsonBody> {
   return (await request.json()) as JsonBody;
 }
 
-function requireDb(env: Env): { ok: true; db: D1Database } | { ok: false; response: Response } {
-  if (!env.DB) return { ok: false, response: json({ error: "Database binding DB is not configured." }, 503) };
+function requireDb(env: Env): { ok: true; db: D1Database | PgDatabase } | { ok: false; response: Response } {
+  if (env.HYPERDRIVE?.connectionString) return { ok: true, db: new PgDatabase(env.HYPERDRIVE.connectionString) };
+  if (env.DATABASE_URL) return { ok: true, db: new PgDatabase(env.DATABASE_URL) };
+  if (!env.DB) {
+    return { ok: false, response: json({ error: "Database binding DB or HYPERDRIVE is not configured." }, 503) };
+  }
   return { ok: true, db: env.DB };
 }
 
@@ -103,6 +167,13 @@ async function listForums(env: Env) {
   const database = db.db;
   const { results } = await database.prepare("SELECT * FROM forums ORDER BY name").all();
   return json({ forums: results });
+}
+
+async function listAgents(env: Env) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ agents: [], previewStorage: true });
+  const { results } = await db.db.prepare("SELECT * FROM agent_identities ORDER BY handle").all();
+  return json({ agents: results });
 }
 
 async function listThreads(env: Env, forumId?: string | null) {
@@ -349,6 +420,159 @@ async function voteSuggestion(request: Request, env: Env, suggestionId: string) 
   return json({ id: suggestionId, vote });
 }
 
+async function readInbox(env: Env, agentId: string) {
+  const db = requireDb(env);
+  if (!db.ok) {
+    const subscribedForumIds = new Set(["forum_general", "forum_stack"]);
+    return json({
+      agentId,
+      forumThreads: memory.threads.filter((thread) => subscribedForumIds.has(String(thread.forum_id))).slice(0, 20),
+      directMessages: memory.directMessages.filter((message) => String(message.sender_agent_id) !== agentId).slice(-20),
+      suggestions: memory.suggestions.filter((suggestion) => suggestion.status === "open"),
+      todos: memory.todos.filter((todo) => todo.assigned_agent_id === agentId && todo.status === "open"),
+      previewStorage: true,
+    });
+  }
+
+  const database = db.db;
+  const { results: subscriptions } = await database
+    .prepare("SELECT forum_id FROM forum_subscriptions WHERE agent_id = ?")
+    .bind(agentId)
+    .all<{ forum_id: string }>();
+  const forumIds = subscriptions.map((subscription) => subscription.forum_id);
+  const forumThreads = forumIds.length
+    ? (
+        await database
+          .prepare(
+            `SELECT * FROM threads
+             WHERE forum_id IN (${forumIds.map(() => "?").join(",")})
+             ORDER BY created_at DESC
+             LIMIT 20`,
+          )
+          .bind(...forumIds)
+          .all()
+      ).results
+    : [];
+  const { results: directMessages } = await database
+    .prepare(
+      `SELECT dm.*
+       FROM direct_messages dm
+       JOIN direct_conversations dc ON dc.id = dm.conversation_id
+       LEFT JOIN direct_breakpoints bp
+         ON bp.conversation_id = dm.conversation_id AND bp.agent_id = ?
+       WHERE (dc.agent_a_id = ? OR dc.agent_b_id = ?)
+         AND dm.sender_agent_id <> ?
+         AND (
+           bp.message_id IS NULL OR dm.created_at > (
+             SELECT created_at FROM direct_messages WHERE id = bp.message_id
+           )
+         )
+       ORDER BY dm.created_at DESC
+       LIMIT 20`,
+    )
+    .bind(agentId, agentId, agentId, agentId)
+    .all();
+  const { results: suggestions } = await database
+    .prepare("SELECT * FROM suggestion_cards WHERE status = 'open' ORDER BY created_at DESC LIMIT 20")
+    .all();
+  const { results: todos } = await database
+    .prepare(
+      `SELECT * FROM platform_todos
+       WHERE assigned_agent_id = ? AND status = 'open'
+       ORDER BY created_at DESC
+       LIMIT 20`,
+    )
+    .bind(agentId)
+    .all();
+
+  return json({ agentId, forumThreads, directMessages, suggestions, todos });
+}
+
+async function approveAgent(request: Request, env: Env) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
+  const input = await body(request);
+  const agentId = String(input.agentId);
+  const database = db.db;
+  await database
+    .prepare("UPDATE agent_identities SET status = 'approved', approved_at = ? WHERE id = ?")
+    .bind(now(), agentId)
+    .run();
+  const { results: forums } = await database
+    .prepare("SELECT id, mandatory_for_new_agents FROM forums WHERE default_subscribed = ? OR mandatory_for_new_agents = ?")
+    .bind(true, true)
+    .all<{ id: string; mandatory_for_new_agents: boolean | number }>();
+  for (const forum of forums) {
+    await database
+      .prepare(
+        `INSERT INTO forum_subscriptions (forum_id, agent_id, permanent)
+         VALUES (?, ?, ?)
+         ON CONFLICT(forum_id, agent_id) DO NOTHING`,
+      )
+      .bind(forum.id, agentId, Boolean(forum.mandatory_for_new_agents))
+      .run();
+  }
+  return json({ agentId, status: "approved" });
+}
+
+async function createForum(request: Request, env: Env) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
+  const input = await body(request);
+  const id = makeId("forum");
+  await db.db
+    .prepare(
+      `INSERT INTO forums
+        (id, slug, name, description, default_subscribed, mandatory_for_new_agents, permanent_subscriber_ids_json)
+       VALUES (?, ?, ?, ?, ?, ?, '[]')`,
+    )
+    .bind(
+      id,
+      input.slug,
+      input.name,
+      input.description ?? "",
+      Boolean(input.defaultSubscribed),
+      Boolean(input.mandatoryForNewAgents),
+    )
+    .run();
+  return json({ id }, 201);
+}
+
+async function createThreadReply(request: Request, env: Env) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
+  const input = await body(request);
+  const id = makeId("reply");
+  await db.db
+    .prepare(
+      `INSERT INTO thread_replies
+        (id, thread_id, author_id, author_kind, body, mentions_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      input.threadId,
+      input.authorId,
+      input.authorKind ?? "human",
+      input.body,
+      JSON.stringify(input.mentions ?? []),
+      now(),
+    )
+    .run();
+  return json({ id }, 201);
+}
+
+async function updateSuggestionStatus(request: Request, env: Env, suggestionId: string) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
+  const input = await body(request);
+  await db.db
+    .prepare("UPDATE suggestion_cards SET status = ? WHERE id = ?")
+    .bind(input.status, suggestionId)
+    .run();
+  return json({ id: suggestionId, status: input.status });
+}
+
 export async function onRequest(context: { request: Request; env: Env }) {
   const { request, env } = context;
   const url = new URL(request.url);
@@ -359,6 +583,7 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (!auth.ok) return auth.response;
 
   if (method === "GET" && path === "agent/forums") return listForums(env);
+  if (method === "GET" && path.startsWith("agent/inbox/")) return readInbox(env, path.split("/").at(-1) ?? "");
   if (method === "GET" && path === "agent/threads") return listThreads(env, url.searchParams.get("forumId"));
   if (method === "POST" && path === "agent/threads") return createThread(request, env);
   if (method === "POST" && path === "agent/signup-requests") return requestSignup(request, env);
@@ -374,6 +599,14 @@ export async function onRequest(context: { request: Request; env: Env }) {
   }
   if (method === "GET" && path === "operator/suggestions") return listSuggestions(env);
   if (method === "GET" && path === "operator/forums") return listForums(env);
+  if (method === "GET" && path === "operator/agents") return listAgents(env);
+  if (method === "GET" && path === "operator/threads") return listThreads(env, url.searchParams.get("forumId"));
+  if (method === "POST" && path === "operator/agent-approvals") return approveAgent(request, env);
+  if (method === "POST" && path === "operator/forums") return createForum(request, env);
+  if (method === "POST" && path === "operator/thread-replies") return createThreadReply(request, env);
+  if (method === "POST" && path.startsWith("operator/suggestions/") && path.endsWith("/status")) {
+    return updateSuggestionStatus(request, env, path.split("/").at(-2) ?? "");
+  }
 
   return json({ error: "Not found." }, 404);
 }

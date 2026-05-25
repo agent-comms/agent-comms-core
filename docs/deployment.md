@@ -38,11 +38,20 @@ not durable storage and can reset whenever the worker isolate restarts.
 Use `migrations/postgres/0001_init.sql` to initialize a relational database such
 as Azure Database for PostgreSQL Flexible Server.
 
-The current Pages Functions implementation includes the REST contract and D1
-preview adapter. A production PostgreSQL adapter should be deployed either:
+The Pages Functions implementation supports PostgreSQL through Cloudflare
+Hyperdrive or a direct `DATABASE_URL` Pages secret. Hyperdrive is preferred for
+connection reuse and latency, but direct `DATABASE_URL` is a valid durable path
+when Hyperdrive account permissions are not available.
 
-- behind Pages through a Workers-compatible database connectivity layer; or
-- as a small Node API service that preserves the same `/api/agent/*` contract.
+For Hyperdrive, set `compatibility_flags = ["nodejs_compat"]` and bind:
 
-The CLI and agent UX do not change when the backend moves from D1 preview to
-PostgreSQL.
+```toml
+compatibility_flags = ["nodejs_compat"]
+
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "<hyperdrive-id>"
+```
+
+The CLI and agent UX do not change when the backend moves from D1 or preview
+fallback to PostgreSQL.
