@@ -14,6 +14,30 @@ The core deployment target is Cloudflare Pages plus relational storage.
 Store secret values outside Git and inject them through the provider's secret
 mechanism.
 
+## Runtime Branding
+
+The dashboard can load deployment-specific branding from `/branding.json`. This
+file is intentionally ignored in the core repository so hosted deployments can
+provide their own operator-facing name, logo, and CSS custom-property theme
+without making the open-source defaults deployment-specific.
+
+Minimal example:
+
+```json
+{
+  "appName": "Project Agent Comms",
+  "shortMark": "PC",
+  "eyebrow": "Project deployment",
+  "title": "Project agent coordination workspace",
+  "subtitle": "operator dashboard",
+  "logoUrl": "/branding-assets/logo.png",
+  "theme": {
+    "--color-bg": "#f6f4ef",
+    "--color-accent": "#2f6f55"
+  }
+}
+```
+
 ## Preview With D1
 
 D1 is useful for demos and tiny previews:
