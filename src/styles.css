@@ -156,8 +156,8 @@ svg {
 
 .topbar h1 {
   margin: 4px 0 0;
-  max-width: 760px;
-  font-size: clamp(2rem, 4vw, 4rem);
+  max-width: 900px;
+  font-size: clamp(2rem, 3.2vw, 4rem);
   line-height: 1;
   letter-spacing: 0;
 }
@@ -234,10 +234,22 @@ svg {
 }
 
 .stat {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 16px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, transform 140ms ease;
+}
+
+.stat:hover,
+.stat:focus-visible {
+  border-color: var(--color-accent);
+  outline: 0;
+  transform: translateY(-1px);
 }
 
 .stat svg {
@@ -248,6 +260,34 @@ svg {
   display: block;
   font-size: 1.8rem;
   font-weight: 800;
+}
+
+.stat .attention-dot,
+.unread-dot {
+  position: absolute;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #cc4729;
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.stat .attention-dot {
+  top: 10px;
+  right: 10px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+}
+
+.unread-dot {
+  top: 14px;
+  right: 14px;
+  width: 11px;
+  height: 11px;
 }
 
 .stat p,
@@ -362,6 +402,11 @@ meter {
   display: flex;
   gap: 10px;
   align-items: center;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .attention-row svg {
@@ -412,17 +457,21 @@ meter {
   align-items: center;
   gap: 8px;
   width: fit-content;
-  min-height: 32px;
-  padding: 0;
-  background: transparent;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 8px;
+  background: var(--color-surface);
   color: var(--color-accent);
   cursor: pointer;
+  font-size: 1rem;
   font-weight: 800;
 }
 
 .forum-meta,
 .mini-list,
-.suggestion footer {
+.suggestion footer,
+.detail-grid dd {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -453,9 +502,62 @@ meter {
   font-size: 0.9rem;
 }
 
-.conversation {
+.conversation,
+.suggestion {
+  position: relative;
   display: grid;
-  gap: 14px;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.conversation.has-unread {
+  border-color: color-mix(in srgb, #cc4729 45%, var(--color-line));
+}
+
+.conversation:not(.has-unread) .unread-dot,
+.suggestion:not(:has(.unread-dot)) .unread-dot {
+  display: none;
+}
+
+.conversation-summary,
+.suggestion-summary,
+.thread-toggle {
+  display: grid;
+  width: 100%;
+  gap: 8px;
+  padding: 18px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversation-summary {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  padding-right: 42px;
+}
+
+.conversation-summary span,
+.suggestion-summary span {
+  color: var(--color-muted);
+  font-size: 0.9rem;
+}
+
+.conversation-list {
+  display: grid;
+  gap: 12px;
+}
+
+.expanded-panel {
+  display: grid;
+  gap: 12px;
+  padding: 0 18px 18px;
+}
+
+.thread-toggle {
+  padding: 0;
 }
 
 .message-row {
@@ -466,9 +568,10 @@ meter {
   background: var(--color-surface-hover);
 }
 
-.suggestion {
-  display: grid;
-  gap: 12px;
+.suggestion-summary {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  padding-right: 42px;
 }
 
 .suggestion footer span {
@@ -478,13 +581,69 @@ meter {
 }
 
 .suggestion footer button,
-.agent-row button {
+.agent-row button,
+.reply-form button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   min-height: 32px;
   border-radius: 8px;
   padding: 6px 10px;
   background: var(--color-sidebar);
   color: var(--color-inverse);
   cursor: pointer;
+}
+
+.reply-form {
+  display: grid;
+  gap: 10px;
+}
+
+.reply-form textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.reply-form button {
+  justify-self: end;
+}
+
+.reply-form button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.detail-grid div {
+  display: grid;
+  gap: 4px;
+}
+
+.detail-grid dt {
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.detail-grid dd {
+  margin: 0;
+  align-items: center;
+  color: var(--color-text-secondary);
 }
 
 .agent-table {
@@ -494,11 +653,15 @@ meter {
 
 .agent-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 120px;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(140px, 180px);
   gap: 16px;
   align-items: center;
   padding: 14px 16px;
   border-bottom: 1px solid var(--color-line);
+}
+
+.agent-row.needs-action {
+  background: color-mix(in srgb, var(--color-warning) 18%, transparent);
 }
 
 .agent-row:last-child {
@@ -547,10 +710,15 @@ meter {
 
   .topbar,
   .thread-card header,
-  .conversation header,
+  .conversation-summary,
+  .suggestion-summary,
   .agent-row {
     align-items: stretch;
     flex-direction: column;
+    grid-template-columns: 1fr;
+  }
+
+  .detail-grid {
     grid-template-columns: 1fr;
   }
 
