@@ -576,6 +576,22 @@ meter {
   gap: 12px;
 }
 
+.receipt-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.receipt-list span {
+  padding: 7px 10px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
 .expanded-panel {
   display: grid;
   gap: 12px;
@@ -699,6 +715,49 @@ meter {
   margin: 0;
   align-items: center;
   color: var(--color-text-secondary);
+}
+
+.gate-list {
+  display: grid;
+  gap: 12px;
+}
+
+.gate-card {
+  display: grid;
+  gap: 14px;
+}
+
+.gate-card header,
+.gate-card footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.gate-card h3,
+.gate-card p {
+  margin: 0;
+}
+
+.gate-card p {
+  color: var(--color-text-secondary);
+}
+
+.gate-card footer button {
+  min-height: 34px;
+  border-radius: 8px;
+  padding: 7px 12px;
+  background: var(--color-sidebar);
+  color: var(--color-inverse);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.empty-state {
+  color: var(--color-muted);
+  font-weight: 700;
 }
 
 .agent-table {

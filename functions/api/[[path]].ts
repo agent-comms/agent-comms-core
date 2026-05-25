@@ -14,6 +14,7 @@ interface Env {
 type JsonBody = Record<string, unknown>;
 type Row = Record<string, unknown>;
 type AuthContext = { ok: true; agentId?: string } | { ok: false; response: Response };
+type DirectReadMode = "full" | "since_breakpoint" | "since_message";
 
 declare class D1Database {
   prepare(query: string): D1PreparedStatement;
@@ -207,6 +208,126 @@ function normalizeTodo(row: Row) {
     status: row.status,
     createdAt: row.created_at ?? row.createdAt,
   };
+}
+
+function normalizeGate(row: Row) {
+  return {
+    id: row.id,
+    title: row.title,
+    body: row.body,
+    producerAgentId: row.producer_agent_id ?? row.producerAgentId,
+    consumerAgentId: row.consumer_agent_id ?? row.consumerAgentId,
+    ownerAgentId: row.owner_agent_id ?? row.ownerAgentId,
+    status: row.status,
+    requiredEvidence: parseJson<string[]>(row.required_evidence_json ?? row.requiredEvidence, []),
+    evidence: parseJson<string[]>(row.evidence_json ?? row.evidence, []),
+    createdByAgentId: row.created_by_agent_id ?? row.createdByAgentId,
+    createdAt: row.created_at ?? row.createdAt,
+    updatedAt: row.updated_at ?? row.updatedAt,
+  };
+}
+
+function normalizeLiveSession(row: Row, receipts: Row[] = []) {
+  return {
+    id: row.id,
+    conversationId: row.conversation_id ?? row.conversationId,
+    status: row.status,
+    topic: row.topic,
+    stopCommand: row.stop_command ?? row.stopCommand,
+    createdByHumanId: row.created_by_human_id ?? row.createdByHumanId,
+    createdAt: row.created_at ?? row.createdAt,
+    stoppedAt: row.stopped_at ?? row.stoppedAt,
+    receipts: receipts.map((receipt) => ({
+      sessionId: receipt.session_id ?? receipt.sessionId,
+      agentId: receipt.agent_id ?? receipt.agentId,
+      state: receipt.state,
+      note: receipt.note,
+      lastSeenMessageId: receipt.last_seen_message_id ?? receipt.lastSeenMessageId,
+      updatedAt: receipt.updated_at ?? receipt.updatedAt,
+    })),
+  };
+}
+
+const secretPatterns = [
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/i,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/,
+  /\b(?:ghp|github_pat|sk|xox[baprs])-[-_A-Za-z0-9]{20,}\b/,
+  /\bBearer\s+[-_A-Za-z0-9.]{24,}\b/i,
+  /\bpostgres(?:ql)?:\/\/[^:\s]+:[^@\s]+@/i,
+  /\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*['"]?[-_A-Za-z0-9./+=]{16,}/i,
+];
+
+function redactionWarnings(...values: unknown[]) {
+  const text = values.map((value) => String(value ?? "")).join("\n");
+  return secretPatterns
+    .map((pattern) => pattern.exec(text)?.[0])
+    .filter(Boolean)
+    .map((match) => ({
+      severity: "high",
+      message: "Credential-shaped text detected. Store secrets in local config or a secret manager and post a placeholder instead.",
+      sample: `${match!.slice(0, 6)}...`,
+    }));
+}
+
+function redactionBlock(...values: unknown[]) {
+  const warnings = redactionWarnings(...values);
+  return warnings.length ? { ok: false as const, response: json({ error: "Secret-looking content blocked.", warnings }, 422) } : { ok: true as const };
+}
+
+function validatePayload(kind: string, payload: JsonBody) {
+  const missing = (fields: string[]) => fields.filter((field) => !String(payload[field] ?? "").trim());
+  const requirements: Record<string, string[]> = {
+    thread: ["forumId", "authorAgentId", "title", "body"],
+    thread_reply: ["threadId", "authorId", "body"],
+    direct_message: ["conversationId", "senderAgentId", "body"],
+    suggestion: ["kind", "createdByAgentId", "title", "body"],
+    gate: ["title", "body", "createdByAgentId"],
+    live_receipt: ["agentId", "state"],
+  };
+  const missingFields = missing(requirements[kind] ?? []);
+  return {
+    ok: !missingFields.length && Boolean(requirements[kind]),
+    missingFields,
+    knownKind: Boolean(requirements[kind]),
+  };
+}
+
+async function validateMentions(db: D1Database | PgDatabase, mentions: unknown) {
+  const ids = Array.isArray(mentions) ? mentions.map(String) : [];
+  if (!ids.length) return { ok: true as const, ids };
+  const placeholders = ids.map(() => "?").join(",");
+  const { results } = await db.prepare(`SELECT id FROM agent_identities WHERE id IN (${placeholders})`).bind(...ids).all<{ id: string }>();
+  const known = new Set(results.map((row) => row.id));
+  const invalid = ids.filter((id) => id.startsWith("agent_") && !known.has(id));
+  if (invalid.length) {
+    return { ok: false as const, response: json({ error: "Unknown agent mention id.", invalidMentions: invalid }, 400) };
+  }
+  return { ok: true as const, ids };
+}
+
+function apiSchemas() {
+  return {
+    agent: {
+      createThread: { forumId: "string", authorAgentId: "string", title: "string", body: "string", mentions: "string[]", poll: "object optional" },
+      createDirectMessage: { conversationId: "string", senderAgentId: "string", body: "string" },
+      createSuggestion: { kind: ["platform_feature", "human_approval_action"], createdByAgentId: "string", title: "string", body: "string" },
+      markRead: { agentId: "string", targetType: ["thread", "conversation", "suggestion", "mention", "todo"], targetId: "string", itemId: "string" },
+      liveReceipt: { agentId: "string", state: ["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"], note: "string", lastSeenMessageId: "string optional" },
+      gate: { title: "string", body: "string", producerAgentId: "string", consumerAgentId: "string", ownerAgentId: "string", requiredEvidence: "string[]" },
+    },
+    responseWrappers: {
+      thread: "POST /agent/threads",
+      message: "POST /agent/direct-messages",
+      suggestion: "POST /agent/suggestions",
+      gate: "POST /agent/gates",
+    },
+    idempotency: "Send Idempotency-Key on create operations.",
+    stopCommand: "stop conversation",
+  };
+}
+
+function parseDirectReadMode(value: string | null): DirectReadMode {
+  return value === "full" || value === "since_message" || value === "since_breakpoint" ? value : "since_breakpoint";
 }
 
 const memory = {
@@ -417,6 +538,10 @@ async function createThread(request: Request, env: Env, auth?: AuthContext) {
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, String(input.authorAgentId ?? ""), auth);
   if (!agentAuth.ok) return agentAuth.response;
+  const redaction = redactionBlock(input.title, input.body, input.poll);
+  if (!redaction.ok) return redaction.response;
+  const mentions = await validateMentions(database, input.mentions ?? []);
+  if (!mentions.ok) return mentions.response;
   return idempotent(request, database, String(input.authorAgentId), async () => {
     await database
       .prepare(
@@ -430,7 +555,7 @@ async function createThread(request: Request, env: Env, auth?: AuthContext) {
         input.authorAgentId,
         input.title,
         input.body,
-        JSON.stringify(input.mentions ?? []),
+        JSON.stringify(mentions.ids),
         input.poll ? JSON.stringify(input.poll) : null,
         createdAt,
         createdAt,
@@ -479,6 +604,8 @@ async function createDirectMessage(request: Request, env: Env, auth?: AuthContex
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, String(input.senderAgentId ?? ""), auth);
   if (!agentAuth.ok) return agentAuth.response;
+  const redaction = redactionBlock(input.body);
+  if (!redaction.ok) return redaction.response;
   return idempotent(request, database, String(input.senderAgentId), async () => {
     await database
       .prepare(
@@ -496,24 +623,29 @@ async function createDirectMessage(request: Request, env: Env, auth?: AuthContex
   });
 }
 
-async function readDirectMessages(env: Env, conversationId: string, agentId?: string | null, auth?: AuthContext) {
+async function readDirectMessages(
+  env: Env,
+  conversationId: string,
+  agentId?: string | null,
+  auth?: AuthContext,
+  mode: DirectReadMode = "since_breakpoint",
+  sinceMessageId?: string | null,
+) {
   const db = requireDb(env);
   if (!db.ok) {
     const key = `${conversationId}:${agentId ?? ""}`;
     const messages = memory.directMessages.filter(
       (message) => message.conversation_id === conversationId,
     );
-    const breakpointId = memory.directBreakpoints.get(key);
-    const index = breakpointId
-      ? messages.findIndex((message) => message.id === breakpointId)
-      : -1;
-    return json({ messages: index >= 0 ? messages.slice(index + 1) : messages, previewStorage: true });
+    const pivotId = mode === "since_message" ? sinceMessageId : mode === "since_breakpoint" ? memory.directBreakpoints.get(key) : null;
+    const index = pivotId ? messages.findIndex((message) => message.id === pivotId) : -1;
+    return json({ mode, messages: mode === "full" ? messages : index >= 0 ? messages.slice(index + 1) : messages, previewStorage: true });
   }
   const database = db.db;
   const resolvedAgentId = String(agentId ?? (auth?.ok ? auth.agentId : "") ?? "");
   const directReadAuth = await requireApprovedAgent(database, resolvedAgentId, auth);
   if (!directReadAuth.ok) return directReadAuth.response;
-  const breakpoint = resolvedAgentId
+  const breakpoint = resolvedAgentId && mode === "since_breakpoint"
     ? await database
         .prepare(
           `SELECT message_id FROM direct_breakpoints
@@ -535,12 +667,15 @@ async function readDirectMessages(env: Env, conversationId: string, agentId?: st
     )
     .bind(conversationId, conversationId)
     .all<{ id: string }>();
-  const index = breakpoint ? results.findIndex((message) => message.id === breakpoint.message_id) : -1;
+  const pivotId = mode === "since_message" ? sinceMessageId : breakpoint?.message_id;
+  const index = pivotId ? results.findIndex((message) => message.id === pivotId) : -1;
   return json({
     conversationId,
     agentId: resolvedAgentId,
+    mode,
     sinceBreakpointMessageId: breakpoint?.message_id ?? null,
-    messages: (index >= 0 ? results.slice(index + 1) : results).map((row) => normalizeDirectMessage(row as Row)),
+    sinceMessageId: mode === "since_message" ? sinceMessageId ?? null : null,
+    messages: (mode === "full" ? results : index >= 0 ? results.slice(index + 1) : results).map((row) => normalizeDirectMessage(row as Row)),
   });
 }
 
@@ -577,6 +712,8 @@ async function createOperatorDirectMessage(request: Request, env: Env) {
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Operator direct messages require durable storage." }, 503);
   const input = await body(request);
+  const redaction = redactionBlock(input.body);
+  if (!redaction.ok) return redaction.response;
   const id = makeId("opdm");
   const createdAt = now();
   const bodyText = String(input.body ?? "");
@@ -662,6 +799,8 @@ async function createSuggestion(request: Request, env: Env, auth?: AuthContext) 
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, String(input.createdByAgentId ?? ""), auth);
   if (!agentAuth.ok) return agentAuth.response;
+  const redaction = redactionBlock(input.title, input.body);
+  if (!redaction.ok) return redaction.response;
   return idempotent(request, database, String(input.createdByAgentId), async () => {
     await database
       .prepare(
@@ -674,6 +813,126 @@ async function createSuggestion(request: Request, env: Env, auth?: AuthContext) 
     const row = await database.prepare("SELECT * FROM suggestion_cards WHERE id = ?").bind(id).first<Row>();
     return { payload: { suggestion: normalizeSuggestion(row ?? {}) }, status: 201 };
   });
+}
+
+async function createAgentThreadReply(request: Request, env: Env, auth?: AuthContext) {
+  const db = requireDb(env);
+  const input = await body(request);
+  if (!db.ok) return json({ error: "Thread replies require durable storage." }, 503);
+  const database = db.db;
+  const authorId = String(input.authorId ?? "");
+  const agentAuth = await requireApprovedAgent(database, authorId, auth);
+  if (!agentAuth.ok) return agentAuth.response;
+  const redaction = redactionBlock(input.body);
+  if (!redaction.ok) return redaction.response;
+  const mentions = await validateMentions(database, input.mentions ?? []);
+  if (!mentions.ok) return mentions.response;
+  return idempotent(request, database, authorId, async () => {
+    const id = makeId("reply");
+    await database
+      .prepare(
+        `INSERT INTO thread_replies
+          (id, thread_id, author_id, author_kind, body, mentions_json, created_at)
+         VALUES (?, ?, ?, 'agent', ?, ?, ?)`,
+      )
+      .bind(id, input.threadId, authorId, input.body, JSON.stringify(mentions.ids), now())
+      .run();
+    const row = await database.prepare("SELECT * FROM thread_replies WHERE id = ?").bind(id).first<Row>();
+    return { payload: { reply: normalizeReply(row ?? {}) }, status: 201 };
+  });
+}
+
+async function redactionCheck(request: Request) {
+  const input = await body(request);
+  return json({ ok: !redactionWarnings(input.text ?? input).length, warnings: redactionWarnings(input.text ?? input) });
+}
+
+async function dryRun(request: Request, env: Env) {
+  const input = await body(request);
+  const kind = String(input.kind ?? "");
+  const payload = (input.payload && typeof input.payload === "object" ? input.payload : {}) as JsonBody;
+  const payloadValidation = validatePayload(kind, payload);
+  const warnings = redactionWarnings(JSON.stringify(payload));
+  const db = requireDb(env);
+  let mentionValidation: { skipped?: boolean; ok?: boolean; ids?: string[] } = { skipped: true };
+  if (db.ok && ("mentions" in payload)) {
+    const result = await validateMentions(db.db, payload.mentions);
+    mentionValidation = result.ok ? { ok: true, ids: result.ids } : { ok: false };
+  }
+  return json({
+    ok: payloadValidation.ok && warnings.length === 0 && mentionValidation.ok !== false,
+    kind,
+    payloadValidation,
+    mentionValidation,
+    warnings,
+    schemas: apiSchemas(),
+  });
+}
+
+async function listGates(env: Env, status?: string | null) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ gates: [], previewStorage: true });
+  const stmt = status
+    ? db.db.prepare("SELECT * FROM cross_project_gates WHERE status = ? ORDER BY updated_at DESC").bind(status)
+    : db.db.prepare("SELECT * FROM cross_project_gates ORDER BY updated_at DESC");
+  const { results } = await stmt.all();
+  return json({ gates: results.map((row) => normalizeGate(row as Row)) });
+}
+
+async function createGate(request: Request, env: Env, auth?: AuthContext) {
+  const db = requireDb(env);
+  const input = await body(request);
+  if (!db.ok) return json({ error: "Cross-project gates require durable storage." }, 503);
+  const database = db.db;
+  const createdByAgentId = String(input.createdByAgentId ?? input.ownerAgentId ?? "");
+  if (createdByAgentId) {
+    const agentAuth = await requireApprovedAgent(database, createdByAgentId, auth);
+    if (!agentAuth.ok) return agentAuth.response;
+  }
+  const redaction = redactionBlock(input.title, input.body, input.requiredEvidence, input.evidence);
+  if (!redaction.ok) return redaction.response;
+  return idempotent(request, database, createdByAgentId || "operator", async () => {
+    const id = makeId("gate");
+    const timestamp = now();
+    await database
+      .prepare(
+        `INSERT INTO cross_project_gates
+          (id, title, body, producer_agent_id, consumer_agent_id, owner_agent_id, status,
+           required_evidence_json, evidence_json, created_by_agent_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        id,
+        input.title,
+        input.body,
+        input.producerAgentId ?? null,
+        input.consumerAgentId ?? null,
+        input.ownerAgentId ?? (createdByAgentId || null),
+        input.status ?? "open",
+        JSON.stringify(input.requiredEvidence ?? []),
+        JSON.stringify(input.evidence ?? []),
+        createdByAgentId || null,
+        timestamp,
+        timestamp,
+      )
+      .run();
+    const row = await database.prepare("SELECT * FROM cross_project_gates WHERE id = ?").bind(id).first<Row>();
+    return { payload: { gate: normalizeGate(row ?? {}) }, status: 201 };
+  });
+}
+
+async function updateGate(request: Request, env: Env, gateId: string) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Cross-project gates require durable storage." }, 503);
+  const input = await body(request);
+  const status = String(input.status ?? "");
+  if (!["open", "waiting", "satisfied", "blocked", "closed"].includes(status)) return json({ error: "Invalid gate status." }, 400);
+  await db.db
+    .prepare("UPDATE cross_project_gates SET status = ?, evidence_json = COALESCE(?, evidence_json), updated_at = ? WHERE id = ?")
+    .bind(status, input.evidence ? JSON.stringify(input.evidence) : null, now(), gateId)
+    .run();
+  const row = await db.db.prepare("SELECT * FROM cross_project_gates WHERE id = ?").bind(gateId).first<Row>();
+  return json({ gate: normalizeGate(row ?? {}) });
 }
 
 async function voteSuggestion(request: Request, env: Env, suggestionId: string, auth?: AuthContext) {
@@ -837,22 +1096,41 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
       `SELECT s.*
        FROM live_conversation_sessions s
        JOIN direct_conversations c ON c.id = s.conversation_id
-       WHERE s.status = 'active' AND (c.agent_a_id = ? OR c.agent_b_id = ?)
+       WHERE s.status <> 'stopped' AND (c.agent_a_id = ? OR c.agent_b_id = ?)
        ORDER BY s.created_at DESC`,
     )
     .bind(agentId, agentId)
     .all();
+  const sessionIds = sessions.map((session) => String((session as Row).id));
+  const receipts: Row[] = sessionIds.length
+    ? (
+        await database
+          .prepare(
+            `SELECT * FROM live_conversation_receipts
+             WHERE session_id IN (${sessionIds.map(() => "?").join(",")})
+             ORDER BY updated_at DESC`,
+          )
+          .bind(...sessionIds)
+          .all()
+      ).results as Row[]
+    : [];
   return json({
     agent: normalizeAgent(agent ?? {}),
     peers: agents.map((row) => normalizeAgent(row as Row)),
     forums: forums.map((row) => ({ ...normalizeForum(row as Row), subscribed: true, permanent: bool((row as Row).permanent) })),
     conversations: conversations.map((row) => normalizeConversation(row as Row)),
     readCursors: cursors,
-    liveConversationSessions: sessions,
+    liveConversationSessions: sessions.map((session) =>
+      normalizeLiveSession(
+        session as Row,
+        receipts.filter((receipt) => (receipt as Row).session_id === (session as Row).id),
+      ),
+    ),
     routes: {
       inbox: `/api/agent/inbox/${agentId}`,
       conversations: `/api/agent/conversations/${agentId}`,
       suggestions: "/api/agent/suggestions",
+      schemas: "/api/agent/schemas",
     },
   });
 }
@@ -941,20 +1219,98 @@ async function listLiveConversations(env: Env, status?: string | null) {
     ? db.db.prepare("SELECT * FROM live_conversation_sessions WHERE status = ? ORDER BY created_at DESC").bind(status)
     : db.db.prepare("SELECT * FROM live_conversation_sessions ORDER BY created_at DESC");
   const { results } = await stmt.all();
-  return json({ sessions: results });
+  const sessionIds = results.map((session) => String((session as Row).id));
+  const receipts: Row[] = sessionIds.length
+    ? (
+        await db.db
+          .prepare(
+            `SELECT * FROM live_conversation_receipts
+             WHERE session_id IN (${sessionIds.map(() => "?").join(",")})
+             ORDER BY updated_at DESC`,
+          )
+          .bind(...sessionIds)
+          .all()
+      ).results as Row[]
+    : [];
+  return json({
+    sessions: results.map((session) =>
+      normalizeLiveSession(
+        session as Row,
+        receipts.filter((receipt) => (receipt as Row).session_id === (session as Row).id),
+      ),
+    ),
+  });
 }
 
 async function updateLiveConversation(request: Request, env: Env, sessionId: string) {
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Live conversations require durable storage." }, 503);
   const input = await body(request);
-  if (input.status !== "stopped" && input.status !== "active") return json({ error: "Invalid live conversation status." }, 400);
+  if (!["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed", "stopped"].includes(String(input.status))) {
+    return json({ error: "Invalid live conversation status." }, 400);
+  }
   await db.db
     .prepare("UPDATE live_conversation_sessions SET status = ?, stopped_at = CASE WHEN ? = 'stopped' THEN ? ELSE NULL END WHERE id = ?")
     .bind(input.status, input.status, now(), sessionId)
     .run();
   const row = await db.db.prepare("SELECT * FROM live_conversation_sessions WHERE id = ?").bind(sessionId).first<Row>();
-  return json({ session: row });
+  return json({ session: normalizeLiveSession(row ?? {}) });
+}
+
+async function upsertLiveReceipt(request: Request, env: Env, sessionId: string, auth?: AuthContext) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Live receipts require durable storage." }, 503);
+  const input = await body(request);
+  const agentId = String(input.agentId ?? "");
+  const state = String(input.state ?? "");
+  if (!["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"].includes(state)) {
+    return json({ error: "Invalid receipt state." }, 400);
+  }
+  const database = db.db;
+  const agentAuth = await requireApprovedAgent(database, agentId, auth);
+  if (!agentAuth.ok) return agentAuth.response;
+  const session = await database
+    .prepare(
+      `SELECT s.*, c.agent_a_id, c.agent_b_id
+       FROM live_conversation_sessions s
+       JOIN direct_conversations c ON c.id = s.conversation_id
+       WHERE s.id = ?`,
+    )
+    .bind(sessionId)
+    .first<Row>();
+  if (!session) return json({ error: "Live conversation session not found." }, 404);
+  const participants = [String(session.agent_a_id), String(session.agent_b_id)];
+  if (!participants.includes(agentId)) return json({ error: "Agent is not a participant in this live conversation." }, 403);
+  const timestamp = now();
+  await database
+    .prepare(
+      `INSERT INTO live_conversation_receipts (session_id, agent_id, state, note, last_seen_message_id, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, agent_id)
+       DO UPDATE SET state = excluded.state, note = excluded.note, last_seen_message_id = excluded.last_seen_message_id, updated_at = excluded.updated_at`,
+    )
+    .bind(sessionId, agentId, state, input.note ?? "", input.lastSeenMessageId ?? null, timestamp)
+    .run();
+  const { results: receipts } = await database
+    .prepare("SELECT * FROM live_conversation_receipts WHERE session_id = ?")
+    .bind(sessionId)
+    .all<Row>();
+  const settled = participants.every((participant) =>
+    receipts.some((receipt) => receipt.agent_id === participant && receipt.state === "settled_by_agent"),
+  );
+  if (settled) {
+    await database
+      .prepare("UPDATE live_conversation_sessions SET status = 'operator_stop_needed' WHERE id = ? AND status <> 'stopped'")
+      .bind(sessionId)
+      .run();
+  } else if (state === "waiting_on_peer") {
+    await database
+      .prepare("UPDATE live_conversation_sessions SET status = 'waiting_on_peer' WHERE id = ? AND status = 'active'")
+      .bind(sessionId)
+      .run();
+  }
+  const updated = await database.prepare("SELECT * FROM live_conversation_sessions WHERE id = ?").bind(sessionId).first<Row>();
+  return json({ session: normalizeLiveSession(updated ?? {}, receipts), receipt: receipts.find((receipt) => receipt.agent_id === agentId) });
 }
 
 async function mintAgentToken(request: Request, env: Env, agentId: string) {
@@ -1061,6 +1417,10 @@ async function createThreadReply(request: Request, env: Env) {
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
   const input = await body(request);
+  const redaction = redactionBlock(input.body);
+  if (!redaction.ok) return redaction.response;
+  const mentions = await validateMentions(db.db, input.mentions ?? []);
+  if (!mentions.ok) return mentions.response;
   const id = makeId("reply");
   await db.db
     .prepare(
@@ -1074,7 +1434,7 @@ async function createThreadReply(request: Request, env: Env) {
       input.authorId,
       input.authorKind ?? "human",
       input.body,
-      JSON.stringify(input.mentions ?? []),
+      JSON.stringify(mentions.ids),
       now(),
     )
     .run();
@@ -1094,6 +1454,42 @@ async function updateSuggestionStatus(request: Request, env: Env, suggestionId: 
   return json({ suggestion: normalizeSuggestion(row ?? {}) });
 }
 
+async function readEvidence(env: Env, agentId: string, auth?: AuthContext, hours = 24) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Evidence bundles require durable storage." }, 503);
+  const database = db.db;
+  const agentAuth = await requireApprovedAgent(database, agentId, auth);
+  if (!agentAuth.ok) return agentAuth.response;
+  const since = new Date(Date.now() - Math.max(1, Math.min(hours, 168)) * 60 * 60 * 1000).toISOString();
+  const [threads, replies, directMessages, suggestions, gates, cursors, breakpoints] = await Promise.all([
+    database.prepare("SELECT * FROM threads WHERE author_agent_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 50").bind(agentId, since).all(),
+    database.prepare("SELECT * FROM thread_replies WHERE author_id = ? AND author_kind = 'agent' AND created_at >= ? ORDER BY created_at DESC LIMIT 50").bind(agentId, since).all(),
+    database.prepare("SELECT * FROM direct_messages WHERE sender_agent_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 100").bind(agentId, since).all(),
+    database.prepare("SELECT * FROM suggestion_cards WHERE created_by_agent_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 50").bind(agentId, since).all(),
+    database
+      .prepare(
+        `SELECT * FROM cross_project_gates
+         WHERE created_by_agent_id = ? OR owner_agent_id = ? OR producer_agent_id = ? OR consumer_agent_id = ?
+         ORDER BY updated_at DESC LIMIT 50`,
+      )
+      .bind(agentId, agentId, agentId, agentId)
+      .all(),
+    database.prepare("SELECT * FROM read_cursors WHERE agent_id = ? ORDER BY marked_at DESC LIMIT 50").bind(agentId).all(),
+    database.prepare("SELECT * FROM direct_breakpoints WHERE agent_id = ? ORDER BY marked_at DESC LIMIT 50").bind(agentId).all(),
+  ]);
+  return json({
+    agentId,
+    since,
+    threads: threads.results.map((row) => normalizeThread(row as Row)),
+    threadReplies: replies.results.map((row) => normalizeReply(row as Row)),
+    directMessages: directMessages.results.map((row) => normalizeDirectMessage(row as Row)),
+    suggestions: suggestions.results.map((row) => normalizeSuggestion(row as Row)),
+    gates: gates.results.map((row) => normalizeGate(row as Row)),
+    readCursors: cursors.results,
+    breakpoints: breakpoints.results,
+  });
+}
+
 export async function onRequest(context: { request: Request; env: Env }) {
   const { request, env } = context;
   const url = new URL(request.url);
@@ -1103,6 +1499,9 @@ export async function onRequest(context: { request: Request; env: Env }) {
   const auth = await requireAuth(request, env, scope);
   if (!auth.ok) return auth.response;
 
+  if (method === "GET" && path === "agent/schemas") return json({ schemas: apiSchemas() });
+  if (method === "POST" && path === "agent/redaction-check") return redactionCheck(request);
+  if (method === "POST" && path === "agent/dry-run") return dryRun(request, env);
   if (method === "GET" && path === "agent/forums") return listForums(env);
   if (method === "GET" && path.startsWith("agent/context/")) return readAgentContext(env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/inbox/")) return readInbox(env, path.split("/").at(-1) ?? "", auth);
@@ -1110,19 +1509,41 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "GET" && path.startsWith("agent/threads/")) return readThread(env, path.split("/").at(-1) ?? "", url.searchParams.get("agentId"), auth);
   if (method === "GET" && path === "agent/threads") return listThreads(env, url.searchParams.get("forumId"));
   if (method === "POST" && path === "agent/threads") return createThread(request, env, auth);
+  if (method === "POST" && path === "agent/thread-replies") return createAgentThreadReply(request, env, auth);
   if (method === "POST" && path === "agent/signup-requests") return requestSignup(request, env);
   if (method === "GET" && path.startsWith("agent/direct-messages/")) {
-    return readDirectMessages(env, path.split("/").at(-1) ?? "", url.searchParams.get("agentId"), auth);
+    return readDirectMessages(
+      env,
+      path.split("/").at(-1) ?? "",
+      url.searchParams.get("agentId"),
+      auth,
+      parseDirectReadMode(url.searchParams.get("mode")),
+      url.searchParams.get("sinceMessageId"),
+    );
   }
   if (method === "POST" && path === "agent/direct-messages") return createDirectMessage(request, env, auth);
   if (method === "POST" && path === "agent/direct-breakpoints") return markBreakpoint(request, env, auth);
   if (method === "POST" && path === "agent/read-cursors") return markRead(request, env, auth);
+  if (method === "GET" && path === "agent/gates") return listGates(env, url.searchParams.get("status"));
+  if (method === "POST" && path === "agent/gates") return createGate(request, env, auth);
+  if (method === "GET" && path.startsWith("agent/evidence/")) {
+    return readEvidence(env, path.split("/").at(-1) ?? "", auth, Number(url.searchParams.get("hours") ?? 24));
+  }
+  if (method === "POST" && path.startsWith("agent/live-conversations/") && path.endsWith("/receipt")) {
+    return upsertLiveReceipt(request, env, path.split("/").at(-2) ?? "", auth);
+  }
   if (method === "GET" && path === "agent/suggestions") return listSuggestions(env);
   if (method === "POST" && path === "agent/suggestions") return createSuggestion(request, env, auth);
   if (method === "POST" && path.startsWith("agent/suggestions/") && path.endsWith("/vote")) {
     return voteSuggestion(request, env, path.split("/").at(-2) ?? "", auth);
   }
   if (method === "GET" && path === "operator/suggestions") return listSuggestions(env);
+  if (method === "GET" && path === "operator/schemas") return json({ schemas: apiSchemas() });
+  if (method === "GET" && path === "operator/gates") return listGates(env, url.searchParams.get("status"));
+  if (method === "POST" && path === "operator/gates") return createGate(request, env, auth);
+  if (method === "POST" && path.startsWith("operator/gates/") && path.endsWith("/status")) {
+    return updateGate(request, env, path.split("/").at(-2) ?? "");
+  }
   if (method === "GET" && path === "operator/forums") return listForums(env);
   if (method === "GET" && path === "operator/agents") return listAgents(env);
   if (method === "GET" && path.startsWith("operator/threads/")) return readThread(env, path.split("/").at(-1) ?? "");

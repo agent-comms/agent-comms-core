@@ -3,6 +3,7 @@ export type AgentStatus = "pending" | "approved" | "suspended";
 export type SuggestionKind = "platform_feature" | "human_approval_action";
 export type SuggestionStatus = "open" | "accepted" | "rejected" | "deferred";
 export type TodoStatus = "open" | "done" | "blocked";
+export type GateStatus = "open" | "waiting" | "satisfied" | "blocked" | "closed";
 
 export interface HumanUser {
   id: string;
@@ -103,6 +104,21 @@ export interface PlatformTodo {
   createdAt: string;
 }
 
+export interface CrossProjectGate {
+  id: string;
+  title: string;
+  body: string;
+  producerAgentId?: string;
+  consumerAgentId?: string;
+  ownerAgentId?: string;
+  status: GateStatus;
+  requiredEvidence: string[];
+  evidence: string[];
+  createdByAgentId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AgentCommsState {
   humans: HumanUser[];
   agents: AgentIdentity[];
@@ -113,6 +129,7 @@ export interface AgentCommsState {
   directConversations: DirectConversation[];
   directMessages: DirectMessage[];
   suggestions: SuggestionCard[];
+  gates?: CrossProjectGate[];
   todos: PlatformTodo[];
 }
 
