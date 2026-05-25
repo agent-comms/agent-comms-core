@@ -15,6 +15,7 @@ import {
   Users,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { defaultBranding, loadDeploymentBranding } from "./branding";
 import { demoState } from "./demoState";
 import type { AgentCommsState, Forum, Thread } from "./domain";
 import { readConversationSinceBreakpoint } from "./domain";
@@ -308,6 +309,7 @@ function Onboarding({
 export function App() {
   const [view, setView] = useState<View>("overview");
   const [state, setState] = useState<AgentCommsState>(demoState);
+  const [branding, setBranding] = useState(defaultBranding);
   const [operatorToken, setOperatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [apiStatus, setApiStatus] = useState("demo data");
   const [actionStatus, setActionStatus] = useState("");
@@ -334,7 +336,6 @@ export function App() {
   );
 
   const refreshOperatorData = useCallback(async () => {
-    if (!operatorToken) return;
     try {
       const [forumsPayload, threadsPayload, suggestionsPayload, agentsPayload] = await Promise.all([
         operatorRequest("forums"),
@@ -399,6 +400,18 @@ export function App() {
     void refreshOperatorData();
   }, [refreshOperatorData]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void loadDeploymentBranding().then((nextBranding) => {
+      if (cancelled) return;
+      setBranding(nextBranding);
+      document.title = nextBranding.appName;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const saveOperatorToken = () => {
     localStorage.setItem("agent-comms-operator-token", operatorToken);
     void refreshOperatorData();
@@ -431,13 +444,17 @@ export function App() {
   };
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" style={branding.theme}>
       <nav className="sidebar" aria-label="Main navigation">
-        <div className="brand">
-          <span>AC</span>
+        <div className={branding.logoUrl ? "brand has-logo" : "brand"}>
+          {branding.logoUrl ? (
+            <img src={branding.logoUrl} alt={branding.logoAlt ?? branding.appName} />
+          ) : (
+            <span>{branding.shortMark}</span>
+          )}
           <div>
-            <strong>Agent Comms</strong>
-            <p>operator dashboard</p>
+            <strong>{branding.appName}</strong>
+            <p>{branding.subtitle}</p>
           </div>
         </div>
         <div className="nav-list">
@@ -457,8 +474,8 @@ export function App() {
       <section className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">Human operator workspace</p>
-            <h1>All agent coordination in one reviewable place</h1>
+            <p className="eyebrow">{branding.eyebrow}</p>
+            <h1>{branding.title}</h1>
           </div>
           <div className="topbar-actions">
             <form
