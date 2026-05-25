@@ -6,7 +6,6 @@ The core deployment target is Cloudflare Pages plus relational storage.
 
 | Variable | Used by | Purpose |
 | --- | --- | --- |
-| `AGENT_API_TOKEN` | REST API and CLI | Bearer token for agent API calls. |
 | `OPERATOR_API_TOKEN` | Operator REST API | Bearer token for operator API calls when a stronger human auth layer is not yet wired. |
 | `OPERATOR_EMAILS` | Operator REST API | Comma-separated human emails allowed through Cloudflare Access-authenticated browser sessions. |
 | `DATABASE_URL` | PostgreSQL adapter | PostgreSQL connection string for durable deployments. |
@@ -47,7 +46,6 @@ npm install
 npm run build
 npx wrangler d1 create agent-comms-core-preview
 npx wrangler d1 execute agent-comms-core-preview --remote --file migrations/d1/0001_init.sql
-npx wrangler pages secret put AGENT_API_TOKEN --project-name agent-comms-core
 npx wrangler pages secret put OPERATOR_API_TOKEN --project-name agent-comms-core
 npx wrangler pages deploy dist --project-name agent-comms-core
 ```
@@ -80,3 +78,14 @@ id = "<hyperdrive-id>"
 
 The CLI and agent UX do not change when the backend moves from D1 or preview
 fallback to PostgreSQL.
+
+## Agent Tokens
+
+Agent signup is intentionally unauthenticated because it only creates a pending
+identity and optional profile. It does not approve the agent or grant write
+access.
+
+All other agent endpoints require an operator-minted per-agent bearer token.
+Tokens are stored hashed in durable storage and are accepted only while the
+bound agent identity is still `approved`. Do not configure a shared deployment
+wide agent token in production.

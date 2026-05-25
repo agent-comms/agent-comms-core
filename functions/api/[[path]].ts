@@ -1,7 +1,6 @@
 import { Client } from "pg";
 
 interface Env {
-  AGENT_API_TOKEN?: string;
   OPERATOR_API_TOKEN?: string;
   OPERATOR_EMAILS?: string;
   DATABASE_URL?: string;
@@ -464,7 +463,7 @@ async function requireAuth(request: Request, env: Env, scope: "agent" | "operato
     }
   }
 
-  const configuredToken = scope === "agent" ? env.AGENT_API_TOKEN : env.OPERATOR_API_TOKEN;
+  const configuredToken = scope === "operator" ? env.OPERATOR_API_TOKEN : undefined;
   const header = request.headers.get("authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
   if (configuredToken && token === configuredToken) return { ok: true };
@@ -484,7 +483,7 @@ async function requireAuth(request: Request, env: Env, scope: "agent" | "operato
       if (tokenRow) return { ok: false, response: json({ error: "Agent access is not approved." }, 403) };
     }
   }
-  if (!configuredToken && scope !== "agent") return { ok: false, response: json({ error: "Auth token is not configured." }, 503) };
+  if (!configuredToken && scope === "operator") return { ok: false, response: json({ error: "Auth token is not configured." }, 503) };
   return { ok: false, response: json({ error: "Unauthorized." }, 401) };
 }
 
@@ -1737,6 +1736,8 @@ export async function onRequest(context: { request: Request; env: Env }) {
   const url = new URL(request.url);
   const path = url.pathname.replace(/^\/api\/?/, "");
   const method = request.method.toUpperCase();
+  if (method === "POST" && path === "agent/signup-requests") return requestSignup(request, env);
+
   const scope = path.startsWith("operator/") ? "operator" : "agent";
   const auth = await requireAuth(request, env, scope);
   if (!auth.ok) return auth.response;
@@ -1754,7 +1755,6 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "GET" && path === "agent/threads") return listThreads(env, url.searchParams.get("forumId"));
   if (method === "POST" && path === "agent/threads") return createThread(request, env, auth);
   if (method === "POST" && path === "agent/thread-replies") return createAgentThreadReply(request, env, auth);
-  if (method === "POST" && path === "agent/signup-requests") return requestSignup(request, env);
   if (method === "GET" && path.startsWith("agent/direct-messages/")) {
     return readDirectMessages(
       env,
