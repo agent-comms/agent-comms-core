@@ -175,6 +175,19 @@ function requireDb(env: Env): { ok: true; db: D1Database | PgDatabase } | { ok: 
   return { ok: true, db: env.DB };
 }
 
+async function requireApprovedAgent(db: D1Database | PgDatabase, agentId: string) {
+  if (!agentId) return { ok: false, response: json({ error: "Agent identity is required." }, 400) };
+  const agent = await db
+    .prepare("SELECT status FROM agent_identities WHERE id = ?")
+    .bind(agentId)
+    .first<{ status: string }>();
+  if (!agent) return { ok: false, response: json({ error: "Agent identity was not found." }, 404) };
+  if (agent.status !== "approved") {
+    return { ok: false, response: json({ error: "Agent access is not approved." }, 403) };
+  }
+  return { ok: true };
+}
+
 async function listForums(env: Env) {
   const db = requireDb(env);
   if (!db.ok) return json({ forums: memory.forums, previewStorage: true });
@@ -232,6 +245,8 @@ async function createThread(request: Request, env: Env) {
     return json({ id, createdAt, previewStorage: true }, 201);
   }
   const database = db.db;
+  const auth = await requireApprovedAgent(database, String(input.authorAgentId ?? ""));
+  if (!auth.ok) return auth.response;
   await database
     .prepare(
       `INSERT INTO threads
@@ -288,6 +303,8 @@ async function createDirectMessage(request: Request, env: Env) {
     return json({ id, createdAt, previewStorage: true }, 201);
   }
   const database = db.db;
+  const auth = await requireApprovedAgent(database, String(input.senderAgentId ?? ""));
+  if (!auth.ok) return auth.response;
   await database
     .prepare(
       `INSERT INTO direct_messages
@@ -313,6 +330,8 @@ async function readDirectMessages(env: Env, conversationId: string, agentId?: st
     return json({ messages: index >= 0 ? messages.slice(index + 1) : messages, previewStorage: true });
   }
   const database = db.db;
+  const directReadAuth = await requireApprovedAgent(database, String(agentId ?? ""));
+  if (!directReadAuth.ok) return directReadAuth.response;
   const breakpoint = agentId
     ? await database
         .prepare(
@@ -391,6 +410,8 @@ async function markBreakpoint(request: Request, env: Env) {
     return json({ ok: true, previewStorage: true });
   }
   const database = db.db;
+  const auth = await requireApprovedAgent(database, String(input.agentId ?? ""));
+  if (!auth.ok) return auth.response;
   await database
     .prepare(
       `INSERT INTO direct_breakpoints (conversation_id, agent_id, message_id, marked_at)
@@ -430,6 +451,8 @@ async function createSuggestion(request: Request, env: Env) {
     return json({ id, status: "open", previewStorage: true }, 201);
   }
   const database = db.db;
+  const auth = await requireApprovedAgent(database, String(input.createdByAgentId ?? ""));
+  if (!auth.ok) return auth.response;
   await database
     .prepare(
       `INSERT INTO suggestion_cards
@@ -466,6 +489,8 @@ async function voteSuggestion(request: Request, env: Env, suggestionId: string) 
   }
 
   const database = db.db;
+  const auth = await requireApprovedAgent(database, agentId);
+  if (!auth.ok) return auth.response;
   const suggestion = await database
     .prepare("SELECT upvotes_json, downvotes_json FROM suggestion_cards WHERE id = ?")
     .bind(suggestionId)
@@ -502,6 +527,8 @@ async function readInbox(env: Env, agentId: string) {
   }
 
   const database = db.db;
+  const auth = await requireApprovedAgent(database, agentId);
+  if (!auth.ok) return auth.response;
   const { results: subscriptions } = await database
     .prepare("SELECT forum_id FROM forum_subscriptions WHERE agent_id = ?")
     .bind(agentId)
@@ -580,6 +607,29 @@ async function approveAgent(request: Request, env: Env) {
       .run();
   }
   return json({ agentId, status: "approved" });
+}
+
+async function updateAgentStatus(request: Request, env: Env, agentId: string) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
+  const input = await body(request);
+  const status = String(input.status);
+  if (!["pending", "approved", "suspended"].includes(status)) {
+    return json({ error: "Invalid agent status." }, 400);
+  }
+  if (status === "approved") {
+    const approvalRequest = new Request(request.url, {
+      method: "POST",
+      headers: request.headers,
+      body: JSON.stringify({ agentId }),
+    });
+    return approveAgent(approvalRequest, env);
+  }
+  await db.db
+    .prepare("UPDATE agent_identities SET status = ?, approved_at = CASE WHEN ? = 'pending' THEN NULL ELSE approved_at END WHERE id = ?")
+    .bind(status, status, agentId)
+    .run();
+  return json({ agentId, status });
 }
 
 async function createForum(request: Request, env: Env) {
@@ -673,6 +723,9 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "GET" && path === "operator/direct-messages") return listOperatorDirectMessages(env);
   if (method === "POST" && path === "operator/direct-messages") return createOperatorDirectMessage(request, env);
   if (method === "POST" && path === "operator/agent-approvals") return approveAgent(request, env);
+  if (method === "POST" && path.startsWith("operator/agents/") && path.endsWith("/status")) {
+    return updateAgentStatus(request, env, path.split("/").at(-2) ?? "");
+  }
   if (method === "POST" && path === "operator/forums") return createForum(request, env);
   if (method === "POST" && path === "operator/thread-replies") return createThreadReply(request, env);
   if (method === "POST" && path.startsWith("operator/suggestions/") && path.endsWith("/status")) {

@@ -20,6 +20,7 @@ import type { AgentCommsState, Forum, SuggestionStatus, Thread } from "./domain"
 import { readConversationSinceBreakpoint } from "./domain";
 
 type View = "overview" | "forums" | "direct" | "suggestions" | "onboarding";
+type AgentStatus = "pending" | "approved" | "suspended";
 
 const views: Array<{ id: View; label: string; icon: typeof Inbox }> = [
   { id: "overview", label: "Overview", icon: Inbox },
@@ -47,6 +48,23 @@ function authorName(state: AgentCommsState, id: string): string {
 
 function forumName(state: AgentCommsState, id: string): string {
   return state.forums.find((forum) => forum.id === id)?.name ?? id;
+}
+
+function readJsonRecord(key: string): Record<string, string | undefined> {
+  try {
+    const value = localStorage.getItem(key);
+    return value ? JSON.parse(value) : {};
+  } catch {
+    return {};
+  }
+}
+
+function latestThreadActivityId(state: AgentCommsState, threadId: string) {
+  const thread = state.threads.find((candidate) => candidate.id === threadId);
+  const replies = state.replies.filter((reply) => reply.threadId === threadId);
+  const latestReply = [...replies].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  if (latestReply && (!thread || latestReply.createdAt >= thread.updatedAt)) return latestReply.id;
+  return thread?.id;
 }
 
 function Stat({
@@ -77,6 +95,7 @@ function Stat({
 function ThreadCard({
   state,
   thread,
+  unread,
   expanded,
   replyDraft,
   onToggle,
@@ -85,6 +104,7 @@ function ThreadCard({
 }: {
   state: AgentCommsState;
   thread: Thread;
+  unread?: boolean;
   expanded?: boolean;
   replyDraft?: string;
   onToggle?: () => void;
@@ -128,7 +148,8 @@ function ThreadCard({
   );
 
   return (
-    <article className="thread-card">
+    <article className={unread ? "thread-card has-unread" : "thread-card"}>
+      {unread ? <span className="unread-dot" aria-hidden="true" /> : null}
       {onToggle ? (
         <button className="thread-toggle" type="button" onClick={onToggle}>
           {cardBody}
@@ -296,6 +317,7 @@ function Forums({
   state,
   selectedForumId,
   expandedThreadIds,
+  readThreadActivityIds,
   threadDrafts,
   onSelectForum,
   onBack,
@@ -306,6 +328,7 @@ function Forums({
   state: AgentCommsState;
   selectedForumId: string | null;
   expandedThreadIds: Set<string>;
+  readThreadActivityIds: Record<string, string | undefined>;
   threadDrafts: Record<string, string>;
   onSelectForum: (forumId: string) => void;
   onBack: () => void;
@@ -355,6 +378,7 @@ function Forums({
               replyDraft={threadDrafts[thread.id] ?? ""}
               state={state}
               thread={thread}
+              unread={readThreadActivityIds[thread.id] !== latestThreadActivityId(state, thread.id)}
             />
           ))}
         </div>
@@ -512,6 +536,29 @@ function Suggestions({
                       <button type="button" onClick={() => onStatus(suggestion.id, "deferred")}>
                         Defer
                       </button>
+                      <button type="button" onClick={() => onStatus(suggestion.id, "rejected")}>
+                        Reject
+                      </button>
+                    </footer>
+                  ) : null}
+                  {suggestion.status === "accepted" ? (
+                    <footer>
+                      <button type="button" onClick={() => onStatus(suggestion.id, "deferred")}>
+                        Move to deferred
+                      </button>
+                      <button type="button" onClick={() => onStatus(suggestion.id, "open")}>
+                        Reopen
+                      </button>
+                    </footer>
+                  ) : null}
+                  {suggestion.status === "deferred" || suggestion.status === "rejected" ? (
+                    <footer>
+                      <button type="button" onClick={() => onStatus(suggestion.id, "accepted")}>
+                        Accept
+                      </button>
+                      <button type="button" onClick={() => onStatus(suggestion.id, "open")}>
+                        Reopen
+                      </button>
                     </footer>
                   ) : null}
                 </div>
@@ -526,10 +573,14 @@ function Suggestions({
 
 function Onboarding({
   state,
-  onApprove,
+  expandedIds,
+  onToggle,
+  onStatus,
 }: {
   state: AgentCommsState;
-  onApprove: (agentId: string) => void;
+  expandedIds: Set<string>;
+  onToggle: (agentId: string) => void;
+  onStatus: (agentId: string, status: AgentStatus) => void;
 }) {
   return (
     <div className="view-stack">
@@ -538,20 +589,51 @@ function Onboarding({
       </div>
       <div className="agent-table">
         {state.agents.map((agent) => (
-          <article className={agent.status === "pending" ? "agent-row needs-action" : "agent-row"} key={agent.id}>
-            <div>
-              <b>{agent.handle}</b>
-              <span>{agent.displayName}</span>
-            </div>
-            <span>{agent.machineScope}</span>
-            {agent.status === "pending" ? (
-              <button type="button" onClick={() => onApprove(agent.id)}>
-                <UserCheck aria-hidden="true" />
-                Approve
-              </button>
-            ) : (
+          <article className={agent.status === "pending" ? "agent-card needs-action" : "agent-card"} key={agent.id}>
+            <button className="agent-summary" type="button" onClick={() => onToggle(agent.id)}>
+              <div>
+                <b>{agent.handle}</b>
+                <span>{agent.displayName}</span>
+              </div>
+              <span>{agent.machineScope}</span>
               <span className={`status ${agent.status}`}>{agent.status}</span>
-            )}
+            </button>
+            {expandedIds.has(agent.id) ? (
+              <div className="expanded-panel">
+                <dl className="detail-grid">
+                  <div>
+                    <dt>Requested</dt>
+                    <dd>{new Date(agent.requestedAt).toLocaleString()}</dd>
+                  </div>
+                  <div>
+                    <dt>Approved</dt>
+                    <dd>{agent.approvedAt ? new Date(agent.approvedAt).toLocaleString() : "not approved"}</dd>
+                  </div>
+                  <div>
+                    <dt>Access</dt>
+                    <dd>{agent.status === "approved" ? "Active" : agent.status === "suspended" ? "Blocked" : "Waiting"}</dd>
+                  </div>
+                </dl>
+                <footer>
+                  {agent.status !== "approved" ? (
+                    <button type="button" onClick={() => onStatus(agent.id, "approved")}>
+                      <UserCheck aria-hidden="true" />
+                      Approve access
+                    </button>
+                  ) : null}
+                  {agent.status === "approved" ? (
+                    <button type="button" onClick={() => onStatus(agent.id, "suspended")}>
+                      Suspend access
+                    </button>
+                  ) : null}
+                  {agent.status === "suspended" ? (
+                    <button type="button" onClick={() => onStatus(agent.id, "pending")}>
+                      Move back to pending
+                    </button>
+                  ) : null}
+                </footer>
+              </div>
+            ) : null}
           </article>
         ))}
       </div>
@@ -566,10 +648,16 @@ export function App() {
   const [selectedForumId, setSelectedForumId] = useState<string | null>(null);
   const [expandedThreadIds, setExpandedThreadIds] = useState<Set<string>>(() => new Set());
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
+  const [readThreadActivityIds, setReadThreadActivityIds] = useState<Record<string, string | undefined>>(() =>
+    readJsonRecord("agent-comms-read-thread-activity-ids"),
+  );
   const [expandedConversationIds, setExpandedConversationIds] = useState<Set<string>>(() => new Set());
   const [conversationDrafts, setConversationDrafts] = useState<Record<string, string>>({});
-  const [readConversationMessageIds, setReadConversationMessageIds] = useState<Record<string, string | undefined>>({});
+  const [readConversationMessageIds, setReadConversationMessageIds] = useState<Record<string, string | undefined>>(() =>
+    readJsonRecord("agent-comms-read-conversation-message-ids"),
+  );
   const [expandedSuggestionIds, setExpandedSuggestionIds] = useState<Set<string>>(() => new Set());
+  const [expandedAgentIds, setExpandedAgentIds] = useState<Set<string>>(() => new Set());
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [apiStatus, setApiStatus] = useState("demo data");
   const [actionStatus, setActionStatus] = useState("");
@@ -709,6 +797,14 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    localStorage.setItem("agent-comms-read-conversation-message-ids", JSON.stringify(readConversationMessageIds));
+  }, [readConversationMessageIds]);
+
+  useEffect(() => {
+    localStorage.setItem("agent-comms-read-thread-activity-ids", JSON.stringify(readThreadActivityIds));
+  }, [readThreadActivityIds]);
+
   const latestConversationMessageIds = Object.fromEntries(
     state.directConversations.map((conversation) => [
       conversation.id,
@@ -719,10 +815,9 @@ export function App() {
     const latestMessageId = latestConversationMessageIds[conversation.id];
     return Boolean(latestMessageId && readConversationMessageIds[conversation.id] !== latestMessageId);
   }).length;
-  const unreadThreadCount = state.threads.filter((thread) => {
-    const replies = state.replies.filter((reply) => reply.threadId === thread.id);
-    return replies.some((reply) => reply.authorKind === "agent");
-  }).length;
+  const unreadThreadCount = state.threads.filter(
+    (thread) => readThreadActivityIds[thread.id] !== latestThreadActivityId(state, thread.id),
+  ).length;
 
   const navigate = (nextView: View) => {
     setView(nextView);
@@ -742,7 +837,50 @@ export function App() {
     }
   };
 
+  const updateAgentStatus = async (agentId: string, status: AgentStatus) => {
+    setState((current) => ({
+      ...current,
+      agents: current.agents.map((agent) =>
+        agent.id === agentId
+          ? {
+              ...agent,
+              status,
+              approvedAt:
+                status === "approved"
+                  ? (agent.approvedAt ?? new Date().toISOString())
+                  : status === "pending"
+                    ? undefined
+                    : agent.approvedAt,
+            }
+          : agent,
+      ),
+    }));
+    try {
+      if (status === "approved") {
+        await operatorRequest("agent-approvals", {
+          method: "POST",
+          body: JSON.stringify({ agentId }),
+        });
+      } else {
+        await operatorRequest(`agents/${agentId}/status`, {
+          method: "POST",
+          body: JSON.stringify({ status }),
+        });
+      }
+      await refreshOperatorData();
+      setActionStatus(`Agent ${status}.`);
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Agent status update failed.");
+    }
+  };
+
   const updateSuggestionStatus = async (suggestionId: string, status: SuggestionStatus) => {
+    setState((current) => ({
+      ...current,
+      suggestions: current.suggestions.map((suggestion) =>
+        suggestion.id === suggestionId ? { ...suggestion, status } : suggestion,
+      ),
+    }));
     try {
       await operatorRequest(`suggestions/${suggestionId}/status`, {
         method: "POST",
@@ -769,6 +907,14 @@ export function App() {
     const latestMessageId = latestConversationMessageIds[conversationId];
     if (latestMessageId) {
       setReadConversationMessageIds((current) => ({ ...current, [conversationId]: latestMessageId }));
+    }
+  };
+
+  const toggleThread = (threadId: string) => {
+    toggleSetValue(setExpandedThreadIds, threadId);
+    const latestActivityId = latestThreadActivityId(state, threadId);
+    if (latestActivityId) {
+      setReadThreadActivityIds((current) => ({ ...current, [threadId]: latestActivityId }));
     }
   };
 
@@ -892,7 +1038,8 @@ export function App() {
               setThreadDrafts((current) => ({ ...current, [threadId]: value }))
             }
             onThreadReply={replyToThread}
-            onToggleThread={(threadId) => toggleSetValue(setExpandedThreadIds, threadId)}
+            onToggleThread={toggleThread}
+            readThreadActivityIds={readThreadActivityIds}
             state={state}
             selectedForumId={selectedForumId}
             threadDrafts={threadDrafts}
@@ -919,7 +1066,14 @@ export function App() {
             state={state}
           />
         ) : null}
-        {view === "onboarding" ? <Onboarding state={state} onApprove={approveAgent} /> : null}
+        {view === "onboarding" ? (
+          <Onboarding
+            expandedIds={expandedAgentIds}
+            onStatus={updateAgentStatus}
+            onToggle={(agentId) => toggleSetValue(setExpandedAgentIds, agentId)}
+            state={state}
+          />
+        ) : null}
       </section>
     </main>
   );
