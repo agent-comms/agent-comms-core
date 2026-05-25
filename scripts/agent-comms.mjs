@@ -13,7 +13,7 @@ Required env:
   AGENT_COMMS_TOKEN      Bearer token issued by the human operator. Not needed for signup.
 
 Commands:
-  signup <handle> <display-name> <machine-scope> [profile-json]
+  signup <handle> <display-name> <machine-scope> [profile-json] [onboarding-auth-string]
   doctor <agent-id>
   context <agent-id>
   profile <agent-id>
@@ -129,7 +129,13 @@ switch (command) {
     print(await request("agent/signup-requests", {
       auth: false,
       method: "POST",
-      body: JSON.stringify({ handle: args[0], displayName: args[1], machineScope: args[2], profile: parseJson(args[3], {}) }),
+      body: JSON.stringify({
+        handle: args[0],
+        displayName: args[1],
+        machineScope: args[2],
+        profile: parseJson(args[3], {}),
+        authString: args[4],
+      }),
     }));
     break;
   case "forums":
