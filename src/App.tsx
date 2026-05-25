@@ -310,19 +310,23 @@ export function App() {
   const [state, setState] = useState<AgentCommsState>(demoState);
   const [operatorToken, setOperatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [apiStatus, setApiStatus] = useState("demo data");
+  const [actionStatus, setActionStatus] = useState("");
 
   const operatorRequest = useCallback(
     async (path: string, options: RequestInit = {}) => {
-      if (!operatorToken) throw new Error("Operator token is not configured.");
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        ...((options.headers as Record<string, string> | undefined) ?? {}),
+      };
+      if (operatorToken) headers.authorization = `Bearer ${operatorToken}`;
       const response = await fetch(`/api/operator/${path}`, {
         ...options,
-        headers: {
-          authorization: `Bearer ${operatorToken}`,
-          "content-type": "application/json",
-          ...(options.headers ?? {}),
-        },
+        headers,
       });
-      const payload = await response.json();
+      const contentType = response.headers.get("content-type") ?? "";
+      const payload = contentType.includes("application/json")
+        ? await response.json()
+        : { error: await response.text() };
       if (!response.ok) throw new Error(payload.error ?? "Operator request failed.");
       return payload;
     },
@@ -401,19 +405,29 @@ export function App() {
   };
 
   const approveAgent = async (agentId: string) => {
-    await operatorRequest("agent-approvals", {
-      method: "POST",
-      body: JSON.stringify({ agentId }),
-    });
-    await refreshOperatorData();
+    try {
+      await operatorRequest("agent-approvals", {
+        method: "POST",
+        body: JSON.stringify({ agentId }),
+      });
+      await refreshOperatorData();
+      setActionStatus("Agent approved.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Approval failed.");
+    }
   };
 
   const updateSuggestionStatus = async (suggestionId: string, status: string) => {
-    await operatorRequest(`suggestions/${suggestionId}/status`, {
-      method: "POST",
-      body: JSON.stringify({ status }),
-    });
-    await refreshOperatorData();
+    try {
+      await operatorRequest(`suggestions/${suggestionId}/status`, {
+        method: "POST",
+        body: JSON.stringify({ status }),
+      });
+      await refreshOperatorData();
+      setActionStatus(`Suggestion ${status}.`);
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Suggestion update failed.");
+    }
   };
 
   return (
@@ -455,12 +469,12 @@ export function App() {
               }}
             >
               <label className="token-field">
-                <span>Operator token</span>
+                <span>Fallback token</span>
                 <input
                   type="password"
                   value={operatorToken}
                   onChange={(event) => setOperatorToken(event.target.value)}
-                  placeholder="Paste token"
+                  placeholder="Optional"
                 />
               </label>
               <button type="submit" title="Save operator token">
@@ -475,7 +489,7 @@ export function App() {
             </button>
           </div>
         </header>
-        <p className="api-status">Data source: {apiStatus}</p>
+        <p className="api-status">Data source: {apiStatus}{actionStatus ? `; ${actionStatus}` : ""}</p>
         {view === "overview" ? <Overview state={state} /> : null}
         {view === "forums" ? <Forums state={state} /> : null}
         {view === "direct" ? <DirectMessages state={state} /> : null}

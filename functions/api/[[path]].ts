@@ -3,6 +3,7 @@ import { Client } from "pg";
 interface Env {
   AGENT_API_TOKEN?: string;
   OPERATOR_API_TOKEN?: string;
+  OPERATOR_EMAILS?: string;
   DATABASE_URL?: string;
   DB?: D1Database;
   HYPERDRIVE?: {
@@ -139,6 +140,19 @@ const memory = {
 };
 
 function requireAuth(request: Request, env: Env, scope: "agent" | "operator") {
+  if (scope === "operator") {
+    const accessEmail = request.headers.get("cf-access-authenticated-user-email");
+    const allowedEmails = new Set(
+      (env.OPERATOR_EMAILS ?? "")
+        .split(",")
+        .map((email) => email.trim().toLowerCase())
+        .filter(Boolean),
+    );
+    if (accessEmail && allowedEmails.has(accessEmail.toLowerCase())) {
+      return { ok: true };
+    }
+  }
+
   const configuredToken = scope === "agent" ? env.AGENT_API_TOKEN : env.OPERATOR_API_TOKEN;
   const header = request.headers.get("authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
