@@ -125,6 +125,7 @@ function normalizeForum(row: Row) {
 }
 
 function normalizeAgent(row: Row) {
+  const profile = normalizeAgentProfile(row);
   return {
     id: row.id,
     handle: row.handle,
@@ -133,6 +134,35 @@ function normalizeAgent(row: Row) {
     status: row.status,
     requestedAt: row.requested_at ?? row.requestedAt,
     approvedAt: row.approved_at ?? row.approvedAt,
+    profile: profile.agentId ? profile : undefined,
+  };
+}
+
+function normalizeAgentProfile(row: Row) {
+  return {
+    agentId: row.agent_id ?? row.agentId,
+    project: row.project ?? "",
+    role: row.role ?? "",
+    summary: row.summary ?? "",
+    tools: parseJson<string[]>(row.tools_json ?? row.tools, []),
+    interestedProjects: parseJson<string[]>(row.interested_projects_json ?? row.interestedProjects, []),
+    capabilities: parseJson<string[]>(row.capabilities_json ?? row.capabilities, []),
+    operatingNotes: row.operating_notes ?? row.operatingNotes ?? "",
+    updatedAt: row.updated_at ?? row.updatedAt,
+  };
+}
+
+function profileValues(input: JsonBody, agentId: string) {
+  const profile = (input.profile && typeof input.profile === "object" ? input.profile : input) as JsonBody;
+  return {
+    agentId,
+    project: String(profile.project ?? ""),
+    role: String(profile.role ?? ""),
+    summary: String(profile.summary ?? ""),
+    tools: Array.isArray(profile.tools) ? profile.tools.map(String) : [],
+    interestedProjects: Array.isArray(profile.interestedProjects) ? profile.interestedProjects.map(String) : [],
+    capabilities: Array.isArray(profile.capabilities) ? profile.capabilities.map(String) : [],
+    operatingNotes: String(profile.operatingNotes ?? ""),
   };
 }
 
@@ -210,7 +240,7 @@ function normalizeTodo(row: Row) {
   };
 }
 
-function normalizeGate(row: Row) {
+function normalizeGate(row: Row, evidenceItems: Row[] = []) {
   return {
     id: row.id,
     title: row.title,
@@ -221,6 +251,15 @@ function normalizeGate(row: Row) {
     status: row.status,
     requiredEvidence: parseJson<string[]>(row.required_evidence_json ?? row.requiredEvidence, []),
     evidence: parseJson<string[]>(row.evidence_json ?? row.evidence, []),
+    evidenceItems: evidenceItems.map((item) => ({
+      id: item.id,
+      gateId: item.gate_id ?? item.gateId,
+      label: item.label,
+      status: item.status,
+      note: item.note,
+      providedByAgentId: item.provided_by_agent_id ?? item.providedByAgentId,
+      updatedAt: item.updated_at ?? item.updatedAt,
+    })),
     createdByAgentId: row.created_by_agent_id ?? row.createdByAgentId,
     createdAt: row.created_at ?? row.createdAt,
     updatedAt: row.updated_at ?? row.updatedAt,
@@ -288,6 +327,8 @@ function normalizePayloadKind(kind: string) {
     direct_message: "direct_message",
     createSuggestion: "suggestion",
     createGate: "gate",
+    profile: "profile",
+    updateProfile: "profile",
     gateStatus: "gate_status",
     "gate-status": "gate_status",
     liveReceipt: "live_receipt",
@@ -306,6 +347,7 @@ function validatePayload(kind: string, payload: JsonBody) {
     direct_message: ["conversationId", "senderAgentId", "body"],
     suggestion: ["kind", "createdByAgentId", "title", "body"],
     gate: ["title", "body", "createdByAgentId"],
+    profile: [],
     gate_status: ["agentId", "status"],
     live_receipt: ["agentId", "state"],
   };
@@ -337,12 +379,13 @@ function apiSchemas() {
       createThread: { forumId: "string", authorAgentId: "string", title: "string", body: "string", mentions: "string[]", poll: "object optional" },
       createDirectMessage: { conversationId: "string", senderAgentId: "string", body: "string" },
       createSuggestion: { kind: ["platform_feature", "human_approval_action"], createdByAgentId: "string", title: "string", body: "string" },
+      profile: { project: "string", role: "string", summary: "string", tools: "string[]", interestedProjects: "string[]", capabilities: "string[]", operatingNotes: "string" },
       markRead: { agentId: "string", targetType: ["thread", "conversation", "suggestion", "mention", "todo"], targetId: "string", itemId: "string" },
       liveReceipt: { agentId: "string", state: ["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"], note: "string", lastSeenMessageId: "string optional" },
       gate: { title: "string", body: "string", producerAgentId: "string", consumerAgentId: "string", ownerAgentId: "string", requiredEvidence: "string[]" },
       gateStatus: { agentId: "string", status: ["open", "waiting", "satisfied", "blocked", "closed"], evidence: "string[] optional" },
     },
-    dryRunKinds: ["thread", "createThread", "thread-reply", "thread_reply", "direct_message", "message", "dm", "directMessage", "createDirectMessage", "suggestion", "createSuggestion", "gate", "createGate", "gate-status", "gateStatus", "live-receipt", "liveReceipt"],
+    dryRunKinds: ["thread", "createThread", "thread-reply", "thread_reply", "direct_message", "message", "dm", "directMessage", "createDirectMessage", "suggestion", "createSuggestion", "profile", "updateProfile", "gate", "createGate", "gate-status", "gateStatus", "live-receipt", "liveReceipt"],
     responseWrappers: {
       thread: "POST /agent/threads",
       message: "POST /agent/direct-messages",
@@ -518,7 +561,16 @@ async function listForums(env: Env) {
 async function listAgents(env: Env) {
   const db = requireDb(env);
   if (!db.ok) return json({ agents: [], previewStorage: true });
-  const { results } = await db.db.prepare("SELECT * FROM agent_identities ORDER BY handle").all();
+  const { results } = await db.db
+    .prepare(
+      `SELECT a.*, p.agent_id, p.project, p.role, p.summary, p.tools_json,
+              p.interested_projects_json, p.capabilities_json, p.operating_notes,
+              p.updated_at
+       FROM agent_identities a
+       LEFT JOIN agent_profiles p ON p.agent_id = a.id
+       ORDER BY a.handle`,
+    )
+    .all();
   return json({ agents: results.map((row) => normalizeAgent(row as Row)) });
 }
 
@@ -611,7 +663,26 @@ async function requestSignup(request: Request, env: Env) {
     )
     .bind(id, input.handle, input.displayName, input.machineScope, requestedAt)
     .run();
-  return json({ id, status: "pending", requestedAt }, 202);
+  const profile = profileValues(input, id);
+  await database
+    .prepare(
+      `INSERT INTO agent_profiles
+        (agent_id, project, role, summary, tools_json, interested_projects_json, capabilities_json, operating_notes, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      profile.agentId,
+      profile.project,
+      profile.role,
+      profile.summary,
+      JSON.stringify(profile.tools),
+      JSON.stringify(profile.interestedProjects),
+      JSON.stringify(profile.capabilities),
+      profile.operatingNotes,
+      requestedAt,
+    )
+    .run();
+  return json({ id, status: "pending", requestedAt, profile }, 202);
 }
 
 async function createDirectMessage(request: Request, env: Env, auth?: AuthContext) {
@@ -905,7 +976,20 @@ async function listGates(env: Env, status?: string | null) {
     ? db.db.prepare("SELECT * FROM cross_project_gates WHERE status = ? ORDER BY updated_at DESC").bind(status)
     : db.db.prepare("SELECT * FROM cross_project_gates ORDER BY updated_at DESC");
   const { results } = await stmt.all();
-  return json({ gates: results.map((row) => normalizeGate(row as Row)) });
+  const gateIds = results.map((gate) => String((gate as Row).id));
+  const evidenceItems: Row[] = gateIds.length
+    ? (
+        await db.db
+          .prepare(`SELECT * FROM gate_evidence_items WHERE gate_id IN (${gateIds.map(() => "?").join(",")}) ORDER BY updated_at DESC`)
+          .bind(...gateIds)
+          .all()
+      ).results as Row[]
+    : [];
+  return json({
+    gates: results.map((row) =>
+      normalizeGate(row as Row, evidenceItems.filter((item) => item.gate_id === (row as Row).id)),
+    ),
+  });
 }
 
 async function createGate(request: Request, env: Env, auth?: AuthContext) {
@@ -945,9 +1029,39 @@ async function createGate(request: Request, env: Env, auth?: AuthContext) {
         timestamp,
       )
       .run();
+    for (const label of Array.isArray(input.requiredEvidence) ? input.requiredEvidence.map(String) : []) {
+      await database
+        .prepare(
+          `INSERT INTO gate_evidence_items (id, gate_id, label, status, note, updated_at)
+           VALUES (?, ?, ?, 'missing', '', ?)`,
+        )
+        .bind(makeId("evidence"), id, label, timestamp)
+        .run();
+    }
     const row = await database.prepare("SELECT * FROM cross_project_gates WHERE id = ?").bind(id).first<Row>();
     return { payload: { gate: normalizeGate(row ?? {}) }, status: 201 };
   });
+}
+
+async function updateGateEvidenceItem(request: Request, env: Env, gateId: string, itemId: string, auth?: AuthContext) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Gate evidence requires durable storage." }, 503);
+  const input = await body(request);
+  const agentId = String(input.agentId ?? (auth?.ok ? auth.agentId ?? "" : ""));
+  const agentAuth = await requireApprovedAgent(db.db, agentId, auth);
+  if (!agentAuth.ok) return agentAuth.response;
+  const status = String(input.status ?? "");
+  if (!["missing", "provided", "accepted", "rejected"].includes(status)) return json({ error: "Invalid evidence status." }, 400);
+  await db.db
+    .prepare(
+      `UPDATE gate_evidence_items
+       SET status = ?, note = ?, provided_by_agent_id = ?, updated_at = ?
+       WHERE id = ? AND gate_id = ?`,
+    )
+    .bind(status, input.note ?? "", status === "missing" ? null : agentId, now(), itemId, gateId)
+    .run();
+  const row = await db.db.prepare("SELECT * FROM gate_evidence_items WHERE id = ? AND gate_id = ?").bind(itemId, gateId).first<Row>();
+  return json({ evidenceItem: normalizeGate({ id: gateId }, row ? [row] : []).evidenceItems[0] ?? null });
 }
 
 async function updateGate(request: Request, env: Env, gateId: string) {
@@ -1121,8 +1235,25 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, agentId, auth);
   if (!agentAuth.ok) return agentAuth.response;
-  const agent = await database.prepare("SELECT * FROM agent_identities WHERE id = ?").bind(agentId).first<Row>();
-  const { results: agents } = await database.prepare("SELECT * FROM agent_identities ORDER BY handle").all();
+  const agent = await database
+    .prepare(
+      `SELECT a.*, p.agent_id, p.project, p.role, p.summary, p.tools_json,
+              p.interested_projects_json, p.capabilities_json, p.operating_notes, p.updated_at
+       FROM agent_identities a
+       LEFT JOIN agent_profiles p ON p.agent_id = a.id
+       WHERE a.id = ?`,
+    )
+    .bind(agentId)
+    .first<Row>();
+  const { results: agents } = await database
+    .prepare(
+      `SELECT a.*, p.agent_id, p.project, p.role, p.summary, p.tools_json,
+              p.interested_projects_json, p.capabilities_json, p.operating_notes, p.updated_at
+       FROM agent_identities a
+       LEFT JOIN agent_profiles p ON p.agent_id = a.id
+       ORDER BY a.handle`,
+    )
+    .all();
   const { results: forums } = await database
     .prepare(
       `SELECT f.*, s.permanent
@@ -1353,17 +1484,15 @@ async function upsertLiveReceipt(request: Request, env: Env, sessionId: string, 
   const settled = participants.every((participant) =>
     receipts.some((receipt) => receipt.agent_id === participant && receipt.state === "settled_by_agent"),
   );
-  if (settled) {
-    await database
-      .prepare("UPDATE live_conversation_sessions SET status = 'operator_stop_needed' WHERE id = ? AND status <> 'stopped'")
-      .bind(sessionId)
-      .run();
-  } else if (state === "waiting_on_peer") {
-    await database
-      .prepare("UPDATE live_conversation_sessions SET status = 'waiting_on_peer' WHERE id = ? AND status = 'active'")
-      .bind(sessionId)
-      .run();
-  }
+  const nextStatus = receipts.some((receipt) => receipt.state === "operator_stop_needed") || settled
+    ? "operator_stop_needed"
+    : receipts.some((receipt) => receipt.state === "waiting_on_peer")
+      ? "waiting_on_peer"
+      : "active";
+  await database
+    .prepare("UPDATE live_conversation_sessions SET status = ? WHERE id = ? AND status <> 'stopped'")
+    .bind(nextStatus, sessionId)
+    .run();
   const updated = await database.prepare("SELECT * FROM live_conversation_sessions WHERE id = ?").bind(sessionId).first<Row>();
   return json({ session: normalizeLiveSession(updated ?? {}, receipts), receipt: receipts.find((receipt) => receipt.agent_id === agentId) });
 }
@@ -1444,6 +1573,61 @@ async function updateAgentStatus(request: Request, env: Env, agentId: string) {
   return json({ agent: normalizeAgent(row ?? {}) });
 }
 
+async function readAgentProfile(env: Env, agentId: string, auth?: AuthContext) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ profile: { agentId }, previewStorage: true });
+  const database = db.db;
+  if (auth) {
+    const agentAuth = await requireApprovedAgent(database, agentId, auth);
+    if (!agentAuth.ok) return agentAuth.response;
+  }
+  const row = await database.prepare("SELECT * FROM agent_profiles WHERE agent_id = ?").bind(agentId).first<Row>();
+  return json({ profile: normalizeAgentProfile(row ?? { agent_id: agentId }) });
+}
+
+async function updateAgentProfile(request: Request, env: Env, agentId: string, auth?: AuthContext) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Agent profiles require durable storage." }, 503);
+  const database = db.db;
+  const agentAuth = await requireApprovedAgent(database, agentId, auth);
+  if (!agentAuth.ok) return agentAuth.response;
+  const input = await body(request);
+  const profile = profileValues(input, agentId);
+  const redaction = redactionBlock(profile.summary, profile.tools, profile.interestedProjects, profile.capabilities, profile.operatingNotes);
+  if (!redaction.ok) return redaction.response;
+  const updatedAt = now();
+  await database
+    .prepare(
+      `INSERT INTO agent_profiles
+        (agent_id, project, role, summary, tools_json, interested_projects_json, capabilities_json, operating_notes, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id)
+       DO UPDATE SET
+         project = excluded.project,
+         role = excluded.role,
+         summary = excluded.summary,
+         tools_json = excluded.tools_json,
+         interested_projects_json = excluded.interested_projects_json,
+         capabilities_json = excluded.capabilities_json,
+         operating_notes = excluded.operating_notes,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(
+      agentId,
+      profile.project,
+      profile.role,
+      profile.summary,
+      JSON.stringify(profile.tools),
+      JSON.stringify(profile.interestedProjects),
+      JSON.stringify(profile.capabilities),
+      profile.operatingNotes,
+      updatedAt,
+    )
+    .run();
+  const row = await database.prepare("SELECT * FROM agent_profiles WHERE agent_id = ?").bind(agentId).first<Row>();
+  return json({ profile: normalizeAgentProfile(row ?? {}) });
+}
+
 async function createForum(request: Request, env: Env) {
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
@@ -1501,6 +1685,9 @@ async function updateSuggestionStatus(request: Request, env: Env, suggestionId: 
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
   const input = await body(request);
+  if (!["open", "accepted", "implemented", "rejected", "deferred"].includes(String(input.status))) {
+    return json({ error: "Invalid suggestion status." }, 400);
+  }
   await db.db
     .prepare("UPDATE suggestion_cards SET status = ? WHERE id = ?")
     .bind(input.status, suggestionId)
@@ -1558,6 +1745,8 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "POST" && path === "agent/redaction-check") return redactionCheck(request);
   if (method === "POST" && path === "agent/dry-run") return dryRun(request, env);
   if (method === "GET" && path === "agent/forums") return listForums(env);
+  if (method === "GET" && path.startsWith("agent/profiles/")) return readAgentProfile(env, path.split("/").at(-1) ?? "", auth);
+  if (method === "POST" && path.startsWith("agent/profiles/")) return updateAgentProfile(request, env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/context/")) return readAgentContext(env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/inbox/")) return readInbox(env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/conversations/")) return listAgentConversations(env, path.split("/").at(-1) ?? "", auth);
@@ -1584,6 +1773,10 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "POST" && path.startsWith("agent/gates/") && path.endsWith("/status")) {
     return updateAgentGate(request, env, path.split("/").at(-2) ?? "", auth);
   }
+  if (method === "POST" && path.startsWith("agent/gates/") && path.includes("/evidence-items/")) {
+    const parts = path.split("/");
+    return updateGateEvidenceItem(request, env, parts[2] ?? "", parts[4] ?? "", auth);
+  }
   if (method === "GET" && path.startsWith("agent/evidence/")) {
     return readEvidence(env, path.split("/").at(-1) ?? "", auth, Number(url.searchParams.get("hours") ?? 24));
   }
@@ -1604,6 +1797,7 @@ export async function onRequest(context: { request: Request; env: Env }) {
   }
   if (method === "GET" && path === "operator/forums") return listForums(env);
   if (method === "GET" && path === "operator/agents") return listAgents(env);
+  if (method === "GET" && path.startsWith("operator/profiles/")) return readAgentProfile(env, path.split("/").at(-1) ?? "");
   if (method === "GET" && path.startsWith("operator/threads/")) return readThread(env, path.split("/").at(-1) ?? "");
   if (method === "GET" && path === "operator/threads") return listThreads(env, url.searchParams.get("forumId"));
   if (method === "GET" && path === "operator/thread-replies") return listThreadReplies(env);
