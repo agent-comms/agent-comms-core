@@ -1,0 +1,432 @@
+:root {
+  color: #17211b;
+  background: #f6f4ef;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button {
+  border: 0;
+  font: inherit;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 24px;
+  background: #193428;
+  color: #f8f4ea;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand > span {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid #a6bf77;
+  border-radius: 8px;
+  color: #e1ecb8;
+  font-weight: 800;
+}
+
+.brand p,
+.eyebrow {
+  margin: 0;
+  color: #6d7a70;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.brand p {
+  color: #aec1b6;
+  text-transform: none;
+}
+
+.nav-list {
+  display: grid;
+  gap: 8px;
+}
+
+.nav-list button,
+.topbar-actions button,
+.section-title button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.nav-list button {
+  justify-content: flex-start;
+  color: #e1e9df;
+}
+
+.nav-list button.active,
+.nav-list button:hover {
+  background: #294a3c;
+}
+
+svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 28px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.topbar h1 {
+  margin: 4px 0 0;
+  max-width: 760px;
+  font-size: clamp(2rem, 4vw, 4rem);
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.topbar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.topbar-actions button,
+.section-title button {
+  justify-content: center;
+  width: 42px;
+  padding: 0;
+  border: 1px solid #d6d2c7;
+  background: #ffffff;
+  color: #193428;
+}
+
+.view-stack {
+  display: grid;
+  gap: 22px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.stat,
+.operator-box,
+.thread-card,
+.forum-panel,
+.conversation,
+.suggestion,
+.agent-table {
+  border: 1px solid #ded9cc;
+  border-radius: 8px;
+  background: #fffdf8;
+}
+
+.stat {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+}
+
+.stat svg {
+  color: #2f6f55;
+}
+
+.stat span {
+  display: block;
+  font-size: 1.8rem;
+  font-weight: 800;
+}
+
+.stat p,
+.thread-card p,
+.forum-panel p,
+.suggestion p,
+.message-row p,
+.agent-row span,
+.operator-box span {
+  margin: 0;
+  color: #536159;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 20px;
+  align-items: start;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.section-title h2,
+.operator-box h2,
+.thread-card h3,
+.forum-panel h3,
+.conversation h3,
+.suggestion h3 {
+  margin: 0;
+}
+
+.thread-list,
+.suggestion-list {
+  display: grid;
+  gap: 12px;
+}
+
+.thread-card,
+.forum-panel,
+.conversation,
+.suggestion,
+.operator-box {
+  padding: 18px;
+}
+
+.thread-card header,
+.conversation header,
+.suggestion header,
+.thread-card footer,
+.suggestion footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.thread-card header > span,
+.thread-card footer,
+.conversation header > span,
+.suggestion header > span:last-child {
+  color: #627065;
+  font-size: 0.88rem;
+}
+
+.thread-card > p {
+  margin: 12px 0;
+  line-height: 1.5;
+}
+
+.poll {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: #eef3e8;
+}
+
+.poll-row {
+  display: grid;
+  grid-template-columns: 1fr minmax(90px, 180px) 24px;
+  gap: 8px;
+  align-items: center;
+}
+
+meter {
+  width: 100%;
+}
+
+.operator-box {
+  display: grid;
+  gap: 16px;
+}
+
+.attention-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.attention-row svg {
+  color: #2f6f55;
+}
+
+.forum-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.forum-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.forum-meta,
+.mini-list,
+.suggestion footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.badge,
+.status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #dcebbb;
+  color: #25452f;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.badge.muted {
+  background: #ebe6d9;
+}
+
+.mini-list span {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f5f1e7;
+  color: #536159;
+  font-size: 0.9rem;
+}
+
+.conversation {
+  display: grid;
+  gap: 14px;
+}
+
+.message-row {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f5f1e7;
+}
+
+.suggestion {
+  display: grid;
+  gap: 12px;
+}
+
+.suggestion footer span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-table {
+  display: grid;
+  overflow: hidden;
+}
+
+.agent-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 120px;
+  gap: 16px;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid #ebe6d9;
+}
+
+.agent-row:last-child {
+  border-bottom: 0;
+}
+
+.agent-row div {
+  display: grid;
+  gap: 3px;
+}
+
+.status.approved {
+  justify-content: center;
+}
+
+.status.pending {
+  justify-content: center;
+  background: #f3dfb3;
+}
+
+@media (max-width: 980px) {
+  .app-shell,
+  .split {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: static;
+  }
+
+  .nav-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .stats-grid,
+  .forum-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .workspace,
+  .sidebar {
+    padding: 18px;
+  }
+
+  .topbar,
+  .thread-card header,
+  .conversation header,
+  .agent-row {
+    align-items: stretch;
+    flex-direction: column;
+    grid-template-columns: 1fr;
+  }
+
+  .stats-grid,
+  .forum-grid,
+  .nav-list {
+    grid-template-columns: 1fr;
+  }
+}
