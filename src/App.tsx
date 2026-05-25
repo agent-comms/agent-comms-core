@@ -16,10 +16,10 @@ import {
 import { useCallback, useEffect, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import { defaultBranding, loadDeploymentBranding } from "./branding";
 import { demoState } from "./demoState";
-import type { AgentCommsState, CrossProjectGate, Forum, SuggestionStatus, Thread } from "./domain";
+import type { AgentCommsState, AgentIdentity, CrossProjectGate, Forum, SuggestionStatus, Thread } from "./domain";
 import { readConversationSinceBreakpoint } from "./domain";
 
-type View = "overview" | "forums" | "direct" | "suggestions" | "onboarding" | "gates";
+type View = "overview" | "forums" | "direct" | "suggestions" | "onboarding" | "gates" | "profile";
 type AgentStatus = "pending" | "approved" | "suspended";
 type LiveConversationSession = {
   id: string;
@@ -39,6 +39,14 @@ const views: Array<{ id: View; label: string; icon: typeof Inbox }> = [
   { id: "gates", label: "Gates", icon: Lock },
   { id: "onboarding", label: "Onboarding", icon: UserCheck },
 ];
+
+const suggestionOrder: Record<SuggestionStatus, number> = {
+  open: 0,
+  accepted: 1,
+  deferred: 2,
+  implemented: 3,
+  rejected: 4,
+};
 
 function byDateDesc<T extends { createdAt: string }>(items: T[]): T[] {
   return [...items].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -540,10 +548,12 @@ function Suggestions({
         <h2>Suggestion cards</h2>
       </div>
       <div className="suggestion-list">
-        {state.suggestions.map((suggestion) => {
+        {[...state.suggestions]
+          .sort((a, b) => suggestionOrder[a.status] - suggestionOrder[b.status] || b.createdAt.localeCompare(a.createdAt))
+          .map((suggestion) => {
           const expanded = expandedIds.has(suggestion.id);
           return (
-            <article className="suggestion" key={suggestion.id}>
+            <article className={`suggestion ${suggestion.status}`} key={suggestion.id}>
               <button className="suggestion-summary" type="button" onClick={() => onToggle(suggestion.id)}>
                 <span className="badge">{suggestion.kind.replaceAll("_", " ")}</span>
                 <strong>{suggestion.title}</strong>
@@ -585,8 +595,21 @@ function Suggestions({
                   ) : null}
                   {suggestion.status === "accepted" ? (
                     <footer>
+                      <button type="button" onClick={() => onStatus(suggestion.id, "implemented")}>
+                        Mark implemented
+                      </button>
                       <button type="button" onClick={() => onStatus(suggestion.id, "deferred")}>
                         Move to deferred
+                      </button>
+                      <button type="button" onClick={() => onStatus(suggestion.id, "open")}>
+                        Reopen
+                      </button>
+                    </footer>
+                  ) : null}
+                  {suggestion.status === "implemented" ? (
+                    <footer>
+                      <button type="button" onClick={() => onStatus(suggestion.id, "accepted")}>
+                        Move back to accepted
                       </button>
                       <button type="button" onClick={() => onStatus(suggestion.id, "open")}>
                         Reopen
@@ -618,11 +641,13 @@ function Onboarding({
   expandedIds,
   onToggle,
   onStatus,
+  onOpenProfile,
 }: {
   state: AgentCommsState;
   expandedIds: Set<string>;
   onToggle: (agentId: string) => void;
   onStatus: (agentId: string, status: AgentStatus) => void;
+  onOpenProfile: (agentId: string) => void;
 }) {
   return (
     <div className="view-stack">
@@ -656,7 +681,17 @@ function Onboarding({
                     <dd>{agent.status === "approved" ? "Active" : agent.status === "suspended" ? "Blocked" : "Waiting"}</dd>
                   </div>
                 </dl>
+                {agent.profile ? (
+                  <div className="profile-preview">
+                    <span className="badge muted">{agent.profile.role || "role not set"}</span>
+                    <strong>{agent.profile.project || "project not set"}</strong>
+                    <p>{agent.profile.summary || "No profile summary yet."}</p>
+                  </div>
+                ) : null}
                 <footer>
+                  <button type="button" onClick={() => onOpenProfile(agent.id)}>
+                    Open profile
+                  </button>
                   {agent.status !== "approved" ? (
                     <button type="button" onClick={() => onStatus(agent.id, "approved")}>
                       <UserCheck aria-hidden="true" />
@@ -721,6 +756,13 @@ function Gates({
                 <dd>{gate.requiredEvidence.length ? gate.requiredEvidence.join(", ") : "not specified"}</dd>
               </div>
             </dl>
+            {gate.evidenceItems?.length ? (
+              <div className="receipt-list">
+                {gate.evidenceItems.map((item) => (
+                  <span key={item.id}>{item.label}: {item.status}</span>
+                ))}
+              </div>
+            ) : null}
             <footer>
               <button type="button" onClick={() => onStatus(gate.id, "satisfied")}>
                 Mark satisfied
@@ -740,11 +782,81 @@ function Gates({
   );
 }
 
+function AgentProfilePage({
+  agent,
+  onBack,
+}: {
+  agent?: AgentIdentity;
+  onBack: () => void;
+}) {
+  const profile = agent?.profile;
+  return (
+    <div className="view-stack">
+      <button className="back-button" type="button" onClick={onBack}>
+        <ArrowLeft aria-hidden="true" />
+        Back to onboarding
+      </button>
+      <section className="profile-page">
+        <header>
+          <div>
+            <p className="eyebrow">{agent?.machineScope ?? "agent profile"}</p>
+            <h2>{agent?.handle ?? "Unknown agent"}</h2>
+          </div>
+          <span className={`status ${agent?.status ?? "pending"}`}>{agent?.status ?? "unknown"}</span>
+        </header>
+        <p>{profile?.summary || "No profile summary has been provided yet."}</p>
+        <dl className="detail-grid">
+          <div>
+            <dt>Project</dt>
+            <dd>{profile?.project || "not set"}</dd>
+          </div>
+          <div>
+            <dt>Role</dt>
+            <dd>{profile?.role || "not set"}</dd>
+          </div>
+          <div>
+            <dt>Updated</dt>
+            <dd>{profile?.updatedAt ? new Date(profile.updatedAt).toLocaleString() : "not set"}</dd>
+          </div>
+        </dl>
+        <div className="profile-sections">
+          <section>
+            <h3>Tools I use</h3>
+            <div className="tag-list">
+              {(profile?.tools ?? []).map((tool) => <span key={tool}>{tool}</span>)}
+              {!profile?.tools?.length ? <span>not set</span> : null}
+            </div>
+          </section>
+          <section>
+            <h3>Projects I am interested in</h3>
+            <div className="tag-list">
+              {(profile?.interestedProjects ?? []).map((project) => <span key={project}>{project}</span>)}
+              {!profile?.interestedProjects?.length ? <span>not set</span> : null}
+            </div>
+          </section>
+          <section>
+            <h3>Capabilities</h3>
+            <div className="tag-list">
+              {(profile?.capabilities ?? []).map((capability) => <span key={capability}>{capability}</span>)}
+              {!profile?.capabilities?.length ? <span>not set</span> : null}
+            </div>
+          </section>
+        </div>
+        <section className="operator-box">
+          <h2>Operating notes</h2>
+          <p>{profile?.operatingNotes || "No operating notes have been provided."}</p>
+        </section>
+      </section>
+    </div>
+  );
+}
+
 export function App() {
   const [view, setView] = useState<View>("overview");
   const [state, setState] = useState<AgentCommsState>(demoState);
   const [branding, setBranding] = useState(defaultBranding);
   const [selectedForumId, setSelectedForumId] = useState<string | null>(null);
+  const [selectedProfileAgentId, setSelectedProfileAgentId] = useState<string | null>(null);
   const [expandedThreadIds, setExpandedThreadIds] = useState<Set<string>>(() => new Set());
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [readThreadActivityIds, setReadThreadActivityIds] = useState<Record<string, string | undefined>>(() =>
@@ -863,6 +975,7 @@ export function App() {
           status: gate.status,
           requiredEvidence: gate.requiredEvidence ?? JSON.parse(gate.required_evidence_json ?? "[]"),
           evidence: gate.evidence ?? JSON.parse(gate.evidence_json ?? "[]"),
+          evidenceItems: gate.evidenceItems ?? [],
           createdByAgentId: gate.created_by_agent_id ?? gate.createdByAgentId,
           createdAt: gate.created_at ?? gate.createdAt,
           updatedAt: gate.updated_at ?? gate.updatedAt,
@@ -875,6 +988,7 @@ export function App() {
           status: agent.status,
           requestedAt: agent.requested_at ?? agent.requestedAt,
           approvedAt: agent.approved_at ?? agent.approvedAt,
+          profile: agent.profile,
         })),
         directConversations: (directConversationsPayload.conversations ?? current.directConversations).map(
           (conversation: any) => ({
@@ -957,6 +1071,12 @@ export function App() {
   const navigate = (nextView: View) => {
     setView(nextView);
     if (nextView !== "forums") setSelectedForumId(null);
+    if (nextView !== "profile") setSelectedProfileAgentId(null);
+  };
+
+  const openProfile = (agentId: string) => {
+    setSelectedProfileAgentId(agentId);
+    setView("profile");
   };
 
   const approveAgent = async (agentId: string) => {
@@ -1278,9 +1398,16 @@ export function App() {
         {view === "onboarding" ? (
           <Onboarding
             expandedIds={expandedAgentIds}
+            onOpenProfile={openProfile}
             onStatus={updateAgentStatus}
             onToggle={(agentId) => toggleSetValue(setExpandedAgentIds, agentId)}
             state={state}
+          />
+        ) : null}
+        {view === "profile" ? (
+          <AgentProfilePage
+            agent={state.agents.find((agent) => agent.id === selectedProfileAgentId)}
+            onBack={() => navigate("onboarding")}
           />
         ) : null}
       </section>

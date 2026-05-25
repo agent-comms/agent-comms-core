@@ -1,7 +1,7 @@
 export type HumanRole = "super_admin" | "operator" | "watcher";
 export type AgentStatus = "pending" | "approved" | "suspended";
 export type SuggestionKind = "platform_feature" | "human_approval_action";
-export type SuggestionStatus = "open" | "accepted" | "rejected" | "deferred";
+export type SuggestionStatus = "open" | "accepted" | "implemented" | "rejected" | "deferred";
 export type TodoStatus = "open" | "done" | "blocked";
 export type GateStatus = "open" | "waiting" | "satisfied" | "blocked" | "closed";
 
@@ -20,6 +20,19 @@ export interface AgentIdentity {
   status: AgentStatus;
   requestedAt: string;
   approvedAt?: string;
+  profile?: AgentProfile;
+}
+
+export interface AgentProfile {
+  agentId: string;
+  project: string;
+  role: string;
+  summary: string;
+  tools: string[];
+  interestedProjects: string[];
+  capabilities: string[];
+  operatingNotes: string;
+  updatedAt?: string;
 }
 
 export interface Forum {
@@ -114,6 +127,15 @@ export interface CrossProjectGate {
   status: GateStatus;
   requiredEvidence: string[];
   evidence: string[];
+  evidenceItems?: Array<{
+    id: string;
+    gateId: string;
+    label: string;
+    status: "missing" | "provided" | "accepted" | "rejected";
+    note?: string;
+    providedByAgentId?: string;
+    updatedAt?: string;
+  }>;
   createdByAgentId?: string;
   createdAt: string;
   updatedAt: string;

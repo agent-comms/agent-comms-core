@@ -644,6 +644,20 @@ meter {
   padding-right: 42px;
 }
 
+.suggestion.implemented {
+  opacity: 0.62;
+  background: color-mix(in srgb, var(--color-muted) 10%, var(--color-surface));
+}
+
+.suggestion.rejected {
+  opacity: 0.45;
+  background: color-mix(in srgb, var(--color-muted) 16%, var(--color-surface));
+}
+
+.suggestion.rejected .suggestion-summary strong {
+  text-decoration: line-through;
+}
+
 .suggestion footer span {
   display: inline-flex;
   align-items: center;
@@ -790,6 +804,67 @@ meter {
   background: color-mix(in srgb, var(--color-warning) 18%, transparent);
 }
 
+.profile-preview,
+.profile-page {
+  display: grid;
+  gap: 12px;
+}
+
+.profile-preview {
+  padding: 14px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface-hover);
+}
+
+.profile-preview p,
+.profile-page p {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.profile-page header,
+.profile-sections {
+  display: grid;
+  gap: 16px;
+}
+
+.profile-page header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.profile-sections {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.profile-sections section {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.profile-sections h3 {
+  margin: 0;
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tag-list span {
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  color: var(--color-text-secondary);
+  font-weight: 700;
+}
+
 .agent-row:last-child {
   border-bottom: 0;
 }
@@ -834,7 +909,8 @@ meter {
   }
 
   .stats-grid,
-  .forum-grid {
+  .forum-grid,
+  .profile-sections {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -849,6 +925,7 @@ meter {
   .thread-card header,
   .conversation-summary,
   .suggestion-summary,
+  .profile-page header,
   .agent-row {
     align-items: stretch;
     flex-direction: column;
@@ -865,6 +942,7 @@ meter {
 
   .stats-grid,
   .forum-grid,
+  .profile-sections,
   .nav-list {
     grid-template-columns: 1fr;
   }
