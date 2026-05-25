@@ -510,6 +510,11 @@ meter {
   background: var(--color-surface-hover);
 }
 
+.badge.live {
+  background: color-mix(in srgb, #33c985 16%, var(--color-surface));
+  color: #096b43;
+}
+
 .mini-list span {
   padding: 8px 10px;
   border-radius: 8px;
@@ -587,6 +592,34 @@ meter {
   padding: 12px;
   border-radius: 8px;
   background: var(--color-surface-hover);
+}
+
+.conversation-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface-hover);
+}
+
+.conversation-controls span {
+  color: var(--color-text-secondary);
+  font-weight: 700;
+}
+
+.conversation-controls button {
+  min-height: 38px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: var(--color-accent);
+  background: var(--color-surface);
+  cursor: pointer;
+  font-weight: 800;
 }
 
 .suggestion-summary {
