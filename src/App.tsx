@@ -1,4 +1,5 @@
 import {
+  ArrowLeft,
   Bell,
   CheckCircle2,
   CircleDot,
@@ -14,7 +15,7 @@ import {
   UserCheck,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
 import { defaultBranding, loadDeploymentBranding } from "./branding";
 import { demoState } from "./demoState";
 import type { AgentCommsState, Forum, Thread } from "./domain";
@@ -100,26 +101,50 @@ function ThreadCard({ state, thread }: { state: AgentCommsState; thread: Thread 
   );
 }
 
-function ForumPanel({ state, forum }: { state: AgentCommsState; forum: Forum }) {
+function ForumPanel({
+  state,
+  forum,
+  onSelect,
+}: {
+  state: AgentCommsState;
+  forum: Forum;
+  onSelect?: () => void;
+}) {
   const subscribed = state.subscriptions.filter((subscription) => subscription.forumId === forum.id);
   const threads = state.threads.filter((thread) => thread.forumId === forum.id);
+  const recentThreads = byDateDesc(threads).slice(0, 3);
+  const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (!onSelect) return;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onSelect();
+    }
+  };
   return (
-    <section className="forum-panel">
+    <article
+      className={onSelect ? "forum-panel is-clickable" : "forum-panel"}
+      onClick={onSelect}
+      onKeyDown={handleKeyDown}
+      role={onSelect ? "button" : undefined}
+      tabIndex={onSelect ? 0 : undefined}
+    >
       <div>
         <h3>{forum.name}</h3>
         <p>{forum.description}</p>
       </div>
       <div className="forum-meta">
+        <span>{threads.length} threads</span>
         <span>{subscribed.length} subscribers</span>
         {forum.mandatoryForNewAgents ? <span className="badge">mandatory</span> : null}
         {forum.defaultSubscribed ? <span className="badge muted">default</span> : null}
       </div>
       <div className="mini-list">
-        {threads.map((thread) => (
+        {recentThreads.map((thread) => (
           <span key={thread.id}>{thread.title}</span>
         ))}
+        {threads.length > recentThreads.length ? <span>{threads.length - recentThreads.length} more threads</span> : null}
       </div>
-    </section>
+    </article>
   );
 }
 
@@ -168,23 +193,79 @@ function Overview({ state }: { state: AgentCommsState }) {
   );
 }
 
-function Forums({ state }: { state: AgentCommsState }) {
+function Forums({
+  state,
+  selectedForumId,
+  onSelectForum,
+  onBack,
+}: {
+  state: AgentCommsState;
+  selectedForumId: string | null;
+  onSelectForum: (forumId: string) => void;
+  onBack: () => void;
+}) {
+  const selectedForum = selectedForumId
+    ? state.forums.find((forum) => forum.id === selectedForumId)
+    : undefined;
+  const selectedThreads = selectedForum
+    ? byDateDesc(state.threads.filter((thread) => thread.forumId === selectedForum.id))
+    : [];
+  const selectedSubscribers = selectedForum
+    ? state.subscriptions.filter((subscription) => subscription.forumId === selectedForum.id).length
+    : 0;
+
+  if (selectedForum) {
+    return (
+      <div className="view-stack">
+        <div className="section-title">
+          <div>
+            <button className="back-button" type="button" onClick={onBack}>
+              <ArrowLeft aria-hidden="true" />
+              Forums
+            </button>
+            <h2>{selectedForum.name}</h2>
+          </div>
+          <button type="button" title="Open a new thread">
+            <Plus aria-hidden="true" />
+          </button>
+        </div>
+        <section className="forum-detail-summary">
+          <p>{selectedForum.description}</p>
+          <div className="forum-meta">
+            <span>{selectedThreads.length} threads</span>
+            <span>{selectedSubscribers} subscribers</span>
+            {selectedForum.mandatoryForNewAgents ? <span className="badge">mandatory</span> : null}
+            {selectedForum.defaultSubscribed ? <span className="badge muted">default</span> : null}
+          </div>
+        </section>
+        <div className="thread-list">
+          {selectedThreads.map((thread) => (
+            <ThreadCard key={thread.id} state={state} thread={thread} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="view-stack">
       <div className="section-title">
-        <h2>Forums</h2>
+        <div>
+          <h2>Forums</h2>
+          <p className="section-subtitle">Open a forum to review its full thread list.</p>
+        </div>
         <button type="button" title="Suggest a new forum">
           <Plus aria-hidden="true" />
         </button>
       </div>
       <div className="forum-grid">
         {state.forums.map((forum) => (
-          <ForumPanel key={forum.id} state={state} forum={forum} />
-        ))}
-      </div>
-      <div className="thread-list">
-        {byDateDesc(state.threads).map((thread) => (
-          <ThreadCard key={thread.id} state={state} thread={thread} />
+          <ForumPanel
+            key={forum.id}
+            state={state}
+            forum={forum}
+            onSelect={() => onSelectForum(forum.id)}
+          />
         ))}
       </div>
     </div>
@@ -310,6 +391,7 @@ export function App() {
   const [view, setView] = useState<View>("overview");
   const [state, setState] = useState<AgentCommsState>(demoState);
   const [branding, setBranding] = useState(defaultBranding);
+  const [selectedForumId, setSelectedForumId] = useState<string | null>(null);
   const [operatorToken, setOperatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [apiStatus, setApiStatus] = useState("demo data");
   const [actionStatus, setActionStatus] = useState("");
@@ -508,7 +590,14 @@ export function App() {
         </header>
         <p className="api-status">Data source: {apiStatus}{actionStatus ? `; ${actionStatus}` : ""}</p>
         {view === "overview" ? <Overview state={state} /> : null}
-        {view === "forums" ? <Forums state={state} /> : null}
+        {view === "forums" ? (
+          <Forums
+            state={state}
+            selectedForumId={selectedForumId}
+            onSelectForum={setSelectedForumId}
+            onBack={() => setSelectedForumId(null)}
+          />
+        ) : null}
         {view === "direct" ? <DirectMessages state={state} /> : null}
         {view === "suggestions" ? <Suggestions state={state} onStatus={updateSuggestionStatus} /> : null}
         {view === "onboarding" ? <Onboarding state={state} onApprove={approveAgent} /> : null}

@@ -276,6 +276,16 @@ svg {
   margin-bottom: 12px;
 }
 
+.section-title > div {
+  display: grid;
+  gap: 6px;
+}
+
+.section-subtitle {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
 .section-title h2,
 .operator-box h2,
 .thread-card h3,
@@ -367,6 +377,47 @@ meter {
 .forum-panel {
   display: grid;
   gap: 16px;
+  height: 100%;
+  transition: border-color 140ms ease, transform 140ms ease;
+}
+
+.forum-panel.is-clickable {
+  cursor: pointer;
+}
+
+.forum-panel.is-clickable:hover,
+.forum-panel.is-clickable:focus-visible {
+  border-color: var(--color-accent);
+  outline: 0;
+  transform: translateY(-1px);
+}
+
+.forum-detail-summary {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.forum-detail-summary p {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.back-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  min-height: 32px;
+  padding: 0;
+  background: transparent;
+  color: var(--color-accent);
+  cursor: pointer;
+  font-weight: 800;
 }
 
 .forum-meta,
