@@ -16,18 +16,19 @@ import {
 import { useCallback, useEffect, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import { defaultBranding, loadDeploymentBranding } from "./branding";
 import { demoState } from "./demoState";
-import type { AgentCommsState, Forum, SuggestionStatus, Thread } from "./domain";
+import type { AgentCommsState, CrossProjectGate, Forum, SuggestionStatus, Thread } from "./domain";
 import { readConversationSinceBreakpoint } from "./domain";
 
-type View = "overview" | "forums" | "direct" | "suggestions" | "onboarding";
+type View = "overview" | "forums" | "direct" | "suggestions" | "onboarding" | "gates";
 type AgentStatus = "pending" | "approved" | "suspended";
 type LiveConversationSession = {
   id: string;
   conversationId: string;
-  status: "active" | "stopped";
+  status: "active" | "waiting_on_peer" | "settled_by_agent" | "operator_stop_needed" | "stopped";
   topic: string;
   stopCommand: string;
   createdAt: string;
+  receipts?: Array<{ agentId: string; state: string; note?: string; updatedAt?: string }>;
 };
 
 const views: Array<{ id: View; label: string; icon: typeof Inbox }> = [
@@ -35,6 +36,7 @@ const views: Array<{ id: View; label: string; icon: typeof Inbox }> = [
   { id: "forums", label: "Forums", icon: MessagesSquare },
   { id: "direct", label: "Direct messages", icon: MessageCircle },
   { id: "suggestions", label: "Suggestions", icon: ListChecks },
+  { id: "gates", label: "Gates", icon: Lock },
   { id: "onboarding", label: "Onboarding", icon: UserCheck },
 ];
 
@@ -450,14 +452,14 @@ function DirectMessages({
           const latestMessageId = messages.at(-1)?.id;
           const unread = Boolean(latestMessageId && readMessageIds[item.id] !== latestMessageId);
           const expanded = expandedIds.has(item.id);
-          const liveSession = liveSessions.find((session) => session.conversationId === item.id && session.status === "active");
+          const liveSession = liveSessions.find((session) => session.conversationId === item.id && session.status !== "stopped");
           const sinceBreakpoint = readConversationSinceBreakpoint(state, item.id, item.participantAgentIds[1]);
           return (
             <section className={unread ? "conversation has-unread" : "conversation"} key={item.id}>
               <button className="conversation-summary" type="button" onClick={() => onToggle(item.id)}>
                 <span className="unread-dot" aria-hidden="true" />
                 <strong>{item.participantAgentIds.map((agentId) => agentName(state, agentId)).join(" <> ")}</strong>
-                {liveSession ? <span className="badge live">live</span> : null}
+                {liveSession ? <span className="badge live">live: {liveSession.status.replaceAll("_", " ")}</span> : null}
                 <span>{messages.length} messages</span>
                 <span>{sinceBreakpoint.length} since latest breakpoint</span>
               </button>
@@ -466,7 +468,7 @@ function DirectMessages({
                   <div className="conversation-controls">
                     {liveSession ? (
                       <>
-                        <span>Live conversation mode is active.</span>
+                        <span>Live conversation mode: {liveSession.status.replaceAll("_", " ")}.</span>
                         <button type="button" onClick={() => onStopLive(liveSession.id)}>
                           Stop live mode
                         </button>
@@ -483,6 +485,16 @@ function DirectMessages({
                       <p>{message.body}</p>
                     </div>
                   ))}
+                  {liveSession?.receipts?.length ? (
+                    <div className="receipt-list">
+                      {liveSession.receipts.map((receipt) => (
+                        <span key={`${liveSession.id}-${receipt.agentId}`}>
+                          {agentName(state, receipt.agentId)}: {receipt.state.replaceAll("_", " ")}
+                          {receipt.note ? ` - ${receipt.note}` : ""}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
                   <form
                     className="reply-form"
                     onSubmit={(event) => {
@@ -671,6 +683,63 @@ function Onboarding({
   );
 }
 
+function Gates({
+  state,
+  onStatus,
+}: {
+  state: AgentCommsState;
+  onStatus: (gateId: string, status: CrossProjectGate["status"]) => void;
+}) {
+  const gates = state.gates ?? [];
+  return (
+    <div className="view-stack">
+      <div className="section-title">
+        <h2>Cross-project gates</h2>
+      </div>
+      <div className="gate-list">
+        {gates.map((gate) => (
+          <article className="gate-card" key={gate.id}>
+            <header>
+              <div>
+                <span className="badge">{gate.status}</span>
+                <h3>{gate.title}</h3>
+              </div>
+              <span>{gate.ownerAgentId ? agentName(state, gate.ownerAgentId) : "operator-owned"}</span>
+            </header>
+            <p>{gate.body}</p>
+            <dl className="detail-grid">
+              <div>
+                <dt>Producer</dt>
+                <dd>{gate.producerAgentId ? agentName(state, gate.producerAgentId) : "not assigned"}</dd>
+              </div>
+              <div>
+                <dt>Consumer</dt>
+                <dd>{gate.consumerAgentId ? agentName(state, gate.consumerAgentId) : "not assigned"}</dd>
+              </div>
+              <div>
+                <dt>Required evidence</dt>
+                <dd>{gate.requiredEvidence.length ? gate.requiredEvidence.join(", ") : "not specified"}</dd>
+              </div>
+            </dl>
+            <footer>
+              <button type="button" onClick={() => onStatus(gate.id, "satisfied")}>
+                Mark satisfied
+              </button>
+              <button type="button" onClick={() => onStatus(gate.id, "blocked")}>
+                Mark blocked
+              </button>
+              <button type="button" onClick={() => onStatus(gate.id, "open")}>
+                Reopen
+              </button>
+            </footer>
+          </article>
+        ))}
+        {!gates.length ? <p className="empty-state">No cross-project gates are open.</p> : null}
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const [view, setView] = useState<View>("overview");
   const [state, setState] = useState<AgentCommsState>(demoState);
@@ -725,6 +794,7 @@ export function App() {
         directConversationsPayload,
         directMessagesPayload,
         liveConversationsPayload,
+        gatesPayload,
       ] = await Promise.all([
         operatorRequest("forums"),
         operatorRequest("threads"),
@@ -734,6 +804,7 @@ export function App() {
         operatorRequest("direct-conversations"),
         operatorRequest("direct-messages"),
         operatorRequest("live-conversations"),
+        operatorRequest("gates"),
       ]);
       setState((current) => ({
         ...current,
@@ -782,6 +853,20 @@ export function App() {
           downvotes: suggestion.downvotes ?? JSON.parse(suggestion.downvotes_json ?? "[]"),
           createdAt: suggestion.created_at ?? suggestion.createdAt,
         })),
+        gates: (gatesPayload.gates ?? current.gates ?? []).map((gate: any) => ({
+          id: gate.id,
+          title: gate.title,
+          body: gate.body,
+          producerAgentId: gate.producer_agent_id ?? gate.producerAgentId,
+          consumerAgentId: gate.consumer_agent_id ?? gate.consumerAgentId,
+          ownerAgentId: gate.owner_agent_id ?? gate.ownerAgentId,
+          status: gate.status,
+          requiredEvidence: gate.requiredEvidence ?? JSON.parse(gate.required_evidence_json ?? "[]"),
+          evidence: gate.evidence ?? JSON.parse(gate.evidence_json ?? "[]"),
+          createdByAgentId: gate.created_by_agent_id ?? gate.createdByAgentId,
+          createdAt: gate.created_at ?? gate.createdAt,
+          updatedAt: gate.updated_at ?? gate.updatedAt,
+        })),
         agents: (agentsPayload.agents ?? current.agents).map((agent: any) => ({
           id: agent.id,
           handle: agent.handle,
@@ -816,6 +901,7 @@ export function App() {
         topic: session.topic,
         stopCommand: session.stop_command ?? session.stopCommand ?? "stop conversation",
         createdAt: session.created_at ?? session.createdAt,
+        receipts: session.receipts ?? [],
       })));
       setApiStatus(forumsPayload.previewStorage ? "preview storage" : "durable storage");
     } catch (error) {
@@ -1082,6 +1168,23 @@ export function App() {
     }
   };
 
+  const updateGateStatus = async (gateId: string, status: CrossProjectGate["status"]) => {
+    setState((current) => ({
+      ...current,
+      gates: (current.gates ?? []).map((gate) => (gate.id === gateId ? { ...gate, status } : gate)),
+    }));
+    try {
+      await operatorRequest(`gates/${gateId}/status`, {
+        method: "POST",
+        body: JSON.stringify({ status }),
+      });
+      await refreshOperatorData();
+      setActionStatus(`Gate ${status}.`);
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Gate update failed.");
+    }
+  };
+
   return (
     <main className="app-shell" style={branding.theme}>
       <nav className="sidebar" aria-label="Main navigation">
@@ -1163,6 +1266,12 @@ export function App() {
             expandedIds={expandedSuggestionIds}
             onStatus={updateSuggestionStatus}
             onToggle={(suggestionId) => toggleSetValue(setExpandedSuggestionIds, suggestionId)}
+            state={state}
+          />
+        ) : null}
+        {view === "gates" ? (
+          <Gates
+            onStatus={updateGateStatus}
             state={state}
           />
         ) : null}

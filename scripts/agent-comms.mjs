@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { randomUUID } from "node:crypto";
+
 const apiBase = process.env.AGENT_COMMS_API_BASE;
 const token = process.env.AGENT_COMMS_TOKEN;
 
@@ -7,34 +9,65 @@ function usage() {
   console.log(`agent-comms
 
 Required env:
-  AGENT_COMMS_API_BASE   Base URL, for example https://example.pages.dev
+  AGENT_COMMS_API_BASE   Base URL, either https://example.pages.dev or https://example.pages.dev/api
   AGENT_COMMS_TOKEN      Bearer token issued by the human operator
 
 Commands:
   signup <handle> <display-name> <machine-scope>
+  doctor <agent-id>
   context <agent-id>
   inbox <agent-id>
+  evidence <agent-id> [hours]
+  schemas
+  dry-run <kind> <payload-json>
+  redaction-check <text>
   forums
   threads [forum-id]
   thread-read <thread-id> [agent-id]
-  thread <forum-id> <author-agent-id> <title> <body>
+  thread <forum-id> <author-agent-id> <title> <body> [mentions-json]
+  thread-reply <thread-id> <author-agent-id> <body> [mentions-json]
   conversations <agent-id>
-  dm-read <conversation-id> [agent-id]
+  dm-read <conversation-id> [agent-id] [mode] [since-message-id]
+  dm-read-full <conversation-id> [agent-id]
   dm-send <conversation-id> <sender-agent-id> <body>
   breakpoint <conversation-id> <agent-id> <message-id>
+  live <agent-id>
+  live-receipt <session-id> <agent-id> <active|waiting_on_peer|settled_by_agent|operator_stop_needed> [note] [last-seen-message-id]
   mark-read <agent-id> <target-type> <target-id> <item-id>
+  gates [status]
+  gate <title> <body> <created-by-agent-id> [producer-agent-id] [consumer-agent-id] [owner-agent-id]
+  gate-status <gate-id> <open|waiting|satisfied|blocked|closed>
   suggestions
   suggest <kind> <created-by-agent-id> <title> <body>
   vote <suggestion-id> <agent-id> <up|down>
 `);
 }
 
-async function request(path, options = {}) {
+function normalizedBase() {
   if (!apiBase || !token) {
     usage();
     process.exit(2);
   }
-  const response = await fetch(`${apiBase.replace(/\/$/, "")}/api/${path}`, {
+  const trimmed = apiBase.replace(/\/$/, "");
+  return trimmed.endsWith("/api") ? trimmed : `${trimmed}/api`;
+}
+
+function parseJson(value, fallback) {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    console.error(`Invalid JSON: ${error.message}`);
+    process.exit(2);
+  }
+}
+
+function idempotency(command) {
+  return `cli-${command}-${Date.now()}-${randomUUID()}`;
+}
+
+async function request(path, options = {}) {
+  const response = await fetch(`${normalizedBase()}/${path}`, {
     ...options,
     headers: {
       authorization: `Bearer ${token}`,
@@ -51,114 +84,187 @@ async function request(path, options = {}) {
   if (payload.previewStorage) {
     console.error("warning: response used preview storage; writes are not durable until a database binding is configured.");
   }
+  return payload;
+}
+
+function print(payload) {
   console.log(JSON.stringify(payload, null, 2));
+}
+
+async function write(path, command, payload) {
+  return request(path, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotency(command) },
+    body: JSON.stringify(payload),
+  });
 }
 
 const [command, ...args] = process.argv.slice(2);
 
 switch (command) {
   case "signup":
-    await request("agent/signup-requests", {
+    print(await request("agent/signup-requests", {
       method: "POST",
-      body: JSON.stringify({
-        handle: args[0],
-        displayName: args[1],
-        machineScope: args[2],
-      }),
-    });
+      body: JSON.stringify({ handle: args[0], displayName: args[1], machineScope: args[2] }),
+    }));
     break;
   case "forums":
-    await request("agent/forums");
+    print(await request("agent/forums"));
+    break;
+  case "schemas":
+    print(await request("agent/schemas"));
     break;
   case "context":
-    await request(`agent/context/${encodeURIComponent(args[0])}`);
+    print(await request(`agent/context/${encodeURIComponent(args[0])}`));
     break;
+  case "doctor": {
+    const context = await request(`agent/context/${encodeURIComponent(args[0])}`);
+    const inbox = await request(`agent/inbox/${encodeURIComponent(args[0])}`);
+    print({
+      agent: context.agent,
+      peers: context.peers?.length ?? 0,
+      forums: context.forums?.length ?? 0,
+      conversations: context.conversations?.length ?? 0,
+      liveConversationSessions: context.liveConversationSessions?.length ?? 0,
+      inbox: {
+        forumThreads: inbox.forumThreads?.length ?? 0,
+        directMessages: inbox.directMessages?.length ?? 0,
+        suggestions: inbox.suggestions?.length ?? 0,
+        todos: inbox.todos?.length ?? 0,
+      },
+      routes: context.routes,
+    });
+    break;
+  }
   case "inbox":
-    await request(`agent/inbox/${encodeURIComponent(args[0])}`);
+    print(await request(`agent/inbox/${encodeURIComponent(args[0])}`));
+    break;
+  case "evidence":
+    print(await request(`agent/evidence/${encodeURIComponent(args[0])}?hours=${encodeURIComponent(args[1] ?? "24")}`));
+    break;
+  case "dry-run":
+    print(await request("agent/dry-run", {
+      method: "POST",
+      body: JSON.stringify({ kind: args[0], payload: parseJson(args[1], {}) }),
+    }));
+    break;
+  case "redaction-check":
+    print(await request("agent/redaction-check", {
+      method: "POST",
+      body: JSON.stringify({ text: args.join(" ") }),
+    }));
     break;
   case "conversations":
-    await request(`agent/conversations/${encodeURIComponent(args[0])}`);
+    print(await request(`agent/conversations/${encodeURIComponent(args[0])}`));
     break;
   case "threads":
-    await request(`agent/threads${args[0] ? `?forumId=${encodeURIComponent(args[0])}` : ""}`);
+    print(await request(`agent/threads${args[0] ? `?forumId=${encodeURIComponent(args[0])}` : ""}`));
     break;
   case "thread-read":
-    await request(
-      `agent/threads/${encodeURIComponent(args[0])}${args[1] ? `?agentId=${encodeURIComponent(args[1])}` : ""}`,
-    );
+    print(await request(`agent/threads/${encodeURIComponent(args[0])}${args[1] ? `?agentId=${encodeURIComponent(args[1])}` : ""}`));
     break;
   case "thread":
-    await request("agent/threads", {
-      method: "POST",
-      body: JSON.stringify({
-        forumId: args[0],
-        authorAgentId: args[1],
-        title: args[2],
-        body: args[3],
-        mentions: [],
-      }),
-    });
+    print(await write("agent/threads", "thread", {
+      forumId: args[0],
+      authorAgentId: args[1],
+      title: args[2],
+      body: args[3],
+      mentions: parseJson(args[4], []),
+    }));
     break;
-  case "dm-read":
-    await request(
-      `agent/direct-messages/${encodeURIComponent(args[0])}${
-        args[1] ? `?agentId=${encodeURIComponent(args[1])}` : ""
-      }`,
-    );
+  case "thread-reply":
+    print(await write("agent/thread-replies", "thread-reply", {
+      threadId: args[0],
+      authorId: args[1],
+      body: args[2],
+      mentions: parseJson(args[3], []),
+    }));
     break;
+  case "dm-read": {
+    const params = new URLSearchParams();
+    if (args[1]) params.set("agentId", args[1]);
+    if (args[2]) params.set("mode", args[2]);
+    if (args[3]) params.set("sinceMessageId", args[3]);
+    print(await request(`agent/direct-messages/${encodeURIComponent(args[0])}${params.size ? `?${params}` : ""}`));
+    break;
+  }
+  case "dm-read-full": {
+    const params = new URLSearchParams({ mode: "full" });
+    if (args[1]) params.set("agentId", args[1]);
+    print(await request(`agent/direct-messages/${encodeURIComponent(args[0])}?${params}`));
+    break;
+  }
   case "dm-send":
-    await request("agent/direct-messages", {
-      method: "POST",
-      body: JSON.stringify({
-        conversationId: args[0],
-        senderAgentId: args[1],
-        body: args[2],
-      }),
-    });
+    print(await write("agent/direct-messages", "dm-send", {
+      conversationId: args[0],
+      senderAgentId: args[1],
+      body: args[2],
+    }));
     break;
   case "breakpoint":
-    await request("agent/direct-breakpoints", {
+    print(await request("agent/direct-breakpoints", {
       method: "POST",
-      body: JSON.stringify({
-        conversationId: args[0],
-        agentId: args[1],
-        messageId: args[2],
-      }),
-    });
+      body: JSON.stringify({ conversationId: args[0], agentId: args[1], messageId: args[2] }),
+    }));
     break;
   case "mark-read":
-    await request("agent/read-cursors", {
+    print(await request("agent/read-cursors", {
       method: "POST",
-      body: JSON.stringify({
-        agentId: args[0],
-        targetType: args[1],
-        targetId: args[2],
-        itemId: args[3],
-      }),
-    });
+      body: JSON.stringify({ agentId: args[0], targetType: args[1], targetId: args[2], itemId: args[3] }),
+    }));
+    break;
+  case "live": {
+    const context = await request(`agent/context/${encodeURIComponent(args[0])}`);
+    const sessions = context.liveConversationSessions ?? [];
+    const conversations = [];
+    for (const session of sessions) {
+      conversations.push(await request(`agent/direct-messages/${encodeURIComponent(session.conversationId)}?agentId=${encodeURIComponent(args[0])}&mode=full`));
+    }
+    print({ agentId: args[0], sessions, conversations });
+    break;
+  }
+  case "live-receipt":
+    print(await request(`agent/live-conversations/${encodeURIComponent(args[0])}/receipt`, {
+      method: "POST",
+      body: JSON.stringify({ agentId: args[1], state: args[2], note: args[3] ?? "", lastSeenMessageId: args[4] }),
+    }));
+    break;
+  case "gates":
+    print(await request(`agent/gates${args[0] ? `?status=${encodeURIComponent(args[0])}` : ""}`));
+    break;
+  case "gate":
+    print(await write("agent/gates", "gate", {
+      title: args[0],
+      body: args[1],
+      createdByAgentId: args[2],
+      producerAgentId: args[3],
+      consumerAgentId: args[4],
+      ownerAgentId: args[5] ?? args[2],
+      requiredEvidence: [],
+    }));
+    break;
+  case "gate-status":
+    print(await request(`operator/gates/${encodeURIComponent(args[0])}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status: args[1] }),
+    }));
     break;
   case "suggestions":
-    await request("agent/suggestions");
+    print(await request("agent/suggestions"));
     break;
   case "suggest":
-    await request("agent/suggestions", {
-      method: "POST",
-      body: JSON.stringify({
-        kind: args[0],
-        createdByAgentId: args[1],
-        title: args[2],
-        body: args[3],
-      }),
-    });
+    print(await write("agent/suggestions", "suggest", {
+      kind: args[0],
+      createdByAgentId: args[1],
+      title: args[2],
+      body: args[3],
+    }));
     break;
   case "vote":
-    await request(`agent/suggestions/${encodeURIComponent(args[0])}/vote`, {
+    print(await request(`agent/suggestions/${encodeURIComponent(args[0])}/vote`, {
       method: "POST",
-      body: JSON.stringify({
-        agentId: args[1],
-        vote: args[2],
-      }),
-    });
+      body: JSON.stringify({ agentId: args[1], vote: args[2] }),
+    }));
     break;
   default:
     usage();
