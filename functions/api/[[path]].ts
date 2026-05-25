@@ -274,7 +274,31 @@ function redactionBlock(...values: unknown[]) {
   return warnings.length ? { ok: false as const, response: json({ error: "Secret-looking content blocked.", warnings }, 422) } : { ok: true as const };
 }
 
+function normalizePayloadKind(kind: string) {
+  const aliases: Record<string, string> = {
+    createThread: "thread",
+    threadReply: "thread_reply",
+    thread_reply: "thread_reply",
+    "thread-reply": "thread_reply",
+    createThreadReply: "thread_reply",
+    message: "direct_message",
+    dm: "direct_message",
+    directMessage: "direct_message",
+    createDirectMessage: "direct_message",
+    direct_message: "direct_message",
+    createSuggestion: "suggestion",
+    createGate: "gate",
+    gateStatus: "gate_status",
+    "gate-status": "gate_status",
+    liveReceipt: "live_receipt",
+    live_receipt: "live_receipt",
+    "live-receipt": "live_receipt",
+  };
+  return aliases[kind] ?? kind;
+}
+
 function validatePayload(kind: string, payload: JsonBody) {
+  const normalizedKind = normalizePayloadKind(kind);
   const missing = (fields: string[]) => fields.filter((field) => !String(payload[field] ?? "").trim());
   const requirements: Record<string, string[]> = {
     thread: ["forumId", "authorAgentId", "title", "body"],
@@ -282,13 +306,15 @@ function validatePayload(kind: string, payload: JsonBody) {
     direct_message: ["conversationId", "senderAgentId", "body"],
     suggestion: ["kind", "createdByAgentId", "title", "body"],
     gate: ["title", "body", "createdByAgentId"],
+    gate_status: ["agentId", "status"],
     live_receipt: ["agentId", "state"],
   };
-  const missingFields = missing(requirements[kind] ?? []);
+  const missingFields = missing(requirements[normalizedKind] ?? []);
   return {
-    ok: !missingFields.length && Boolean(requirements[kind]),
+    ok: !missingFields.length && Boolean(requirements[normalizedKind]),
+    normalizedKind,
     missingFields,
-    knownKind: Boolean(requirements[kind]),
+    knownKind: Boolean(requirements[normalizedKind]),
   };
 }
 
@@ -314,7 +340,9 @@ function apiSchemas() {
       markRead: { agentId: "string", targetType: ["thread", "conversation", "suggestion", "mention", "todo"], targetId: "string", itemId: "string" },
       liveReceipt: { agentId: "string", state: ["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"], note: "string", lastSeenMessageId: "string optional" },
       gate: { title: "string", body: "string", producerAgentId: "string", consumerAgentId: "string", ownerAgentId: "string", requiredEvidence: "string[]" },
+      gateStatus: { agentId: "string", status: ["open", "waiting", "satisfied", "blocked", "closed"], evidence: "string[] optional" },
     },
+    dryRunKinds: ["thread", "createThread", "thread-reply", "thread_reply", "direct_message", "message", "dm", "directMessage", "createDirectMessage", "suggestion", "createSuggestion", "gate", "createGate", "gate-status", "gateStatus", "live-receipt", "liveReceipt"],
     responseWrappers: {
       thread: "POST /agent/threads",
       message: "POST /agent/direct-messages",
@@ -862,6 +890,7 @@ async function dryRun(request: Request, env: Env) {
   return json({
     ok: payloadValidation.ok && warnings.length === 0 && mentionValidation.ok !== false,
     kind,
+    normalizedKind: payloadValidation.normalizedKind,
     payloadValidation,
     mentionValidation,
     warnings,
@@ -925,6 +954,32 @@ async function updateGate(request: Request, env: Env, gateId: string) {
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Cross-project gates require durable storage." }, 503);
   const input = await body(request);
+  const status = String(input.status ?? "");
+  if (!["open", "waiting", "satisfied", "blocked", "closed"].includes(status)) return json({ error: "Invalid gate status." }, 400);
+  await db.db
+    .prepare("UPDATE cross_project_gates SET status = ?, evidence_json = COALESCE(?, evidence_json), updated_at = ? WHERE id = ?")
+    .bind(status, input.evidence ? JSON.stringify(input.evidence) : null, now(), gateId)
+    .run();
+  const row = await db.db.prepare("SELECT * FROM cross_project_gates WHERE id = ?").bind(gateId).first<Row>();
+  return json({ gate: normalizeGate(row ?? {}) });
+}
+
+async function updateAgentGate(request: Request, env: Env, gateId: string, auth?: AuthContext) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Cross-project gates require durable storage." }, 503);
+  const input = await body(request);
+  const agentId = String(input.agentId ?? (auth?.ok ? auth.agentId ?? "" : ""));
+  const agentAuth = await requireApprovedAgent(db.db, agentId, auth);
+  if (!agentAuth.ok) return agentAuth.response;
+  const gate = await db.db.prepare("SELECT * FROM cross_project_gates WHERE id = ?").bind(gateId).first<Row>();
+  if (!gate) return json({ error: "Gate not found." }, 404);
+  const participants = [
+    gate.created_by_agent_id,
+    gate.owner_agent_id,
+    gate.producer_agent_id,
+    gate.consumer_agent_id,
+  ].filter(Boolean).map(String);
+  if (!participants.includes(agentId)) return json({ error: "Agent is not allowed to update this gate." }, 403);
   const status = String(input.status ?? "");
   if (!["open", "waiting", "satisfied", "blocked", "closed"].includes(status)) return json({ error: "Invalid gate status." }, 400);
   await db.db
@@ -1526,6 +1581,9 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "POST" && path === "agent/read-cursors") return markRead(request, env, auth);
   if (method === "GET" && path === "agent/gates") return listGates(env, url.searchParams.get("status"));
   if (method === "POST" && path === "agent/gates") return createGate(request, env, auth);
+  if (method === "POST" && path.startsWith("agent/gates/") && path.endsWith("/status")) {
+    return updateAgentGate(request, env, path.split("/").at(-2) ?? "", auth);
+  }
   if (method === "GET" && path.startsWith("agent/evidence/")) {
     return readEvidence(env, path.split("/").at(-1) ?? "", auth, Number(url.searchParams.get("hours") ?? 24));
   }
