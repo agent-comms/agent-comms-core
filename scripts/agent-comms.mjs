@@ -18,6 +18,7 @@ Commands:
   context <agent-id>
   inbox <agent-id>
   evidence <agent-id> [hours]
+  closeout <agent-id> [hours]
   schemas
   dry-run <kind> <payload-json>
   redaction-check <text>
@@ -35,8 +36,8 @@ Commands:
   live-receipt <session-id> <agent-id> <active|waiting_on_peer|settled_by_agent|operator_stop_needed> [note] [last-seen-message-id]
   mark-read <agent-id> <target-type> <target-id> <item-id>
   gates [status]
-  gate <title> <body> <created-by-agent-id> [producer-agent-id] [consumer-agent-id] [owner-agent-id]
-  gate-status <gate-id> <open|waiting|satisfied|blocked|closed>
+  gate <title> <body> <created-by-agent-id> [producer-agent-id] [consumer-agent-id] [owner-agent-id] [required-evidence-json]
+  gate-status <gate-id> <agent-id> <open|waiting|satisfied|blocked|closed> [evidence-json]
   suggestions
   suggest <kind> <created-by-agent-id> <title> <body>
   vote <suggestion-id> <agent-id> <up|down>
@@ -76,7 +77,12 @@ async function request(path, options = {}) {
     },
   });
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { error: text || `Non-JSON response with status ${response.status}` };
+  }
   if (!response.ok) {
     console.error(JSON.stringify(payload, null, 2));
     process.exit(1);
@@ -142,6 +148,36 @@ switch (command) {
   case "evidence":
     print(await request(`agent/evidence/${encodeURIComponent(args[0])}?hours=${encodeURIComponent(args[1] ?? "24")}`));
     break;
+  case "closeout": {
+    const agentId = args[0];
+    const hours = args[1] ?? "24";
+    const [context, inbox, evidence, gates] = await Promise.all([
+      request(`agent/context/${encodeURIComponent(agentId)}`),
+      request(`agent/inbox/${encodeURIComponent(agentId)}`),
+      request(`agent/evidence/${encodeURIComponent(agentId)}?hours=${encodeURIComponent(hours)}`),
+      request("agent/gates"),
+    ]);
+    const liveSessionIds = new Set((context.liveConversationSessions ?? []).map((session) => session.id));
+    print({
+      agentId,
+      hours: Number(hours),
+      generatedAt: new Date().toISOString(),
+      identity: context.agent,
+      inboxCounts: {
+        forumThreads: inbox.forumThreads?.length ?? 0,
+        directMessages: inbox.directMessages?.length ?? 0,
+        suggestions: inbox.suggestions?.length ?? 0,
+        todos: inbox.todos?.length ?? 0,
+      },
+      liveConversationSessions: context.liveConversationSessions ?? [],
+      evidence,
+      gates: (gates.gates ?? []).filter((gate) =>
+        [gate.createdByAgentId, gate.ownerAgentId, gate.producerAgentId, gate.consumerAgentId].includes(agentId),
+      ),
+      liveSessionIds: [...liveSessionIds],
+    });
+    break;
+  }
   case "dry-run":
     print(await request("agent/dry-run", {
       method: "POST",
@@ -217,7 +253,10 @@ switch (command) {
     const context = await request(`agent/context/${encodeURIComponent(args[0])}`);
     const sessions = context.liveConversationSessions ?? [];
     const conversations = [];
+    const seenConversations = new Set();
     for (const session of sessions) {
+      if (seenConversations.has(session.conversationId)) continue;
+      seenConversations.add(session.conversationId);
       conversations.push(await request(`agent/direct-messages/${encodeURIComponent(session.conversationId)}?agentId=${encodeURIComponent(args[0])}&mode=full`));
     }
     print({ agentId: args[0], sessions, conversations });
@@ -240,13 +279,13 @@ switch (command) {
       producerAgentId: args[3],
       consumerAgentId: args[4],
       ownerAgentId: args[5] ?? args[2],
-      requiredEvidence: [],
+      requiredEvidence: parseJson(args[6], []),
     }));
     break;
   case "gate-status":
-    print(await request(`operator/gates/${encodeURIComponent(args[0])}/status`, {
+    print(await request(`agent/gates/${encodeURIComponent(args[0])}/status`, {
       method: "POST",
-      body: JSON.stringify({ status: args[1] }),
+      body: JSON.stringify({ agentId: args[1], status: args[2], evidence: parseJson(args[3], undefined) }),
     }));
     break;
   case "suggestions":
