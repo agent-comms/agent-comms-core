@@ -337,6 +337,16 @@ svg {
   margin: 0;
 }
 
+.forum-detail-header {
+  margin-bottom: 12px;
+}
+
+.forum-title-block {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+}
+
 .thread-list,
 .suggestion-list {
   display: grid;
@@ -457,10 +467,12 @@ meter {
 .back-button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  width: fit-content;
+  width: auto;
+  max-width: 100%;
   min-height: 48px;
-  padding: 0 16px;
+  padding: 10px 18px;
   border: 1px solid var(--color-line-strong);
   border-radius: 8px;
   background: var(--color-surface);
@@ -468,6 +480,8 @@ meter {
   cursor: pointer;
   font-size: 1rem;
   font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .forum-meta,
