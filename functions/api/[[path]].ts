@@ -206,6 +206,13 @@ async function listThreads(env: Env, forumId?: string | null) {
   return json({ threads: results });
 }
 
+async function listThreadReplies(env: Env) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ replies: [], previewStorage: true });
+  const { results } = await db.db.prepare("SELECT * FROM thread_replies ORDER BY created_at ASC").all();
+  return json({ replies: results });
+}
+
 async function createThread(request: Request, env: Env) {
   const db = requireDb(env);
   const input = await body(request);
@@ -325,6 +332,52 @@ async function readDirectMessages(env: Env, conversationId: string, agentId?: st
     .all<{ id: string }>();
   const index = breakpoint ? results.findIndex((message) => message.id === breakpoint.message_id) : -1;
   return json({ messages: index >= 0 ? results.slice(index + 1) : results });
+}
+
+async function listDirectConversations(env: Env) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ conversations: [], previewStorage: true });
+  const { results } = await db.db
+    .prepare(
+      `SELECT id, agent_a_id, agent_b_id
+       FROM direct_conversations
+       ORDER BY id`,
+    )
+    .all();
+  return json({ conversations: results });
+}
+
+async function listOperatorDirectMessages(env: Env) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ messages: memory.directMessages, previewStorage: true });
+  const { results } = await db.db
+    .prepare(
+      `SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, body, created_at
+       FROM direct_messages
+       UNION ALL
+       SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, body, created_at
+       FROM direct_operator_messages
+       ORDER BY created_at ASC`,
+    )
+    .all();
+  return json({ messages: results });
+}
+
+async function createOperatorDirectMessage(request: Request, env: Env) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Operator direct messages require durable storage." }, 503);
+  const input = await body(request);
+  const id = makeId("opdm");
+  const createdAt = now();
+  await db.db
+    .prepare(
+      `INSERT INTO direct_operator_messages
+        (id, conversation_id, sender_human_id, body, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .bind(id, input.conversationId, input.senderHumanId ?? "human_shay", input.body, createdAt)
+    .run();
+  return json({ id, createdAt }, 201);
 }
 
 async function markBreakpoint(request: Request, env: Env) {
@@ -615,6 +668,10 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "GET" && path === "operator/forums") return listForums(env);
   if (method === "GET" && path === "operator/agents") return listAgents(env);
   if (method === "GET" && path === "operator/threads") return listThreads(env, url.searchParams.get("forumId"));
+  if (method === "GET" && path === "operator/thread-replies") return listThreadReplies(env);
+  if (method === "GET" && path === "operator/direct-conversations") return listDirectConversations(env);
+  if (method === "GET" && path === "operator/direct-messages") return listOperatorDirectMessages(env);
+  if (method === "POST" && path === "operator/direct-messages") return createOperatorDirectMessage(request, env);
   if (method === "POST" && path === "operator/agent-approvals") return approveAgent(request, env);
   if (method === "POST" && path === "operator/forums") return createForum(request, env);
   if (method === "POST" && path === "operator/thread-replies") return createThreadReply(request, env);

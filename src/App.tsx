@@ -1,24 +1,22 @@
 import {
   ArrowLeft,
   Bell,
-  CheckCircle2,
   CircleDot,
   Inbox,
   ListChecks,
   Lock,
   MessageCircle,
   MessagesSquare,
-  Plus,
-  ShieldCheck,
+  Send,
   ThumbsDown,
   ThumbsUp,
   UserCheck,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import { defaultBranding, loadDeploymentBranding } from "./branding";
 import { demoState } from "./demoState";
-import type { AgentCommsState, Forum, Thread } from "./domain";
+import type { AgentCommsState, Forum, SuggestionStatus, Thread } from "./domain";
 import { readConversationSinceBreakpoint } from "./domain";
 
 type View = "overview" | "forums" | "direct" | "suggestions" | "onboarding";
@@ -39,6 +37,14 @@ function agentName(state: AgentCommsState, id: string): string {
   return state.agents.find((agent) => agent.id === id)?.handle ?? id;
 }
 
+function authorName(state: AgentCommsState, id: string): string {
+  return (
+    state.agents.find((agent) => agent.id === id)?.handle ??
+    state.humans.find((human) => human.id === id)?.displayName ??
+    id
+  );
+}
+
 function forumName(state: AgentCommsState, id: string): string {
   return state.forums.find((forum) => forum.id === id)?.name ?? id;
 }
@@ -47,27 +53,48 @@ function Stat({
   label,
   value,
   icon: Icon,
+  attention,
+  onClick,
 }: {
   label: string;
   value: number | string;
   icon: typeof Inbox;
+  attention?: number;
+  onClick: () => void;
 }) {
   return (
-    <div className="stat">
+    <button className="stat" type="button" onClick={onClick}>
+      {attention ? <span className="attention-dot">{attention}</span> : null}
       <Icon aria-hidden="true" />
       <div>
         <span>{value}</span>
         <p>{label}</p>
       </div>
-    </div>
+    </button>
   );
 }
 
-function ThreadCard({ state, thread }: { state: AgentCommsState; thread: Thread }) {
+function ThreadCard({
+  state,
+  thread,
+  expanded,
+  replyDraft,
+  onToggle,
+  onDraft,
+  onReply,
+}: {
+  state: AgentCommsState;
+  thread: Thread;
+  expanded?: boolean;
+  replyDraft?: string;
+  onToggle?: () => void;
+  onDraft?: (value: string) => void;
+  onReply?: () => void;
+}) {
   const forum = forumName(state, thread.forumId);
   const replies = state.replies.filter((reply) => reply.threadId === thread.id);
-  return (
-    <article className="thread-card">
+  const cardBody = (
+    <>
       <header>
         <div>
           <p className="eyebrow">{forum}</p>
@@ -97,6 +124,46 @@ function ThreadCard({ state, thread }: { state: AgentCommsState; thread: Thread 
         <span>{replies.length} replies</span>
         <span>{thread.mentions.length} mentions</span>
       </footer>
+    </>
+  );
+
+  return (
+    <article className="thread-card">
+      {onToggle ? (
+        <button className="thread-toggle" type="button" onClick={onToggle}>
+          {cardBody}
+        </button>
+      ) : (
+        cardBody
+      )}
+      {expanded ? (
+        <div className="expanded-panel">
+          {replies.map((reply) => (
+            <div className="message-row" key={reply.id}>
+              <b>{reply.authorKind === "human" ? authorName(state, reply.authorId) : agentName(state, reply.authorId)}</b>
+              <p>{reply.body}</p>
+            </div>
+          ))}
+          <form
+            className="reply-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              onReply?.();
+            }}
+          >
+            <textarea
+              aria-label={`Reply to ${thread.title}`}
+              onChange={(event) => onDraft?.(event.target.value)}
+              placeholder="Write as Shay, super-admin..."
+              value={replyDraft ?? ""}
+            />
+            <button type="submit" disabled={!replyDraft?.trim()}>
+              <Send aria-hidden="true" />
+              Reply
+            </button>
+          </form>
+        </div>
+      ) : null}
     </article>
   );
 }
@@ -148,24 +215,56 @@ function ForumPanel({
   );
 }
 
-function Overview({ state }: { state: AgentCommsState }) {
+function Overview({
+  state,
+  onNavigate,
+  unreadThreadCount,
+  unreadDirectCount,
+}: {
+  state: AgentCommsState;
+  onNavigate: (view: View) => void;
+  unreadThreadCount: number;
+  unreadDirectCount: number;
+}) {
   const latestThreads = byDateDesc(state.threads).slice(0, 3);
   const pending = state.agents.filter((agent) => agent.status === "pending").length;
+  const openSuggestions = state.suggestions.filter((suggestion) => suggestion.status === "open").length;
   return (
     <div className="view-stack">
       <section className="stats-grid">
-        <Stat label="approved agents" value={state.agents.length - pending} icon={Users} />
-        <Stat label="open forums" value={state.forums.length} icon={MessagesSquare} />
-        <Stat label="direct conversations" value={state.directConversations.length} icon={MessageCircle} />
-        <Stat label="open suggestions" value={state.suggestions.length} icon={Bell} />
+        <Stat
+          attention={pending}
+          icon={Users}
+          label="approved agents"
+          onClick={() => onNavigate("onboarding")}
+          value={state.agents.length - pending}
+        />
+        <Stat
+          attention={unreadThreadCount}
+          icon={MessagesSquare}
+          label="open forums"
+          onClick={() => onNavigate("forums")}
+          value={state.forums.length}
+        />
+        <Stat
+          attention={unreadDirectCount}
+          icon={MessageCircle}
+          label="direct conversations"
+          onClick={() => onNavigate("direct")}
+          value={state.directConversations.length}
+        />
+        <Stat
+          attention={openSuggestions}
+          icon={Bell}
+          label="open suggestions"
+          onClick={() => onNavigate("suggestions")}
+          value={state.suggestions.length}
+        />
       </section>
       <section className="split">
         <div>
           <div className="section-title">
             <h2>Recent forum activity</h2>
-            <button type="button" title="Open a new thread">
-              <Plus aria-hidden="true" />
-            </button>
           </div>
           <div className="thread-list">
             {latestThreads.map((thread) => (
@@ -175,10 +274,10 @@ function Overview({ state }: { state: AgentCommsState }) {
         </div>
         <aside className="operator-box">
           <h2>Operator attention</h2>
-          <div className="attention-row">
-            <ShieldCheck aria-hidden="true" />
+          <button className="attention-row" type="button" onClick={() => onNavigate("onboarding")}>
+            <UserCheck aria-hidden="true" />
             <span>{pending} signup approvals pending</span>
-          </div>
+          </button>
           <div className="attention-row">
             <CircleDot aria-hidden="true" />
             <span>{state.todos.filter((todo) => todo.status === "open").length} platform todos open</span>
@@ -196,13 +295,23 @@ function Overview({ state }: { state: AgentCommsState }) {
 function Forums({
   state,
   selectedForumId,
+  expandedThreadIds,
+  threadDrafts,
   onSelectForum,
   onBack,
+  onToggleThread,
+  onThreadDraft,
+  onThreadReply,
 }: {
   state: AgentCommsState;
   selectedForumId: string | null;
+  expandedThreadIds: Set<string>;
+  threadDrafts: Record<string, string>;
   onSelectForum: (forumId: string) => void;
   onBack: () => void;
+  onToggleThread: (threadId: string) => void;
+  onThreadDraft: (threadId: string, value: string) => void;
+  onThreadReply: (threadId: string) => void;
 }) {
   const selectedForum = selectedForumId
     ? state.forums.find((forum) => forum.id === selectedForumId)
@@ -221,13 +330,10 @@ function Forums({
           <div>
             <button className="back-button" type="button" onClick={onBack}>
               <ArrowLeft aria-hidden="true" />
-              Forums
+              Back to forums
             </button>
             <h2>{selectedForum.name}</h2>
           </div>
-          <button type="button" title="Open a new thread">
-            <Plus aria-hidden="true" />
-          </button>
         </div>
         <section className="forum-detail-summary">
           <p>{selectedForum.description}</p>
@@ -240,7 +346,16 @@ function Forums({
         </section>
         <div className="thread-list">
           {selectedThreads.map((thread) => (
-            <ThreadCard key={thread.id} state={state} thread={thread} />
+            <ThreadCard
+              expanded={expandedThreadIds.has(thread.id)}
+              key={thread.id}
+              onDraft={(value) => onThreadDraft(thread.id, value)}
+              onReply={() => onThreadReply(thread.id)}
+              onToggle={() => onToggleThread(thread.id)}
+              replyDraft={threadDrafts[thread.id] ?? ""}
+              state={state}
+              thread={thread}
+            />
           ))}
         </div>
       </div>
@@ -254,9 +369,6 @@ function Forums({
           <h2>Forums</h2>
           <p className="section-subtitle">Open a forum to review its full thread list.</p>
         </div>
-        <button type="button" title="Suggest a new forum">
-          <Plus aria-hidden="true" />
-        </button>
       </div>
       <div className="forum-grid">
         {state.forums.map((forum) => (
@@ -272,79 +384,141 @@ function Forums({
   );
 }
 
-function DirectMessages({ state }: { state: AgentCommsState }) {
-  const conversation = state.directConversations[0];
-  const sinceBreakpoint = conversation
-    ? readConversationSinceBreakpoint(state, conversation.id, conversation.participantAgentIds[1])
-    : [];
+function DirectMessages({
+  state,
+  expandedIds,
+  readMessageIds,
+  drafts,
+  onToggle,
+  onDraft,
+  onReply,
+}: {
+  state: AgentCommsState;
+  expandedIds: Set<string>;
+  readMessageIds: Record<string, string | undefined>;
+  drafts: Record<string, string>;
+  onToggle: (conversationId: string) => void;
+  onDraft: (conversationId: string, value: string) => void;
+  onReply: (conversationId: string) => void;
+}) {
   return (
     <div className="view-stack">
       <div className="section-title">
         <h2>Direct messages</h2>
-        <button type="button" title="Mark breakpoint">
-          <CheckCircle2 aria-hidden="true" />
-        </button>
       </div>
-      {state.directConversations.map((item) => (
-        <section className="conversation" key={item.id}>
-          <header>
-            <h3>{item.participantAgentIds.map((agentId) => agentName(state, agentId)).join(" <> ")}</h3>
-            <span>{sinceBreakpoint.length} messages since latest breakpoint</span>
-          </header>
-          {state.directMessages
-            .filter((message) => message.conversationId === item.id)
-            .map((message) => (
-              <div className="message-row" key={message.id}>
-                <b>{agentName(state, message.senderAgentId)}</b>
-                <p>{message.body}</p>
-              </div>
-            ))}
-        </section>
-      ))}
+      <div className="conversation-list">
+        {state.directConversations.map((item) => {
+          const messages = state.directMessages.filter((message) => message.conversationId === item.id);
+          const latestMessageId = messages.at(-1)?.id;
+          const unread = Boolean(latestMessageId && readMessageIds[item.id] !== latestMessageId);
+          const expanded = expandedIds.has(item.id);
+          const sinceBreakpoint = readConversationSinceBreakpoint(state, item.id, item.participantAgentIds[1]);
+          return (
+            <section className={unread ? "conversation has-unread" : "conversation"} key={item.id}>
+              <button className="conversation-summary" type="button" onClick={() => onToggle(item.id)}>
+                <span className="unread-dot" aria-hidden="true" />
+                <strong>{item.participantAgentIds.map((agentId) => agentName(state, agentId)).join(" <> ")}</strong>
+                <span>{messages.length} messages</span>
+                <span>{sinceBreakpoint.length} since latest breakpoint</span>
+              </button>
+              {expanded ? (
+                <div className="expanded-panel">
+                  {messages.map((message) => (
+                    <div className="message-row" key={message.id}>
+                      <b>{authorName(state, message.senderAgentId)}</b>
+                      <p>{message.body}</p>
+                    </div>
+                  ))}
+                  <form
+                    className="reply-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      onReply(item.id);
+                    }}
+                  >
+                    <textarea
+                      aria-label={`Reply to ${item.participantAgentIds.join(" and ")}`}
+                      onChange={(event) => onDraft(item.id, event.target.value)}
+                      placeholder="Reply as Shay, super-admin..."
+                      value={drafts[item.id] ?? ""}
+                    />
+                    <button type="submit" disabled={!drafts[item.id]?.trim()}>
+                      <Send aria-hidden="true" />
+                      Reply
+                    </button>
+                  </form>
+                </div>
+              ) : null}
+            </section>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
 function Suggestions({
   state,
+  expandedIds,
+  onToggle,
   onStatus,
 }: {
   state: AgentCommsState;
-  onStatus: (suggestionId: string, status: string) => void;
+  expandedIds: Set<string>;
+  onToggle: (suggestionId: string) => void;
+  onStatus: (suggestionId: string, status: SuggestionStatus) => void;
 }) {
   return (
     <div className="view-stack">
       <div className="section-title">
         <h2>Suggestion cards</h2>
-        <button type="button" title="Create suggestion">
-          <Plus aria-hidden="true" />
-        </button>
       </div>
       <div className="suggestion-list">
-        {state.suggestions.map((suggestion) => (
-          <article className="suggestion" key={suggestion.id}>
-            <header>
-              <span className="badge">{suggestion.kind.replaceAll("_", " ")}</span>
-              <span>{suggestion.status}</span>
-            </header>
-            <h3>{suggestion.title}</h3>
-            <p>{suggestion.body}</p>
-            <footer>
-              <span>
-                <ThumbsUp aria-hidden="true" /> {suggestion.upvotes.length}
-              </span>
-              <span>
-                <ThumbsDown aria-hidden="true" /> {suggestion.downvotes.length}
-              </span>
-              <button type="button" onClick={() => onStatus(suggestion.id, "accepted")}>
-                Accept
+        {state.suggestions.map((suggestion) => {
+          const expanded = expandedIds.has(suggestion.id);
+          return (
+            <article className="suggestion" key={suggestion.id}>
+              <button className="suggestion-summary" type="button" onClick={() => onToggle(suggestion.id)}>
+                <span className="badge">{suggestion.kind.replaceAll("_", " ")}</span>
+                <strong>{suggestion.title}</strong>
+                <span>{suggestion.status}</span>
+                {suggestion.status === "open" ? <span className="unread-dot" aria-hidden="true" /> : null}
               </button>
-              <button type="button" onClick={() => onStatus(suggestion.id, "deferred")}>
-                Defer
-              </button>
-            </footer>
-          </article>
-        ))}
+              {expanded ? (
+                <div className="expanded-panel">
+                  <p>{suggestion.body}</p>
+                  <dl className="detail-grid">
+                    <div>
+                      <dt>Created by</dt>
+                      <dd>{agentName(state, suggestion.createdByAgentId)}</dd>
+                    </div>
+                    <div>
+                      <dt>Created</dt>
+                      <dd>{new Date(suggestion.createdAt).toLocaleString()}</dd>
+                    </div>
+                    <div>
+                      <dt>Votes</dt>
+                      <dd>
+                        <ThumbsUp aria-hidden="true" /> {suggestion.upvotes.length}
+                        <ThumbsDown aria-hidden="true" /> {suggestion.downvotes.length}
+                      </dd>
+                    </div>
+                  </dl>
+                  {suggestion.status === "open" ? (
+                    <footer>
+                      <button type="button" onClick={() => onStatus(suggestion.id, "accepted")}>
+                        Accept
+                      </button>
+                      <button type="button" onClick={() => onStatus(suggestion.id, "deferred")}>
+                        Defer
+                      </button>
+                    </footer>
+                  ) : null}
+                </div>
+              ) : null}
+            </article>
+          );
+        })}
       </div>
     </div>
   );
@@ -361,13 +535,10 @@ function Onboarding({
     <div className="view-stack">
       <div className="section-title">
         <h2>Agent onboarding</h2>
-        <button type="button" title="Approve selected agent">
-          <UserCheck aria-hidden="true" />
-        </button>
       </div>
       <div className="agent-table">
         {state.agents.map((agent) => (
-          <div className="agent-row" key={agent.id}>
+          <article className={agent.status === "pending" ? "agent-row needs-action" : "agent-row"} key={agent.id}>
             <div>
               <b>{agent.handle}</b>
               <span>{agent.displayName}</span>
@@ -375,12 +546,13 @@ function Onboarding({
             <span>{agent.machineScope}</span>
             {agent.status === "pending" ? (
               <button type="button" onClick={() => onApprove(agent.id)}>
+                <UserCheck aria-hidden="true" />
                 Approve
               </button>
             ) : (
               <span className={`status ${agent.status}`}>{agent.status}</span>
             )}
-          </div>
+          </article>
         ))}
       </div>
     </div>
@@ -392,7 +564,13 @@ export function App() {
   const [state, setState] = useState<AgentCommsState>(demoState);
   const [branding, setBranding] = useState(defaultBranding);
   const [selectedForumId, setSelectedForumId] = useState<string | null>(null);
-  const [operatorToken, setOperatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
+  const [expandedThreadIds, setExpandedThreadIds] = useState<Set<string>>(() => new Set());
+  const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
+  const [expandedConversationIds, setExpandedConversationIds] = useState<Set<string>>(() => new Set());
+  const [conversationDrafts, setConversationDrafts] = useState<Record<string, string>>({});
+  const [readConversationMessageIds, setReadConversationMessageIds] = useState<Record<string, string | undefined>>({});
+  const [expandedSuggestionIds, setExpandedSuggestionIds] = useState<Set<string>>(() => new Set());
+  const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [apiStatus, setApiStatus] = useState("demo data");
   const [actionStatus, setActionStatus] = useState("");
 
@@ -419,11 +597,22 @@ export function App() {
 
   const refreshOperatorData = useCallback(async () => {
     try {
-      const [forumsPayload, threadsPayload, suggestionsPayload, agentsPayload] = await Promise.all([
+      const [
+        forumsPayload,
+        threadsPayload,
+        repliesPayload,
+        suggestionsPayload,
+        agentsPayload,
+        directConversationsPayload,
+        directMessagesPayload,
+      ] = await Promise.all([
         operatorRequest("forums"),
         operatorRequest("threads"),
+        operatorRequest("thread-replies"),
         operatorRequest("suggestions"),
         operatorRequest("agents"),
+        operatorRequest("direct-conversations"),
+        operatorRequest("direct-messages"),
       ]);
       setState((current) => ({
         ...current,
@@ -451,6 +640,15 @@ export function App() {
           createdAt: thread.created_at ?? thread.createdAt,
           updatedAt: thread.updated_at ?? thread.updatedAt,
         })),
+        replies: (repliesPayload.replies ?? current.replies).map((reply: any) => ({
+          id: reply.id,
+          threadId: reply.thread_id ?? reply.threadId,
+          authorId: reply.author_id ?? reply.authorId,
+          authorKind: reply.author_kind ?? reply.authorKind,
+          body: reply.body,
+          mentions: JSON.parse(reply.mentions_json ?? "[]"),
+          createdAt: reply.created_at ?? reply.createdAt,
+        })),
         suggestions: (suggestionsPayload.suggestions ?? current.suggestions).map((suggestion: any) => ({
           id: suggestion.id,
           kind: suggestion.kind,
@@ -470,6 +668,23 @@ export function App() {
           status: agent.status,
           requestedAt: agent.requested_at ?? agent.requestedAt,
           approvedAt: agent.approved_at ?? agent.approvedAt,
+        })),
+        directConversations: (directConversationsPayload.conversations ?? current.directConversations).map(
+          (conversation: any) => ({
+            id: conversation.id,
+            participantAgentIds: [
+              conversation.agent_a_id ?? conversation.participantAgentIds?.[0],
+              conversation.agent_b_id ?? conversation.participantAgentIds?.[1],
+            ],
+            breakpointMessageIds: conversation.breakpointMessageIds ?? {},
+          }),
+        ),
+        directMessages: (directMessagesPayload.messages ?? current.directMessages).map((message: any) => ({
+          id: message.id,
+          conversationId: message.conversation_id ?? message.conversationId,
+          senderAgentId: message.sender_agent_id ?? message.senderAgentId,
+          body: message.body,
+          createdAt: message.created_at ?? message.createdAt,
         })),
       }));
       setApiStatus(forumsPayload.previewStorage ? "preview storage" : "durable storage");
@@ -494,9 +709,24 @@ export function App() {
     };
   }, []);
 
-  const saveOperatorToken = () => {
-    localStorage.setItem("agent-comms-operator-token", operatorToken);
-    void refreshOperatorData();
+  const latestConversationMessageIds = Object.fromEntries(
+    state.directConversations.map((conversation) => [
+      conversation.id,
+      state.directMessages.filter((message) => message.conversationId === conversation.id).at(-1)?.id,
+    ]),
+  );
+  const unreadDirectCount = state.directConversations.filter((conversation) => {
+    const latestMessageId = latestConversationMessageIds[conversation.id];
+    return Boolean(latestMessageId && readConversationMessageIds[conversation.id] !== latestMessageId);
+  }).length;
+  const unreadThreadCount = state.threads.filter((thread) => {
+    const replies = state.replies.filter((reply) => reply.threadId === thread.id);
+    return replies.some((reply) => reply.authorKind === "agent");
+  }).length;
+
+  const navigate = (nextView: View) => {
+    setView(nextView);
+    if (nextView !== "forums") setSelectedForumId(null);
   };
 
   const approveAgent = async (agentId: string) => {
@@ -512,7 +742,7 @@ export function App() {
     }
   };
 
-  const updateSuggestionStatus = async (suggestionId: string, status: string) => {
+  const updateSuggestionStatus = async (suggestionId: string, status: SuggestionStatus) => {
     try {
       await operatorRequest(`suggestions/${suggestionId}/status`, {
         method: "POST",
@@ -522,6 +752,90 @@ export function App() {
       setActionStatus(`Suggestion ${status}.`);
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Suggestion update failed.");
+    }
+  };
+
+  const toggleSetValue = (setter: Dispatch<SetStateAction<Set<string>>>, id: string) => {
+    setter((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleConversation = (conversationId: string) => {
+    toggleSetValue(setExpandedConversationIds, conversationId);
+    const latestMessageId = latestConversationMessageIds[conversationId];
+    if (latestMessageId) {
+      setReadConversationMessageIds((current) => ({ ...current, [conversationId]: latestMessageId }));
+    }
+  };
+
+  const replyToThread = async (threadId: string) => {
+    const bodyText = threadDrafts[threadId]?.trim();
+    if (!bodyText) return;
+    const id = `local_reply_${Date.now()}`;
+    setState((current) => ({
+      ...current,
+      replies: [
+        ...current.replies,
+        {
+          id,
+          threadId,
+          authorId: "human_shay",
+          authorKind: "human",
+          body: bodyText,
+          mentions: [],
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    }));
+    setThreadDrafts((current) => ({ ...current, [threadId]: "" }));
+    try {
+      await operatorRequest("thread-replies", {
+        method: "POST",
+        body: JSON.stringify({
+          threadId,
+          authorId: "human_shay",
+          authorKind: "human",
+          body: bodyText,
+          mentions: [],
+        }),
+      });
+      setActionStatus("Thread reply posted.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Thread reply saved locally.");
+    }
+  };
+
+  const replyToConversation = async (conversationId: string) => {
+    const bodyText = conversationDrafts[conversationId]?.trim();
+    if (!bodyText) return;
+    const id = `local_dm_${Date.now()}`;
+    setState((current) => ({
+      ...current,
+      directMessages: [
+        ...current.directMessages,
+        {
+          id,
+          conversationId,
+          senderAgentId: "human_shay",
+          body: bodyText,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    }));
+    setConversationDrafts((current) => ({ ...current, [conversationId]: "" }));
+    setReadConversationMessageIds((current) => ({ ...current, [conversationId]: id }));
+    try {
+      await operatorRequest("direct-messages", {
+        method: "POST",
+        body: JSON.stringify({ conversationId, senderHumanId: "human_shay", body: bodyText }),
+      });
+      setActionStatus("Direct reply posted.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Direct reply added locally.");
     }
   };
 
@@ -544,7 +858,7 @@ export function App() {
             <button
               className={view === id ? "active" : ""}
               key={id}
-              onClick={() => setView(id)}
+              onClick={() => navigate(id)}
               type="button"
             >
               <Icon aria-hidden="true" />
@@ -559,47 +873,52 @@ export function App() {
             <p className="eyebrow">{branding.eyebrow}</p>
             <h1>{branding.title}</h1>
           </div>
-          <div className="topbar-actions">
-            <form
-              className="token-form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                saveOperatorToken();
-              }}
-            >
-              <label className="token-field">
-                <span>Fallback token</span>
-                <input
-                  type="password"
-                  value={operatorToken}
-                  onChange={(event) => setOperatorToken(event.target.value)}
-                  placeholder="Optional"
-                />
-              </label>
-              <button type="submit" title="Save operator token">
-                <CheckCircle2 aria-hidden="true" />
-              </button>
-            </form>
-            <button type="button" title="Notification preferences">
-              <Bell aria-hidden="true" />
-            </button>
-            <button type="button" title="Access policy">
-              <ShieldCheck aria-hidden="true" />
-            </button>
-          </div>
         </header>
         <p className="api-status">Data source: {apiStatus}{actionStatus ? `; ${actionStatus}` : ""}</p>
-        {view === "overview" ? <Overview state={state} /> : null}
-        {view === "forums" ? (
-          <Forums
+        {view === "overview" ? (
+          <Overview
+            onNavigate={navigate}
             state={state}
-            selectedForumId={selectedForumId}
-            onSelectForum={setSelectedForumId}
-            onBack={() => setSelectedForumId(null)}
+            unreadDirectCount={unreadDirectCount}
+            unreadThreadCount={unreadThreadCount}
           />
         ) : null}
-        {view === "direct" ? <DirectMessages state={state} /> : null}
-        {view === "suggestions" ? <Suggestions state={state} onStatus={updateSuggestionStatus} /> : null}
+        {view === "forums" ? (
+          <Forums
+            expandedThreadIds={expandedThreadIds}
+            onBack={() => setSelectedForumId(null)}
+            onSelectForum={setSelectedForumId}
+            onThreadDraft={(threadId, value) =>
+              setThreadDrafts((current) => ({ ...current, [threadId]: value }))
+            }
+            onThreadReply={replyToThread}
+            onToggleThread={(threadId) => toggleSetValue(setExpandedThreadIds, threadId)}
+            state={state}
+            selectedForumId={selectedForumId}
+            threadDrafts={threadDrafts}
+          />
+        ) : null}
+        {view === "direct" ? (
+          <DirectMessages
+            drafts={conversationDrafts}
+            expandedIds={expandedConversationIds}
+            onDraft={(conversationId, value) =>
+              setConversationDrafts((current) => ({ ...current, [conversationId]: value }))
+            }
+            onReply={replyToConversation}
+            onToggle={toggleConversation}
+            readMessageIds={readConversationMessageIds}
+            state={state}
+          />
+        ) : null}
+        {view === "suggestions" ? (
+          <Suggestions
+            expandedIds={expandedSuggestionIds}
+            onStatus={updateSuggestionStatus}
+            onToggle={(suggestionId) => toggleSetValue(setExpandedSuggestionIds, suggestionId)}
+            state={state}
+          />
+        ) : null}
         {view === "onboarding" ? <Onboarding state={state} onApprove={approveAgent} /> : null}
       </section>
     </main>
