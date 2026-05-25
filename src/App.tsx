@@ -14,7 +14,7 @@ import {
   UserCheck,
   Users,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { demoState } from "./demoState";
 import type { AgentCommsState, Forum, Thread } from "./domain";
 import { readConversationSinceBreakpoint } from "./domain";
@@ -223,7 +223,13 @@ function DirectMessages({ state }: { state: AgentCommsState }) {
   );
 }
 
-function Suggestions({ state }: { state: AgentCommsState }) {
+function Suggestions({
+  state,
+  onStatus,
+}: {
+  state: AgentCommsState;
+  onStatus: (suggestionId: string, status: string) => void;
+}) {
   return (
     <div className="view-stack">
       <div className="section-title">
@@ -248,6 +254,12 @@ function Suggestions({ state }: { state: AgentCommsState }) {
               <span>
                 <ThumbsDown aria-hidden="true" /> {suggestion.downvotes.length}
               </span>
+              <button type="button" onClick={() => onStatus(suggestion.id, "accepted")}>
+                Accept
+              </button>
+              <button type="button" onClick={() => onStatus(suggestion.id, "deferred")}>
+                Defer
+              </button>
             </footer>
           </article>
         ))}
@@ -256,7 +268,13 @@ function Suggestions({ state }: { state: AgentCommsState }) {
   );
 }
 
-function Onboarding({ state }: { state: AgentCommsState }) {
+function Onboarding({
+  state,
+  onApprove,
+}: {
+  state: AgentCommsState;
+  onApprove: (agentId: string) => void;
+}) {
   return (
     <div className="view-stack">
       <div className="section-title">
@@ -273,7 +291,13 @@ function Onboarding({ state }: { state: AgentCommsState }) {
               <span>{agent.displayName}</span>
             </div>
             <span>{agent.machineScope}</span>
-            <span className={`status ${agent.status}`}>{agent.status}</span>
+            {agent.status === "pending" ? (
+              <button type="button" onClick={() => onApprove(agent.id)}>
+                Approve
+              </button>
+            ) : (
+              <span className={`status ${agent.status}`}>{agent.status}</span>
+            )}
           </div>
         ))}
       </div>
@@ -283,7 +307,114 @@ function Onboarding({ state }: { state: AgentCommsState }) {
 
 export function App() {
   const [view, setView] = useState<View>("overview");
-  const state = useMemo(() => demoState, []);
+  const [state, setState] = useState<AgentCommsState>(demoState);
+  const [operatorToken, setOperatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
+  const [apiStatus, setApiStatus] = useState("demo data");
+
+  const operatorRequest = useCallback(
+    async (path: string, options: RequestInit = {}) => {
+      if (!operatorToken) throw new Error("Operator token is not configured.");
+      const response = await fetch(`/api/operator/${path}`, {
+        ...options,
+        headers: {
+          authorization: `Bearer ${operatorToken}`,
+          "content-type": "application/json",
+          ...(options.headers ?? {}),
+        },
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Operator request failed.");
+      return payload;
+    },
+    [operatorToken],
+  );
+
+  const refreshOperatorData = useCallback(async () => {
+    if (!operatorToken) return;
+    try {
+      const [forumsPayload, threadsPayload, suggestionsPayload, agentsPayload] = await Promise.all([
+        operatorRequest("forums"),
+        operatorRequest("threads"),
+        operatorRequest("suggestions"),
+        operatorRequest("agents"),
+      ]);
+      setState((current) => ({
+        ...current,
+        forums: (forumsPayload.forums ?? current.forums).map((forum: any) => ({
+          id: forum.id,
+          slug: forum.slug,
+          name: forum.name,
+          description: forum.description,
+          defaultSubscribed: Boolean(forum.default_subscribed ?? forum.defaultSubscribed),
+          mandatoryForNewAgents: Boolean(forum.mandatory_for_new_agents ?? forum.mandatoryForNewAgents),
+          allowedAgentIds: forum.allowed_agent_ids_json
+            ? JSON.parse(forum.allowed_agent_ids_json)
+            : forum.allowedAgentIds,
+          permanentSubscriberIds: forum.permanent_subscriber_ids_json
+            ? JSON.parse(forum.permanent_subscriber_ids_json)
+            : (forum.permanentSubscriberIds ?? []),
+        })),
+        threads: (threadsPayload.threads ?? current.threads).map((thread: any) => ({
+          id: thread.id,
+          forumId: thread.forum_id ?? thread.forumId,
+          authorAgentId: thread.author_agent_id ?? thread.authorAgentId,
+          title: thread.title,
+          body: thread.body,
+          mentions: JSON.parse(thread.mentions_json ?? "[]"),
+          createdAt: thread.created_at ?? thread.createdAt,
+          updatedAt: thread.updated_at ?? thread.updatedAt,
+        })),
+        suggestions: (suggestionsPayload.suggestions ?? current.suggestions).map((suggestion: any) => ({
+          id: suggestion.id,
+          kind: suggestion.kind,
+          title: suggestion.title,
+          body: suggestion.body,
+          createdByAgentId: suggestion.created_by_agent_id ?? suggestion.createdByAgentId,
+          status: suggestion.status,
+          upvotes: JSON.parse(suggestion.upvotes_json ?? "[]"),
+          downvotes: JSON.parse(suggestion.downvotes_json ?? "[]"),
+          createdAt: suggestion.created_at ?? suggestion.createdAt,
+        })),
+        agents: (agentsPayload.agents ?? current.agents).map((agent: any) => ({
+          id: agent.id,
+          handle: agent.handle,
+          displayName: agent.display_name ?? agent.displayName,
+          machineScope: agent.machine_scope ?? agent.machineScope,
+          status: agent.status,
+          requestedAt: agent.requested_at ?? agent.requestedAt,
+          approvedAt: agent.approved_at ?? agent.approvedAt,
+        })),
+      }));
+      setApiStatus(forumsPayload.previewStorage ? "preview storage" : "durable storage");
+    } catch (error) {
+      setApiStatus(error instanceof Error ? error.message : "operator API unavailable");
+    }
+  }, [operatorRequest, operatorToken]);
+
+  useEffect(() => {
+    void refreshOperatorData();
+  }, [refreshOperatorData]);
+
+  const saveOperatorToken = () => {
+    localStorage.setItem("agent-comms-operator-token", operatorToken);
+    void refreshOperatorData();
+  };
+
+  const approveAgent = async (agentId: string) => {
+    await operatorRequest("agent-approvals", {
+      method: "POST",
+      body: JSON.stringify({ agentId }),
+    });
+    await refreshOperatorData();
+  };
+
+  const updateSuggestionStatus = async (suggestionId: string, status: string) => {
+    await operatorRequest(`suggestions/${suggestionId}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status }),
+    });
+    await refreshOperatorData();
+  };
 
   return (
     <main className="app-shell">
@@ -316,6 +447,26 @@ export function App() {
             <h1>All agent coordination in one reviewable place</h1>
           </div>
           <div className="topbar-actions">
+            <form
+              className="token-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                saveOperatorToken();
+              }}
+            >
+              <label className="token-field">
+                <span>Operator token</span>
+                <input
+                  type="password"
+                  value={operatorToken}
+                  onChange={(event) => setOperatorToken(event.target.value)}
+                  placeholder="Paste token"
+                />
+              </label>
+              <button type="submit" title="Save operator token">
+                <CheckCircle2 aria-hidden="true" />
+              </button>
+            </form>
             <button type="button" title="Notification preferences">
               <Bell aria-hidden="true" />
             </button>
@@ -324,11 +475,12 @@ export function App() {
             </button>
           </div>
         </header>
+        <p className="api-status">Data source: {apiStatus}</p>
         {view === "overview" ? <Overview state={state} /> : null}
         {view === "forums" ? <Forums state={state} /> : null}
         {view === "direct" ? <DirectMessages state={state} /> : null}
-        {view === "suggestions" ? <Suggestions state={state} /> : null}
-        {view === "onboarding" ? <Onboarding state={state} /> : null}
+        {view === "suggestions" ? <Suggestions state={state} onStatus={updateSuggestionStatus} /> : null}
+        {view === "onboarding" ? <Onboarding state={state} onApprove={approveAgent} /> : null}
       </section>
     </main>
   );

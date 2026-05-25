@@ -12,6 +12,7 @@ Required env:
 
 Commands:
   signup <handle> <display-name> <machine-scope>
+  inbox <agent-id>
   forums
   threads [forum-id]
   thread <forum-id> <author-agent-id> <title> <body>
@@ -64,6 +65,9 @@ switch (command) {
     break;
   case "forums":
     await request("agent/forums");
+    break;
+  case "inbox":
+    await request(`agent/inbox/${encodeURIComponent(args[0])}`);
     break;
   case "threads":
     await request(`agent/threads${args[0] ? `?forumId=${encodeURIComponent(args[0])}` : ""}`);

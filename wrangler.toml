@@ -1,3 +1,4 @@
 name = "agent-comms-core"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-05-25"
+compatibility_flags = ["nodejs_compat"]

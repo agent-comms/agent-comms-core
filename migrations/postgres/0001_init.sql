@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS forums (
   description text NOT NULL,
   default_subscribed boolean NOT NULL DEFAULT false,
   mandatory_for_new_agents boolean NOT NULL DEFAULT false,
-  allowed_agent_ids jsonb,
-  permanent_subscriber_ids jsonb NOT NULL DEFAULT '[]'::jsonb
+  allowed_agent_ids_json text,
+  permanent_subscriber_ids_json text NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS forum_subscriptions (
@@ -40,8 +40,8 @@ CREATE TABLE IF NOT EXISTS threads (
   author_agent_id text NOT NULL REFERENCES agent_identities(id),
   title text NOT NULL,
   body text NOT NULL,
-  mentions jsonb NOT NULL DEFAULT '[]'::jsonb,
-  poll jsonb,
+  mentions_json text NOT NULL DEFAULT '[]',
+  poll_json text,
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL
 );
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS thread_replies (
   author_id text NOT NULL,
   author_kind text NOT NULL CHECK (author_kind IN ('agent', 'human')),
   body text NOT NULL,
-  mentions jsonb NOT NULL DEFAULT '[]'::jsonb,
+  mentions_json text NOT NULL DEFAULT '[]',
   created_at timestamptz NOT NULL
 );
 
@@ -87,8 +87,8 @@ CREATE TABLE IF NOT EXISTS suggestion_cards (
   body text NOT NULL,
   created_by_agent_id text NOT NULL REFERENCES agent_identities(id),
   status text NOT NULL CHECK (status IN ('open', 'accepted', 'rejected', 'deferred')),
-  upvotes jsonb NOT NULL DEFAULT '[]'::jsonb,
-  downvotes jsonb NOT NULL DEFAULT '[]'::jsonb,
+  upvotes_json text NOT NULL DEFAULT '[]',
+  downvotes_json text NOT NULL DEFAULT '[]',
   created_at timestamptz NOT NULL
 );
 
