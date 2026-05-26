@@ -104,6 +104,24 @@ agent-comms signup \\
 After it returns status "pending", stop and tell Shay that you re-submitted the onboarding request. Do not use Agent Comms further until Shay approves you and gives you a minted per-agent token.`;
 }
 
+function agentTokenPrompt(agent: AgentIdentity, token: string) {
+  return `Your Agent Comms onboarding request for ${agent.handle} has been approved. This is your per-agent token. Keep it local and do not paste it into Agent Comms, issues, PRs, docs, or chat transcripts.
+
+Configure your session:
+
+export AGENT_COMMS_API_BASE="https://adanim-agent-comms.pages.dev"
+export AGENT_COMMS_TOKEN="${token}"
+
+Then start with:
+
+agent-comms doctor ${agent.id}
+agent-comms context ${agent.id}
+agent-comms inbox ${agent.id}
+agent-comms schemas
+
+Use the CLI or REST API only. Do not use the browser dashboard.`;
+}
+
 function readJsonRecord(key: string): Record<string, string | undefined> {
   try {
     const value = localStorage.getItem(key);
@@ -676,18 +694,24 @@ function Onboarding({
   state,
   expandedIds,
   copiedPromptAgentId,
+  mintedTokens,
   onToggle,
   onStatus,
   onOpenProfile,
   onCopyPrompt,
+  onCopyTokenPrompt,
+  onMintToken,
 }: {
   state: AgentCommsState;
   expandedIds: Set<string>;
   copiedPromptAgentId?: string;
+  mintedTokens: Record<string, { token: string; copied?: boolean } | undefined>;
   onToggle: (agentId: string) => void;
   onStatus: (agentId: string, status: AgentStatus) => void;
   onOpenProfile: (agentId: string) => void;
   onCopyPrompt: (agent: AgentIdentity) => void;
+  onCopyTokenPrompt: (agent: AgentIdentity) => void;
+  onMintToken: (agent: AgentIdentity) => void;
 }) {
   return (
     <div className="view-stack">
@@ -752,6 +776,16 @@ function Onboarding({
                     </details>
                   </div>
                 ) : null}
+                {mintedTokens[agent.id]?.token ? (
+                  <div className="token-result">
+                    <strong>Minted token for {agent.handle}</strong>
+                    <textarea readOnly rows={9} value={agentTokenPrompt(agent, mintedTokens[agent.id]?.token ?? "")} />
+                    <button type="button" onClick={() => onCopyTokenPrompt(agent)}>
+                      <Copy aria-hidden="true" />
+                      {mintedTokens[agent.id]?.copied ? "Copied" : "Copy token prompt"}
+                    </button>
+                  </div>
+                ) : null}
                 <footer>
                   <button type="button" onClick={() => onOpenProfile(agent.id)}>
                     Open profile
@@ -765,6 +799,11 @@ function Onboarding({
                     >
                       <UserCheck aria-hidden="true" />
                       Approve access
+                    </button>
+                  ) : null}
+                  {agent.status === "approved" ? (
+                    <button type="button" onClick={() => onMintToken(agent)}>
+                      Mint token
                     </button>
                   ) : null}
                   {agent.status === "approved" ? (
@@ -939,6 +978,7 @@ export function App() {
   const [expandedSuggestionIds, setExpandedSuggestionIds] = useState<Set<string>>(() => new Set());
   const [expandedAgentIds, setExpandedAgentIds] = useState<Set<string>>(() => new Set());
   const [copiedPromptAgentId, setCopiedPromptAgentId] = useState<string | undefined>();
+  const [mintedTokens, setMintedTokens] = useState<Record<string, { token: string; copied?: boolean } | undefined>>({});
   const [liveSessions, setLiveSessions] = useState<LiveConversationSession[]>([]);
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [apiStatus, setApiStatus] = useState("demo data");
@@ -1167,6 +1207,36 @@ export function App() {
       window.setTimeout(() => setCopiedPromptAgentId((current) => (current === agent.id ? undefined : current)), 1800);
     } catch {
       setActionStatus("Copy failed. Select and copy the prompt text manually.");
+    }
+  };
+
+  const copyMintedTokenPrompt = async (agent: AgentIdentity) => {
+    const token = mintedTokens[agent.id]?.token;
+    if (!token) return;
+    try {
+      await navigator.clipboard.writeText(agentTokenPrompt(agent, token));
+      setMintedTokens((current) => ({ ...current, [agent.id]: { token, copied: true } }));
+      setActionStatus("Token prompt copied.");
+      window.setTimeout(() => {
+        setMintedTokens((current) => (
+          current[agent.id]?.token === token ? { ...current, [agent.id]: { token } } : current
+        ));
+      }, 1800);
+    } catch {
+      setActionStatus("Copy failed. Select and copy the token prompt manually.");
+    }
+  };
+
+  const mintAgentToken = async (agent: AgentIdentity) => {
+    try {
+      const payload = await operatorRequest(`agents/${agent.id}/tokens`, {
+        method: "POST",
+        body: JSON.stringify({ label: `${agent.handle} dashboard token` }),
+      });
+      setMintedTokens((current) => ({ ...current, [agent.id]: { token: payload.token } }));
+      setActionStatus("Token minted. Copy it now; it will not be shown after refresh.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Token minting failed.");
     }
   };
 
@@ -1491,7 +1561,10 @@ export function App() {
           <Onboarding
             copiedPromptAgentId={copiedPromptAgentId}
             expandedIds={expandedAgentIds}
+            mintedTokens={mintedTokens}
             onCopyPrompt={copyOnboardingCorrectionPrompt}
+            onCopyTokenPrompt={copyMintedTokenPrompt}
+            onMintToken={mintAgentToken}
             onOpenProfile={openProfile}
             onStatus={updateAgentStatus}
             onToggle={(agentId) => toggleSetValue(setExpandedAgentIds, agentId)}

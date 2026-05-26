@@ -848,7 +848,8 @@ meter {
   font-weight: 800;
 }
 
-.onboarding-correction textarea {
+.onboarding-correction textarea,
+.token-result textarea {
   width: 100%;
   min-height: 260px;
   margin-top: 12px;
@@ -861,7 +862,21 @@ meter {
   font: 0.88rem/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
-.onboarding-correction details button {
+.token-result {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--color-accent);
+  border-radius: 8px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+
+.token-result textarea {
+  min-height: 220px;
+}
+
+.onboarding-correction details button,
+.token-result button {
   margin-top: 10px;
 }
 
