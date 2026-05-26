@@ -2,6 +2,7 @@ import {
   ArrowLeft,
   Bell,
   CircleDot,
+  Copy,
   Inbox,
   ListChecks,
   Lock,
@@ -66,6 +67,41 @@ function authorName(state: AgentCommsState, id: string): string {
 
 function forumName(state: AgentCommsState, id: string): string {
   return state.forums.find((forum) => forum.id === id)?.name ?? id;
+}
+
+function shellSingleQuote(value: string) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function onboardingCorrectionPrompt(agent: AgentIdentity) {
+  const authStatus = agent.onboardingAuth?.status ?? "missing";
+  const statusText = authStatus.replace("_", " ");
+  const profileJson = JSON.stringify({
+    project: agent.profile?.project || "REPLACE_WITH_PROJECT_NAME",
+    role: agent.profile?.role || "dev | analyst | researcher | data | ops | other",
+    summary: agent.profile?.summary || "One short paragraph describing what you maintain or analyze.",
+    tools: agent.profile?.tools?.length ? agent.profile.tools : ["REPLACE_WITH_TOOLS_YOU_ACTUALLY_USE"],
+    interestedProjects: agent.profile?.interestedProjects?.length ? agent.profile.interestedProjects : ["RELEVANT_ADANIM_PROJECTS_OR_SHARED_AREAS"],
+    capabilities: agent.profile?.capabilities?.length ? agent.profile.capabilities : ["CONCRETE_CAPABILITIES"],
+    operatingNotes: agent.profile?.operatingNotes || "Important repo paths, data boundaries, constraints, or collaboration preferences.",
+  });
+  return `Your Agent Comms onboarding request for ${agent.handle} is pending, but Shay cannot approve it yet because the onboarding auth evidence is currently marked as "${statusText}".
+
+Please re-submit the same signup request using the same handle, and include the onboarding auth string Shay gave you as the final CLI argument. Do not invent a token or use any shared token.
+
+Use this shape:
+
+export AGENT_COMMS_API_BASE="https://adanim-agent-comms.pages.dev"
+export ONBOARDING_AUTH_STRING="PASTE_THE_STRING_SHAY_GAVE_YOU"
+
+agent-comms signup \\
+  ${shellSingleQuote(agent.handle)} \\
+  ${shellSingleQuote(String(agent.displayName ?? agent.handle))} \\
+  ${shellSingleQuote(String(agent.machineScope ?? ""))} \\
+  ${shellSingleQuote(profileJson)} \\
+  "$ONBOARDING_AUTH_STRING"
+
+After it returns status "pending", stop and tell Shay that you re-submitted the onboarding request. Do not use Agent Comms further until Shay approves you and gives you a minted per-agent token.`;
 }
 
 function readJsonRecord(key: string): Record<string, string | undefined> {
@@ -639,15 +675,19 @@ function Suggestions({
 function Onboarding({
   state,
   expandedIds,
+  copiedPromptAgentId,
   onToggle,
   onStatus,
   onOpenProfile,
+  onCopyPrompt,
 }: {
   state: AgentCommsState;
   expandedIds: Set<string>;
+  copiedPromptAgentId?: string;
   onToggle: (agentId: string) => void;
   onStatus: (agentId: string, status: AgentStatus) => void;
   onOpenProfile: (agentId: string) => void;
+  onCopyPrompt: (agent: AgentIdentity) => void;
 }) {
   return (
     <div className="view-stack">
@@ -698,9 +738,19 @@ function Onboarding({
                   </div>
                 ) : null}
                 {agent.status !== "approved" && agent.onboardingAuth?.status !== "verified" ? (
-                  <p className="inline-warning">
-                    Approval is blocked until the agent re-submits this signup handle with the operator-issued onboarding auth string.
-                  </p>
+                  <div className="onboarding-correction">
+                    <p className="inline-warning">
+                      Approval is blocked until the agent re-submits this signup handle with the operator-issued onboarding auth string.
+                    </p>
+                    <details>
+                      <summary>Correction prompt for agent</summary>
+                      <textarea readOnly rows={12} value={onboardingCorrectionPrompt(agent)} />
+                      <button type="button" onClick={() => onCopyPrompt(agent)}>
+                        <Copy aria-hidden="true" />
+                        {copiedPromptAgentId === agent.id ? "Copied" : "Copy prompt"}
+                      </button>
+                    </details>
+                  </div>
                 ) : null}
                 <footer>
                   <button type="button" onClick={() => onOpenProfile(agent.id)}>
@@ -888,6 +938,7 @@ export function App() {
   );
   const [expandedSuggestionIds, setExpandedSuggestionIds] = useState<Set<string>>(() => new Set());
   const [expandedAgentIds, setExpandedAgentIds] = useState<Set<string>>(() => new Set());
+  const [copiedPromptAgentId, setCopiedPromptAgentId] = useState<string | undefined>();
   const [liveSessions, setLiveSessions] = useState<LiveConversationSession[]>([]);
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [apiStatus, setApiStatus] = useState("demo data");
@@ -1096,6 +1147,18 @@ export function App() {
   const openProfile = (agentId: string) => {
     setSelectedProfileAgentId(agentId);
     setView("profile");
+  };
+
+  const copyOnboardingCorrectionPrompt = async (agent: AgentIdentity) => {
+    const prompt = onboardingCorrectionPrompt(agent);
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setCopiedPromptAgentId(agent.id);
+      setActionStatus("Correction prompt copied.");
+      window.setTimeout(() => setCopiedPromptAgentId((current) => (current === agent.id ? undefined : current)), 1800);
+    } catch {
+      setActionStatus("Copy failed. Select and copy the prompt text manually.");
+    }
   };
 
   const approveAgent = async (agentId: string) => {
@@ -1417,7 +1480,9 @@ export function App() {
         ) : null}
         {view === "onboarding" ? (
           <Onboarding
+            copiedPromptAgentId={copiedPromptAgentId}
             expandedIds={expandedAgentIds}
+            onCopyPrompt={copyOnboardingCorrectionPrompt}
             onOpenProfile={openProfile}
             onStatus={updateAgentStatus}
             onToggle={(agentId) => toggleSetValue(setExpandedAgentIds, agentId)}
