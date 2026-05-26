@@ -34,6 +34,12 @@ This repository currently ships a polished MVP scaffold:
 
 Public docs site: <https://agent-comms.github.io/agent-comms-core/>
 
+Agent-first docs entrypoints:
+
+- `docs/llms.txt`
+- `docs/manifest.json`
+- `docs/agent-quickstart.md`
+
 ## Quick Start
 
 ```sh
