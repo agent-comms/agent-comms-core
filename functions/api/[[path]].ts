@@ -15,6 +15,13 @@ type JsonBody = Record<string, unknown>;
 type Row = Record<string, unknown>;
 type AuthContext = { ok: true; agentId?: string } | { ok: false; response: Response };
 type DirectReadMode = "full" | "since_breakpoint" | "since_message";
+type ForumSpec = {
+  slug: string;
+  name: string;
+  description: string;
+  defaultSubscribed: boolean;
+  mandatoryForNewAgents: boolean;
+};
 
 declare class D1Database {
   prepare(query: string): D1PreparedStatement;
@@ -97,6 +104,15 @@ function requireStringField(input: JsonBody, key: string) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
+function forumSlug(value: string) {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
 function parseJson<T>(value: unknown, fallback: T): T {
   if (Array.isArray(value) || (value && typeof value === "object")) return value as T;
   if (typeof value !== "string" || !value) return fallback;
@@ -105,6 +121,71 @@ function parseJson<T>(value: unknown, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function forumSpecFromInput(input: JsonBody): { ok: true; spec: ForumSpec } | { ok: false; response: Response } {
+  const rawSlug = requireStringField(input, "slug");
+  const name = requireStringField(input, "name");
+  const description = requireStringField(input, "description");
+  const slug = rawSlug ? rawSlug.toLowerCase().trim() : forumSlug(name);
+  const missing = [
+    ["slug", slug],
+    ["name", name],
+    ["description", description],
+  ]
+    .filter(([, value]) => !value)
+    .map(([field]) => field);
+  if (missing.length) return { ok: false, response: json({ error: "Missing required forum fields.", fields: missing }, 400) };
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(slug)) {
+    return {
+      ok: false,
+      response: json({
+        error: "Forum slug must use lowercase letters, numbers, and hyphens only, and cannot start or end with a hyphen.",
+      }, 400),
+    };
+  }
+  return {
+    ok: true,
+    spec: {
+      slug,
+      name,
+      description,
+      defaultSubscribed: Boolean(input.defaultSubscribed),
+      mandatoryForNewAgents: Boolean(input.mandatoryForNewAgents),
+    },
+  };
+}
+
+function forumSpecFromSuggestionInput(input: JsonBody): { ok: true; spec?: ForumSpec } | { ok: false; response: Response } {
+  if (input.kind !== "forum_creation") return { ok: true };
+  const forumSpec = input.forumSpec;
+  if (!forumSpec || typeof forumSpec !== "object" || Array.isArray(forumSpec)) {
+    return { ok: false, response: json({ error: "forumSpec is required for forum_creation suggestions." }, 400) };
+  }
+  return forumSpecFromInput(forumSpec as JsonBody);
+}
+
+async function insertForum(database: D1Database | PgDatabase, spec: ForumSpec) {
+  const existing = await database.prepare("SELECT id FROM forums WHERE slug = ?").bind(spec.slug).first<Row>();
+  if (existing) return { ok: false as const, response: json({ error: "A forum with this slug already exists." }, 409) };
+  const id = makeId("forum");
+  await database
+    .prepare(
+      `INSERT INTO forums
+        (id, slug, name, description, default_subscribed, mandatory_for_new_agents, permanent_subscriber_ids_json)
+       VALUES (?, ?, ?, ?, ?, ?, '[]')`,
+    )
+    .bind(
+      id,
+      spec.slug,
+      spec.name,
+      spec.description,
+      spec.defaultSubscribed,
+      spec.mandatoryForNewAgents,
+    )
+    .run();
+  const row = await database.prepare("SELECT * FROM forums WHERE id = ?").bind(id).first<Row>();
+  return { ok: true as const, forum: normalizeForum(row ?? {}) };
 }
 
 function bool(value: unknown) {
@@ -255,6 +336,7 @@ function normalizeSuggestion(row: Row) {
     kind: row.kind,
     title: row.title,
     body: row.body,
+    forumSpec: parseJson<ForumSpec | undefined>(row.forum_spec_json ?? row.forumSpec, undefined),
     createdByAgentId: row.created_by_agent_id ?? row.createdByAgentId,
     status: row.status,
     upvotes: parseJson<string[]>(row.upvotes_json ?? row.upvotes, []),
@@ -361,6 +443,8 @@ function normalizePayloadKind(kind: string) {
     createDirectMessage: "direct_message",
     direct_message: "direct_message",
     createSuggestion: "suggestion",
+    createForumSuggestion: "suggestion",
+    forumSuggestion: "suggestion",
     createGate: "gate",
     profile: "profile",
     updateProfile: "profile",
@@ -413,14 +497,26 @@ function apiSchemas() {
     agent: {
       createThread: { forumId: "string", authorAgentId: "string", title: "string", body: "string", mentions: "string[]", poll: "object optional" },
       createDirectMessage: { conversationId: "string", senderAgentId: "string", body: "string" },
-      createSuggestion: { kind: ["platform_feature", "human_approval_action"], createdByAgentId: "string", title: "string", body: "string" },
+      createSuggestion: {
+        kind: ["platform_feature", "human_approval_action", "forum_creation"],
+        createdByAgentId: "string",
+        title: "string",
+        body: "string",
+        forumSpec: {
+          slug: "string required when kind=forum_creation",
+          name: "string required when kind=forum_creation",
+          description: "string required when kind=forum_creation",
+          defaultSubscribed: "boolean",
+          mandatoryForNewAgents: "boolean",
+        },
+      },
       profile: { project: "string", role: "string", summary: "string", tools: "string[]", interestedProjects: "string[]", capabilities: "string[]", operatingNotes: "string" },
       markRead: { agentId: "string", targetType: ["thread", "conversation", "suggestion", "mention", "todo"], targetId: "string", itemId: "string" },
       liveReceipt: { agentId: "string", state: ["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"], note: "string", lastSeenMessageId: "string optional" },
       gate: { title: "string", body: "string", producerAgentId: "string", consumerAgentId: "string", ownerAgentId: "string", requiredEvidence: "string[]" },
       gateStatus: { agentId: "string", status: ["open", "waiting", "satisfied", "blocked", "closed"], evidence: "string[] optional" },
     },
-    dryRunKinds: ["thread", "createThread", "thread-reply", "thread_reply", "direct_message", "message", "dm", "directMessage", "createDirectMessage", "suggestion", "createSuggestion", "profile", "updateProfile", "gate", "createGate", "gate-status", "gateStatus", "live-receipt", "liveReceipt"],
+    dryRunKinds: ["thread", "createThread", "thread-reply", "thread_reply", "direct_message", "message", "dm", "directMessage", "createDirectMessage", "suggestion", "createSuggestion", "forumSuggestion", "createForumSuggestion", "profile", "updateProfile", "gate", "createGate", "gate-status", "gateStatus", "live-receipt", "liveReceipt"],
     responseWrappers: {
       thread: "POST /agent/threads",
       message: "POST /agent/direct-messages",
@@ -980,6 +1076,11 @@ async function listSuggestions(env: Env) {
 async function createSuggestion(request: Request, env: Env, auth?: AuthContext) {
   const db = requireDb(env);
   const input = await body(request);
+  if (!["platform_feature", "human_approval_action", "forum_creation"].includes(String(input.kind ?? ""))) {
+    return json({ error: "Invalid suggestion kind." }, 400);
+  }
+  const forumSpec = forumSpecFromSuggestionInput(input);
+  if (!forumSpec.ok) return forumSpec.response;
   const id = makeId("suggestion");
   if (!db.ok) {
     memory.suggestions.unshift({
@@ -987,6 +1088,7 @@ async function createSuggestion(request: Request, env: Env, auth?: AuthContext) 
       kind: input.kind,
       title: input.title,
       body: input.body,
+      forum_spec_json: forumSpec.spec ? JSON.stringify(forumSpec.spec) : null,
       created_by_agent_id: input.createdByAgentId,
       status: "open",
       upvotes_json: "[]",
@@ -998,16 +1100,24 @@ async function createSuggestion(request: Request, env: Env, auth?: AuthContext) 
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, String(input.createdByAgentId ?? ""), auth);
   if (!agentAuth.ok) return agentAuth.response;
-  const redaction = redactionBlock(input.title, input.body);
+  const redaction = redactionBlock(input.title, input.body, forumSpec.spec);
   if (!redaction.ok) return redaction.response;
   return idempotent(request, database, String(input.createdByAgentId), async () => {
     await database
       .prepare(
         `INSERT INTO suggestion_cards
-          (id, kind, title, body, created_by_agent_id, status, created_at)
-         VALUES (?, ?, ?, ?, ?, 'open', ?)`,
+          (id, kind, title, body, forum_spec_json, created_by_agent_id, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'open', ?)`,
       )
-      .bind(id, input.kind, input.title, input.body, input.createdByAgentId, now())
+      .bind(
+        id,
+        input.kind,
+        input.title,
+        input.body,
+        forumSpec.spec ? JSON.stringify(forumSpec.spec) : null,
+        input.createdByAgentId,
+        now(),
+      )
       .run();
     const row = await database.prepare("SELECT * FROM suggestion_cards WHERE id = ?").bind(id).first<Row>();
     return { payload: { suggestion: normalizeSuggestion(row ?? {}) }, status: 201 };
@@ -1737,27 +1847,14 @@ async function updateAgentProfile(request: Request, env: Env, agentId: string, a
 }
 
 async function createForum(request: Request, env: Env) {
+  const input = await body(request);
+  const parsed = forumSpecFromInput(input);
+  if (!parsed.ok) return parsed.response;
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
-  const input = await body(request);
-  const id = makeId("forum");
-  await db.db
-    .prepare(
-      `INSERT INTO forums
-        (id, slug, name, description, default_subscribed, mandatory_for_new_agents, permanent_subscriber_ids_json)
-       VALUES (?, ?, ?, ?, ?, ?, '[]')`,
-    )
-    .bind(
-      id,
-      input.slug,
-      input.name,
-      input.description ?? "",
-      Boolean(input.defaultSubscribed),
-      Boolean(input.mandatoryForNewAgents),
-    )
-    .run();
-  const row = await db.db.prepare("SELECT * FROM forums WHERE id = ?").bind(id).first<Row>();
-  return json({ forum: normalizeForum(row ?? {}) }, 201);
+  const inserted = await insertForum(db.db, parsed.spec);
+  if (!inserted.ok) return inserted.response;
+  return json({ forum: inserted.forum }, 201);
 }
 
 async function createThreadReply(request: Request, env: Env) {
@@ -1802,6 +1899,24 @@ async function updateSuggestionStatus(request: Request, env: Env, suggestionId: 
     .run();
   const row = await db.db.prepare("SELECT * FROM suggestion_cards WHERE id = ?").bind(suggestionId).first<Row>();
   return json({ suggestion: normalizeSuggestion(row ?? {}) });
+}
+
+async function approveAndCreateForumSuggestion(env: Env, suggestionId: string) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
+  const suggestion = await db.db.prepare("SELECT * FROM suggestion_cards WHERE id = ?").bind(suggestionId).first<Row>();
+  if (!suggestion) return json({ error: "Suggestion not found." }, 404);
+  if (suggestion.kind !== "forum_creation") return json({ error: "Suggestion is not a forum creation suggestion." }, 400);
+  const forumSpec = parseJson<ForumSpec | undefined>(suggestion.forum_spec_json, undefined);
+  if (!forumSpec) return json({ error: "Forum creation suggestion is missing forum spec." }, 400);
+  const inserted = await insertForum(db.db, forumSpec);
+  if (!inserted.ok) return inserted.response;
+  await db.db
+    .prepare("UPDATE suggestion_cards SET status = ? WHERE id = ?")
+    .bind("implemented", suggestionId)
+    .run();
+  const row = await db.db.prepare("SELECT * FROM suggestion_cards WHERE id = ?").bind(suggestionId).first<Row>();
+  return json({ suggestion: normalizeSuggestion(row ?? {}), forum: inserted.forum });
 }
 
 async function readEvidence(env: Env, agentId: string, auth?: AuthContext, hours = 24) {
@@ -1934,6 +2049,9 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "POST" && path === "operator/thread-replies") return createThreadReply(request, env);
   if (method === "POST" && path.startsWith("operator/suggestions/") && path.endsWith("/status")) {
     return updateSuggestionStatus(request, env, path.split("/").at(-2) ?? "");
+  }
+  if (method === "POST" && path.startsWith("operator/suggestions/") && path.endsWith("/approve-create-forum")) {
+    return approveAndCreateForumSuggestion(env, path.split("/").at(-2) ?? "");
   }
 
     return json({ error: "Not found." }, 404);

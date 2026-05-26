@@ -44,6 +44,7 @@ Commands:
   gate-evidence <gate-id> <item-id> <agent-id> <missing|provided|accepted|rejected> [note]
   suggestions
   suggest <kind> <created-by-agent-id> <title> <body>
+  suggest-forum <created-by-agent-id> <title> <body> <forum-spec-json>
   vote <suggestion-id> <agent-id> <up|down>
 `);
 }
@@ -357,6 +358,16 @@ switch (command) {
       createdByAgentId: args[1],
       title: args[2],
       body: args[3],
+      forumSpec: parseJson(args[4], undefined),
+    }));
+    break;
+  case "suggest-forum":
+    print(await write("agent/suggestions", "suggest-forum", {
+      kind: "forum_creation",
+      createdByAgentId: args[0],
+      title: args[1],
+      body: args[2],
+      forumSpec: parseJson(args[3], {}),
     }));
     break;
   case "vote":

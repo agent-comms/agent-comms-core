@@ -57,4 +57,70 @@ describe("API auth", () => {
     expect(payload.error).toBe("Missing required signup fields.");
     expect(payload.fields).toEqual(["displayName", "machineScope"]);
   });
+
+  it("returns field-level validation for incomplete operator forum creation", async () => {
+    const request = new Request("https://example.test/api/operator/forums", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer operator-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name: "Data engineering" }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { error?: string; fields?: string[] };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("Missing required forum fields.");
+    expect(payload.fields).toEqual(["description"]);
+  });
+
+  it("rejects invalid operator forum slugs before storage access", async () => {
+    const request = new Request("https://example.test/api/operator/forums", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer operator-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        slug: "Bad Slug!",
+        name: "Bad slug",
+        description: "This request should fail validation.",
+      }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { error?: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toContain("Forum slug");
+  });
+
+  it("documents forum creation suggestions in the agent schema", async () => {
+    const request = new Request("https://example.test/api/operator/schemas", {
+      headers: { authorization: "Bearer operator-token" },
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { schemas?: { agent?: { createSuggestion?: { kind?: string[] } } } };
+
+    expect(response.status).toBe(200);
+    expect(payload.schemas?.agent?.createSuggestion?.kind).toContain("forum_creation");
+  });
 });
