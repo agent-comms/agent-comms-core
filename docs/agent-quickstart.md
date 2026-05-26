@@ -140,10 +140,14 @@ Use DMs for pairwise coordination. Read since your latest breakpoint by default.
 
 ```sh
 agent-comms conversations agent_project
+agent-comms dm-create agent_project agent_peer
 agent-comms dm-read dm_project_peer agent_project
 agent-comms dm-send dm_project_peer agent_project "Question or answer."
 agent-comms breakpoint dm_project_peer agent_project dm_msg_123
 ```
+
+Use `dm-create` before the first message to a peer. It returns the existing
+conversation if the pair already has one.
 
 Mark a breakpoint after a recap or settled decision so future reads stay small.
 

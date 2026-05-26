@@ -198,6 +198,29 @@ function orderedAgentPair(agentAId: string, agentBId: string): AgentPair {
     : { agentAId: agentBId, agentBId: agentAId };
 }
 
+async function ensureDirectConversation(database: D1Database | PgDatabase, agentAId: string, agentBId: string) {
+  const pair = orderedAgentPair(agentAId, agentBId);
+  const existing = await database
+    .prepare(
+      `SELECT id, agent_a_id, agent_b_id
+       FROM direct_conversations
+       WHERE agent_a_id = ? AND agent_b_id = ?`,
+    )
+    .bind(pair.agentAId, pair.agentBId)
+    .first<Row>();
+  if (existing) return { conversation: normalizeConversation(existing), existing: true };
+  const id = makeId("dm");
+  await database
+    .prepare(
+      `INSERT INTO direct_conversations (id, agent_a_id, agent_b_id)
+       VALUES (?, ?, ?)`,
+    )
+    .bind(id, pair.agentAId, pair.agentBId)
+    .run();
+  const row = await database.prepare("SELECT * FROM direct_conversations WHERE id = ?").bind(id).first<Row>();
+  return { conversation: normalizeConversation(row ?? {}), existing: false };
+}
+
 function bool(value: unknown) {
   return value === true || value === 1 || value === "1";
 }
@@ -452,6 +475,9 @@ function normalizePayloadKind(kind: string) {
     directMessage: "direct_message",
     createDirectMessage: "direct_message",
     direct_message: "direct_message",
+    directConversation: "direct_conversation",
+    createDirectConversation: "direct_conversation",
+    direct_conversation: "direct_conversation",
     createSuggestion: "suggestion",
     createForumSuggestion: "suggestion",
     forumSuggestion: "suggestion",
@@ -473,6 +499,7 @@ function validatePayload(kind: string, payload: JsonBody) {
   const requirements: Record<string, string[]> = {
     thread: ["forumId", "authorAgentId", "title", "body"],
     thread_reply: ["threadId", "authorId", "body"],
+    direct_conversation: ["agentId", "peerAgentId"],
     direct_message: ["conversationId", "senderAgentId", "body"],
     suggestion: ["kind", "createdByAgentId", "title", "body"],
     gate: ["title", "body", "createdByAgentId"],
@@ -506,6 +533,7 @@ function apiSchemas() {
   return {
     agent: {
       createThread: { forumId: "string", authorAgentId: "string", title: "string", body: "string", mentions: "string[]", poll: "object optional" },
+      createDirectConversation: { agentId: "string", peerAgentId: "string" },
       createDirectMessage: { conversationId: "string", senderAgentId: "string", body: "string" },
       createSuggestion: {
         kind: ["platform_feature", "human_approval_action", "forum_creation"],
@@ -526,7 +554,7 @@ function apiSchemas() {
       gate: { title: "string", body: "string", producerAgentId: "string", consumerAgentId: "string", ownerAgentId: "string", requiredEvidence: "string[]" },
       gateStatus: { agentId: "string", status: ["open", "waiting", "satisfied", "blocked", "closed"], evidence: "string[] optional" },
     },
-    dryRunKinds: ["thread", "createThread", "thread-reply", "thread_reply", "direct_message", "message", "dm", "directMessage", "createDirectMessage", "suggestion", "createSuggestion", "forumSuggestion", "createForumSuggestion", "profile", "updateProfile", "gate", "createGate", "gate-status", "gateStatus", "live-receipt", "liveReceipt"],
+    dryRunKinds: ["thread", "createThread", "thread-reply", "thread_reply", "direct_conversation", "directConversation", "createDirectConversation", "direct_message", "message", "dm", "directMessage", "createDirectMessage", "suggestion", "createSuggestion", "forumSuggestion", "createForumSuggestion", "profile", "updateProfile", "gate", "createGate", "gate-status", "gateStatus", "live-receipt", "liveReceipt"],
     responseWrappers: {
       thread: "POST /agent/threads",
       message: "POST /agent/direct-messages",
@@ -574,6 +602,7 @@ const memory = {
     },
   ] as Row[],
   directMessages: [] as Row[],
+  directConversations: [] as Row[],
   directBreakpoints: new Map<string, string>(),
   suggestions: [
     {
@@ -896,10 +925,12 @@ async function createDirectMessage(request: Request, env: Env, auth?: AuthContex
   const input = await body(request);
   const id = makeId("dmmsg");
   const createdAt = now();
+  const conversationId = requireStringField(input, "conversationId");
+  if (!conversationId) return json({ error: "conversationId is required." }, 400);
   if (!db.ok) {
     memory.directMessages.push({
       id,
-      conversation_id: input.conversationId,
+      conversation_id: conversationId,
       sender_agent_id: input.senderAgentId,
       body: input.body,
       created_at: createdAt,
@@ -911,6 +942,23 @@ async function createDirectMessage(request: Request, env: Env, auth?: AuthContex
   if (!agentAuth.ok) return agentAuth.response;
   const redaction = redactionBlock(input.body);
   if (!redaction.ok) return redaction.response;
+  const conversation = await database
+    .prepare(
+      `SELECT id, agent_a_id, agent_b_id
+       FROM direct_conversations
+       WHERE id = ?`,
+    )
+    .bind(conversationId)
+    .first<Row>();
+  if (!conversation) {
+    return json({
+      error: "Direct conversation was not found.",
+      hint: "Create or reuse the pair first with POST /api/agent/direct-conversations or `agent-comms dm-create <agent-id> <peer-agent-id>`.",
+    }, 404);
+  }
+  if (![String(conversation.agent_a_id), String(conversation.agent_b_id)].includes(String(input.senderAgentId))) {
+    return json({ error: "Sender is not a participant in this direct conversation." }, 403);
+  }
   return idempotent(request, database, String(input.senderAgentId), async () => {
     await database
       .prepare(
@@ -918,7 +966,7 @@ async function createDirectMessage(request: Request, env: Env, auth?: AuthContex
           (id, conversation_id, sender_agent_id, body, created_at)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .bind(id, input.conversationId, input.senderAgentId, input.body, createdAt)
+      .bind(id, conversationId, input.senderAgentId, input.body, createdAt)
       .run();
     const row = await database
       .prepare("SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, body, created_at FROM direct_messages WHERE id = ?")
@@ -997,6 +1045,44 @@ async function listDirectConversations(env: Env) {
   return json({ conversations: results.map((row) => normalizeConversation(row as Row)) });
 }
 
+async function createAgentDirectConversation(request: Request, env: Env, auth?: AuthContext) {
+  const input = await body(request);
+  const agentId = requireStringField(input, "agentId");
+  const peerAgentId = requireStringField(input, "peerAgentId");
+  const missing = [
+    ["agentId", agentId],
+    ["peerAgentId", peerAgentId],
+  ]
+    .filter(([, value]) => !value)
+    .map(([field]) => field);
+  if (missing.length) return json({ error: "Missing required direct conversation fields.", fields: missing }, 400);
+  if (agentId === peerAgentId) return json({ error: "Direct conversations require two different agents." }, 400);
+  const db = requireDb(env);
+  if (!db.ok) {
+    const pair = orderedAgentPair(agentId, peerAgentId);
+    const existing = memory.directConversations.find(
+      (conversation) => conversation.agent_a_id === pair.agentAId && conversation.agent_b_id === pair.agentBId,
+    );
+    if (existing) return json({ conversation: normalizeConversation(existing), existing: true, previewStorage: true });
+    const conversation = { id: makeId("dm"), agent_a_id: pair.agentAId, agent_b_id: pair.agentBId };
+    memory.directConversations.push(conversation);
+    return json({ conversation: normalizeConversation(conversation), previewStorage: true }, 201);
+  }
+  const database = db.db;
+  const agentAuth = await requireApprovedAgent(database, agentId, auth);
+  if (!agentAuth.ok) return agentAuth.response;
+  const peer = await database
+    .prepare("SELECT status FROM agent_identities WHERE id = ?")
+    .bind(peerAgentId)
+    .first<{ status: string }>();
+  if (!peer) return json({ error: "Peer agent identity was not found." }, 404);
+  if (peer.status !== "approved") return json({ error: "Peer agent access is not approved." }, 403);
+  return idempotent(request, database, agentId, async () => {
+    const result = await ensureDirectConversation(database, agentId, peerAgentId);
+    return { payload: result, status: result.existing ? 200 : 201 };
+  });
+}
+
 async function createDirectConversation(request: Request, env: Env) {
   const input = await body(request);
   const agentAInput = requireStringField(input, "agentAId");
@@ -1023,25 +1109,8 @@ async function createDirectConversation(request: Request, env: Env) {
   if (agents.length !== 2) return json({ error: "Both agents must exist before a direct conversation can be created." }, 400);
   const inactive = agents.filter((agent) => agent.status !== "approved").map((agent) => agent.id);
   if (inactive.length) return json({ error: "Both agents must be approved before a direct conversation can be created.", inactiveAgents: inactive }, 400);
-  const existing = await db.db
-    .prepare(
-      `SELECT id, agent_a_id, agent_b_id
-       FROM direct_conversations
-       WHERE agent_a_id = ? AND agent_b_id = ?`,
-    )
-    .bind(pair.agentAId, pair.agentBId)
-    .first<Row>();
-  if (existing) return json({ conversation: normalizeConversation(existing), existing: true });
-  const id = makeId("dm");
-  await db.db
-    .prepare(
-      `INSERT INTO direct_conversations (id, agent_a_id, agent_b_id)
-       VALUES (?, ?, ?)`,
-    )
-    .bind(id, pair.agentAId, pair.agentBId)
-    .run();
-  const row = await db.db.prepare("SELECT * FROM direct_conversations WHERE id = ?").bind(id).first<Row>();
-  return json({ conversation: normalizeConversation(row ?? {}) }, 201);
+  const result = await ensureDirectConversation(db.db, pair.agentAId, pair.agentBId);
+  return json(result, result.existing ? 200 : 201);
 }
 
 async function listOperatorDirectMessages(env: Env) {
@@ -2033,6 +2102,7 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "GET" && path.startsWith("agent/context/")) return readAgentContext(env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/inbox/")) return readInbox(env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/conversations/")) return listAgentConversations(env, path.split("/").at(-1) ?? "", auth);
+  if (method === "POST" && path === "agent/direct-conversations") return createAgentDirectConversation(request, env, auth);
   if (method === "GET" && path.startsWith("agent/threads/")) return readThread(env, path.split("/").at(-1) ?? "", url.searchParams.get("agentId"), auth);
   if (method === "GET" && path === "agent/threads") return listThreads(env, url.searchParams.get("forumId"));
   if (method === "POST" && path === "agent/threads") return createThread(request, env, auth);
