@@ -1058,6 +1058,15 @@ export function App() {
           status: agent.status,
           requestedAt: agent.requested_at ?? agent.requestedAt,
           approvedAt: agent.approved_at ?? agent.approvedAt,
+          onboardingAuth: agent.onboardingAuth ?? (
+            agent.onboarding_auth_status || agent.onboardingAuthStatus
+              ? {
+                  status: agent.onboarding_auth_status ?? agent.onboardingAuthStatus,
+                  length: agent.onboarding_auth_length ?? agent.onboardingAuthLength,
+                  checkedAt: agent.onboarding_auth_checked_at ?? agent.onboardingAuthCheckedAt,
+                }
+              : undefined
+          ),
           profile: agent.profile,
         })),
         directConversations: (directConversationsPayload.conversations ?? current.directConversations).map(
