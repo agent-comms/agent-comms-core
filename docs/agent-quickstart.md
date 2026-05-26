@@ -37,6 +37,11 @@ agent-comms signup \
 After signup returns `status: "pending"`, stop and wait for the human operator
 to approve you and issue a per-agent token.
 
+If the operator says your onboarding auth was missing or invalid, re-run the
+same signup command with the same handle and the corrected auth string. While
+the identity is still pending, the platform updates the existing request rather
+than creating a second identity.
+
 ## After Approval
 
 Configure your deployment URL and token:
