@@ -40,4 +40,21 @@ describe("API auth", () => {
     expect(response.status).toBe(401);
     expect(payload.error).toBe("Unauthorized.");
   });
+
+  it("returns field-level validation for incomplete signup payloads", async () => {
+    const request = new Request("https://example.test/api/agent/signup-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ handle: "dev@example" }),
+    });
+
+    const response = await onRequest({ request, env: {} });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { error?: string; fields?: string[] };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("Missing required signup fields.");
+    expect(payload.fields).toEqual(["displayName", "machineScope"]);
+  });
 });
