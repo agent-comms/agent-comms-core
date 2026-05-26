@@ -1405,27 +1405,39 @@ export function App() {
 
   const operatorRequest = useCallback(
     async (path: string, options: RequestInit = {}) => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
       const headers: Record<string, string> = {
         "content-type": "application/json",
         ...((options.headers as Record<string, string> | undefined) ?? {}),
       };
       if (operatorToken) headers.authorization = `Bearer ${operatorToken}`;
-      const response = await fetch(`/api/operator/${path}`, {
-        ...options,
-        headers,
-      });
-      const contentType = response.headers.get("content-type") ?? "";
-      const payload = contentType.includes("application/json")
-        ? await response.json()
-        : { error: await response.text() };
-      if (!contentType.includes("application/json")) {
-        throw new Error(readableRequestError(payload.error ?? "Operator API returned a non-JSON response."));
+      try {
+        const response = await fetch(`/api/operator/${path}`, {
+          ...options,
+          headers,
+          signal: options.signal ?? controller.signal,
+        });
+        const contentType = response.headers.get("content-type") ?? "";
+        const payload = contentType.includes("application/json")
+          ? await response.json()
+          : { error: await response.text() };
+        if (!contentType.includes("application/json")) {
+          throw new Error(readableRequestError(payload.error ?? "Operator API returned a non-JSON response."));
+        }
+        if (!response.ok) throw new Error(readableRequestError(payload.error ?? "Operator request failed."));
+        if (payload && typeof payload === "object" && "error" in payload && Object.keys(payload).length === 1) {
+          throw new Error(readableRequestError((payload as { error?: unknown }).error));
+        }
+        return payload;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          throw new Error(`Operator API request timed out: ${path}`);
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timeout);
       }
-      if (!response.ok) throw new Error(readableRequestError(payload.error ?? "Operator request failed."));
-      if (payload && typeof payload === "object" && "error" in payload && Object.keys(payload).length === 1) {
-        throw new Error(readableRequestError((payload as { error?: unknown }).error));
-      }
-      return payload;
     },
     [operatorToken],
   );
@@ -1436,38 +1448,42 @@ export function App() {
     const refreshSequence = refreshSequenceRef.current + 1;
     refreshSequenceRef.current = refreshSequence;
     const mutationEpochAtStart = mutationEpochRef.current;
-    try {
-      const [
-        forumsPayload,
-        threadsPayload,
-        repliesPayload,
-        suggestionsPayload,
-        agentsPayload,
-        directConversationsPayload,
-        directMessagesPayload,
-        liveConversationsPayload,
-        gatesPayload,
-      ] = await Promise.all([
-        operatorRequest("forums"),
-        operatorRequest("threads"),
-        operatorRequest("thread-replies"),
-        operatorRequest("suggestions"),
-        operatorRequest("agents"),
-        operatorRequest("direct-conversations"),
-        operatorRequest("direct-messages"),
-        operatorRequest("live-conversations"),
-        operatorRequest("gates"),
-      ]);
-      if (!force && (
-        refreshSequence !== refreshSequenceRef.current ||
-        mutationEpochAtStart !== mutationEpochRef.current ||
-        activeOperatorMutationsRef.current > 0
-      )) {
-        return;
-      }
+    const requests = [
+      ["forums", "forums"],
+      ["threads", "threads"],
+      ["replies", "thread-replies"],
+      ["suggestions", "suggestions"],
+      ["agents", "agents"],
+      ["directConversations", "direct-conversations"],
+      ["directMessages", "direct-messages"],
+      ["liveConversations", "live-conversations"],
+      ["gates", "gates"],
+    ] as const;
+    const settled = await Promise.all(
+      requests.map(async ([key, path]) => {
+        try {
+          return { key, payload: await operatorRequest(path) };
+        } catch (error) {
+          return { key, error: error instanceof Error ? error.message : "request failed" };
+        }
+      }),
+    );
+    if (!force && (
+      refreshSequence !== refreshSequenceRef.current ||
+      mutationEpochAtStart !== mutationEpochRef.current ||
+      activeOperatorMutationsRef.current > 0
+    )) {
+      return;
+    }
+    const payloads = Object.fromEntries(
+      settled.filter((result) => "payload" in result).map((result) => [result.key, result.payload]),
+    ) as Record<string, any>;
+    const failures = settled.filter((result) => "error" in result) as Array<{ key: string; error: string }>;
+    const hasAnyPayload = Object.keys(payloads).length > 0;
+    if (hasAnyPayload) {
       setState((current) => ({
         ...current,
-        forums: (forumsPayload.forums ?? current.forums).map((forum: any) => ({
+        forums: (payloads.forums?.forums ?? current.forums).map((forum: any) => ({
           id: forum.id,
           slug: forum.slug,
           name: forum.name,
@@ -1481,7 +1497,7 @@ export function App() {
             ? JSON.parse(forum.permanent_subscriber_ids_json)
             : (forum.permanentSubscriberIds ?? []),
         })),
-        threads: (threadsPayload.threads ?? current.threads).map((thread: any) => ({
+        threads: (payloads.threads?.threads ?? current.threads).map((thread: any) => ({
           id: thread.id,
           forumId: thread.forum_id ?? thread.forumId,
           authorAgentId: thread.author_agent_id ?? thread.authorAgentId,
@@ -1492,7 +1508,7 @@ export function App() {
           createdAt: thread.created_at ?? thread.createdAt,
           updatedAt: thread.updated_at ?? thread.updatedAt,
         })),
-        replies: (repliesPayload.replies ?? current.replies).map((reply: any) => ({
+        replies: (payloads.replies?.replies ?? current.replies).map((reply: any) => ({
           id: reply.id,
           threadId: reply.thread_id ?? reply.threadId,
           authorId: reply.author_id ?? reply.authorId,
@@ -1501,7 +1517,7 @@ export function App() {
           mentions: reply.mentions ?? JSON.parse(reply.mentions_json ?? "[]"),
           createdAt: reply.created_at ?? reply.createdAt,
         })),
-        suggestions: (suggestionsPayload.suggestions ?? current.suggestions).map((suggestion: any) => ({
+        suggestions: (payloads.suggestions?.suggestions ?? current.suggestions).map((suggestion: any) => ({
           id: suggestion.id,
           kind: suggestion.kind,
           title: suggestion.title,
@@ -1515,7 +1531,7 @@ export function App() {
           downvotes: suggestion.downvotes ?? JSON.parse(suggestion.downvotes_json ?? "[]"),
           createdAt: suggestion.created_at ?? suggestion.createdAt,
         })),
-        gates: (gatesPayload.gates ?? current.gates ?? []).map((gate: any) => ({
+        gates: (payloads.gates?.gates ?? current.gates ?? []).map((gate: any) => ({
           id: gate.id,
           title: gate.title,
           body: gate.body,
@@ -1530,7 +1546,7 @@ export function App() {
           createdAt: gate.created_at ?? gate.createdAt,
           updatedAt: gate.updated_at ?? gate.updatedAt,
         })),
-        agents: (agentsPayload.agents ?? current.agents).map((agent: any) => ({
+        agents: (payloads.agents?.agents ?? current.agents).map((agent: any) => ({
           id: agent.id,
           handle: agent.handle,
           displayName: agent.display_name ?? agent.displayName,
@@ -1549,7 +1565,7 @@ export function App() {
           ),
           profile: agent.profile,
         })),
-        directConversations: (directConversationsPayload.conversations ?? current.directConversations).map(
+        directConversations: (payloads.directConversations?.conversations ?? current.directConversations).map(
           (conversation: any) => ({
             id: conversation.id,
             participantAgentIds: [
@@ -1559,7 +1575,7 @@ export function App() {
             breakpointMessageIds: conversation.breakpointMessageIds ?? {},
           }),
         ),
-        directMessages: (directMessagesPayload.messages ?? current.directMessages).map((message: any) => ({
+        directMessages: (payloads.directMessages?.messages ?? current.directMessages).map((message: any) => ({
           id: message.id,
           conversationId: message.conversation_id ?? message.conversationId,
           senderAgentId: message.sender_agent_id ?? message.senderAgentId ?? message.senderId,
@@ -1567,7 +1583,7 @@ export function App() {
           createdAt: message.created_at ?? message.createdAt,
         })),
       }));
-      setLiveSessions((liveConversationsPayload.sessions ?? []).map((session: any) => ({
+      setLiveSessions((payloads.liveConversations?.sessions ?? liveSessions).map((session: any) => ({
         id: session.id,
         conversationId: session.conversation_id ?? session.conversationId,
         status: session.status,
@@ -1576,18 +1592,13 @@ export function App() {
         createdAt: session.created_at ?? session.createdAt,
         receipts: session.receipts ?? [],
       })));
-      setApiStatus(forumsPayload.previewStorage ? "preview storage" : "durable storage");
-    } catch (error) {
-      if (!force && (
-        refreshSequence !== refreshSequenceRef.current ||
-        mutationEpochAtStart !== mutationEpochRef.current ||
-        activeOperatorMutationsRef.current > 0
-      )) {
-        return;
-      }
-      setApiStatus(error instanceof Error ? error.message : "operator API unavailable");
     }
-  }, [operatorRequest, operatorToken]);
+    if (failures.length) {
+      setApiStatus(`${hasAnyPayload ? "partial durable storage" : "operator API unavailable"}; failed: ${failures.map((failure) => `${failure.key} (${failure.error})`).join(", ")}`);
+    } else {
+      setApiStatus(payloads.forums?.previewStorage ? "preview storage" : "durable storage");
+    }
+  }, [liveSessions, operatorRequest, operatorToken]);
 
   useEffect(() => {
     void refreshOperatorData();
