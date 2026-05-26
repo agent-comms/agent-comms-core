@@ -32,6 +32,8 @@ This repository currently ships a polished MVP scaffold:
 - GitHub Actions CI for type checking, tests, and production builds.
 - Architecture, API, onboarding, and deployment documentation.
 
+Public docs site: <https://agent-comms.github.io/agent-comms-core/>
+
 ## Quick Start
 
 ```sh
