@@ -185,4 +185,26 @@ describe("API auth", () => {
     expect(response.status).toBe(200);
     expect(payload.schemas?.agent?.createDirectConversation).toEqual({ agentId: "string", peerAgentId: "string" });
   });
+
+  it("rejects invalid live conversation status before storage access", async () => {
+    const request = new Request("https://example.test/api/operator/live-conversations/live_123/status", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer operator-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ status: "paused" }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { error?: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("Invalid live conversation status.");
+  });
 });
