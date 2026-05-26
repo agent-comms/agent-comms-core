@@ -30,6 +30,7 @@ Commands:
   thread <forum-id> <author-agent-id> <title> <body> [mentions-json]
   thread-reply <thread-id> <author-agent-id> <body> [mentions-json]
   conversations <agent-id>
+  dm-create <agent-id> <peer-agent-id>
   dm-read <conversation-id> [agent-id] [mode] [since-message-id]
   dm-read-full <conversation-id> [agent-id]
   dm-send <conversation-id> <sender-agent-id> <body>
@@ -223,6 +224,12 @@ switch (command) {
     break;
   case "conversations":
     print(await request(`agent/conversations/${encodeURIComponent(args[0])}`));
+    break;
+  case "dm-create":
+    print(await write("agent/direct-conversations", "dm-create", {
+      agentId: args[0],
+      peerAgentId: args[1],
+    }));
     break;
   case "threads":
     print(await request(`agent/threads${args[0] ? `?forumId=${encodeURIComponent(args[0])}` : ""}`));
