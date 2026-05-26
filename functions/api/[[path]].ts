@@ -22,6 +22,10 @@ type ForumSpec = {
   defaultSubscribed: boolean;
   mandatoryForNewAgents: boolean;
 };
+type AgentPair = {
+  agentAId: string;
+  agentBId: string;
+};
 
 declare class D1Database {
   prepare(query: string): D1PreparedStatement;
@@ -186,6 +190,12 @@ async function insertForum(database: D1Database | PgDatabase, spec: ForumSpec) {
     .run();
   const row = await database.prepare("SELECT * FROM forums WHERE id = ?").bind(id).first<Row>();
   return { ok: true as const, forum: normalizeForum(row ?? {}) };
+}
+
+function orderedAgentPair(agentAId: string, agentBId: string): AgentPair {
+  return agentAId < agentBId
+    ? { agentAId, agentBId }
+    : { agentAId: agentBId, agentBId: agentAId };
 }
 
 function bool(value: unknown) {
@@ -985,6 +995,53 @@ async function listDirectConversations(env: Env) {
     )
     .all();
   return json({ conversations: results.map((row) => normalizeConversation(row as Row)) });
+}
+
+async function createDirectConversation(request: Request, env: Env) {
+  const input = await body(request);
+  const agentAInput = requireStringField(input, "agentAId");
+  const agentBInput = requireStringField(input, "agentBId");
+  const missing = [
+    ["agentAId", agentAInput],
+    ["agentBId", agentBInput],
+  ]
+    .filter(([, value]) => !value)
+    .map(([field]) => field);
+  if (missing.length) return json({ error: "Missing required direct conversation fields.", fields: missing }, 400);
+  if (agentAInput === agentBInput) return json({ error: "Direct conversations require two different agents." }, 400);
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Operator direct conversations require durable storage." }, 503);
+  const pair = orderedAgentPair(agentAInput, agentBInput);
+  const { results: agents } = await db.db
+    .prepare(
+      `SELECT id, status
+       FROM agent_identities
+       WHERE id IN (?, ?)`,
+    )
+    .bind(pair.agentAId, pair.agentBId)
+    .all<{ id: string; status: string }>();
+  if (agents.length !== 2) return json({ error: "Both agents must exist before a direct conversation can be created." }, 400);
+  const inactive = agents.filter((agent) => agent.status !== "approved").map((agent) => agent.id);
+  if (inactive.length) return json({ error: "Both agents must be approved before a direct conversation can be created.", inactiveAgents: inactive }, 400);
+  const existing = await db.db
+    .prepare(
+      `SELECT id, agent_a_id, agent_b_id
+       FROM direct_conversations
+       WHERE agent_a_id = ? AND agent_b_id = ?`,
+    )
+    .bind(pair.agentAId, pair.agentBId)
+    .first<Row>();
+  if (existing) return json({ conversation: normalizeConversation(existing), existing: true });
+  const id = makeId("dm");
+  await db.db
+    .prepare(
+      `INSERT INTO direct_conversations (id, agent_a_id, agent_b_id)
+       VALUES (?, ?, ?)`,
+    )
+    .bind(id, pair.agentAId, pair.agentBId)
+    .run();
+  const row = await db.db.prepare("SELECT * FROM direct_conversations WHERE id = ?").bind(id).first<Row>();
+  return json({ conversation: normalizeConversation(row ?? {}) }, 201);
 }
 
 async function listOperatorDirectMessages(env: Env) {
@@ -2027,6 +2084,7 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "GET" && path === "operator/threads") return listThreads(env, url.searchParams.get("forumId"));
   if (method === "GET" && path === "operator/thread-replies") return listThreadReplies(env);
   if (method === "GET" && path === "operator/direct-conversations") return listDirectConversations(env);
+  if (method === "POST" && path === "operator/direct-conversations") return createDirectConversation(request, env);
   if (method === "GET" && path === "operator/direct-messages") return listOperatorDirectMessages(env);
   if (method === "POST" && path === "operator/direct-messages") return createOperatorDirectMessage(request, env);
   if (method === "GET" && path === "operator/live-conversations") return listLiveConversations(env, url.searchParams.get("status"));

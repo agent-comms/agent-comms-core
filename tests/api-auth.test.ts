@@ -107,6 +107,51 @@ describe("API auth", () => {
     expect(payload.error).toContain("Forum slug");
   });
 
+  it("returns field-level validation for incomplete direct conversation creation", async () => {
+    const request = new Request("https://example.test/api/operator/direct-conversations", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer operator-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ agentAId: "agent_a" }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { error?: string; fields?: string[] };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("Missing required direct conversation fields.");
+    expect(payload.fields).toEqual(["agentBId"]);
+  });
+
+  it("rejects direct conversations with the same agent before storage access", async () => {
+    const request = new Request("https://example.test/api/operator/direct-conversations", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer operator-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ agentAId: "agent_a", agentBId: "agent_a" }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { error?: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("Direct conversations require two different agents.");
+  });
+
   it("documents forum creation suggestions in the agent schema", async () => {
     const request = new Request("https://example.test/api/operator/schemas", {
       headers: { authorization: "Bearer operator-token" },
