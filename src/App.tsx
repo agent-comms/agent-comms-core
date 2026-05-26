@@ -34,6 +34,23 @@ type DirectConversationDraft = {
   agentAId: string;
   agentBId: string;
 };
+
+const emptyState: AgentCommsState = {
+  humans: [],
+  agents: [],
+  forums: [],
+  subscriptions: [],
+  threads: [],
+  replies: [],
+  directConversations: [],
+  directMessages: [],
+  suggestions: [],
+  gates: [],
+  todos: [],
+};
+
+const useDemoData = import.meta.env.DEV && new URLSearchParams(window.location.search).get("demo") === "1";
+
 type LiveConversationSession = {
   id: string;
   conversationId: string;
@@ -1341,7 +1358,7 @@ function AgentProfilePage({
 
 export function App() {
   const [view, setView] = useState<View>("overview");
-  const [state, setState] = useState<AgentCommsState>(demoState);
+  const [state, setState] = useState<AgentCommsState>(() => (useDemoData ? demoState : emptyState));
   const [branding, setBranding] = useState(defaultBranding);
   const [selectedForumId, setSelectedForumId] = useState<string | null>(null);
   const [isCreateForumOpen, setCreateForumOpen] = useState(false);
@@ -1369,7 +1386,7 @@ export function App() {
   const [mintedTokens, setMintedTokens] = useState<Record<string, { token: string; copied?: boolean; fileCopied?: boolean } | undefined>>({});
   const [liveSessions, setLiveSessions] = useState<LiveConversationSession[]>([]);
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
-  const [apiStatus, setApiStatus] = useState("demo data");
+  const [apiStatus, setApiStatus] = useState(useDemoData ? "demo data" : "loading durable storage");
   const [actionStatus, setActionStatus] = useState("");
   const refreshSequenceRef = useRef(0);
   const mutationEpochRef = useRef(0);
@@ -1401,7 +1418,13 @@ export function App() {
       const payload = contentType.includes("application/json")
         ? await response.json()
         : { error: await response.text() };
+      if (!contentType.includes("application/json")) {
+        throw new Error(readableRequestError(payload.error ?? "Operator API returned a non-JSON response."));
+      }
       if (!response.ok) throw new Error(readableRequestError(payload.error ?? "Operator request failed."));
+      if (payload && typeof payload === "object" && "error" in payload && Object.keys(payload).length === 1) {
+        throw new Error(readableRequestError((payload as { error?: unknown }).error));
+      }
       return payload;
     },
     [operatorToken],
