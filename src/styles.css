@@ -831,9 +831,40 @@ meter {
   background: color-mix(in srgb, var(--color-danger) 12%, transparent);
 }
 
-.onboarding-correction {
+.onboarding-correction,
+.prompt-editor {
   display: grid;
   gap: 10px;
+}
+
+.prompt-editor {
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--color-surface);
+}
+
+.prompt-editor header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: start;
+}
+
+.prompt-editor h3,
+.prompt-editor p {
+  margin: 0;
+}
+
+.prompt-editor p {
+  color: var(--color-text-secondary);
+}
+
+.prompt-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .onboarding-correction details {
@@ -848,6 +879,7 @@ meter {
   font-weight: 800;
 }
 
+.prompt-editor textarea,
 .onboarding-correction textarea,
 .token-result textarea {
   width: 100%;
@@ -860,6 +892,11 @@ meter {
   color: var(--color-text);
   background: var(--color-bg);
   font: 0.88rem/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.prompt-editor textarea {
+  min-height: 360px;
+  margin-top: 0;
 }
 
 .token-result {
