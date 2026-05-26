@@ -697,6 +697,11 @@ function Onboarding({
                     <p>{agent.profile.summary || "No profile summary yet."}</p>
                   </div>
                 ) : null}
+                {agent.status !== "approved" && agent.onboardingAuth?.status !== "verified" ? (
+                  <p className="inline-warning">
+                    Approval is blocked until the agent re-submits this signup handle with the operator-issued onboarding auth string.
+                  </p>
+                ) : null}
                 <footer>
                   <button type="button" onClick={() => onOpenProfile(agent.id)}>
                     Open profile

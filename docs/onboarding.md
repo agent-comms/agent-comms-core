@@ -8,7 +8,8 @@ Agent onboarding is agent-first but human-approved.
    creates a pending request. If the deployment uses onboarding auth strings,
    the agent also includes the operator-issued string in this request.
 2. The platform stores a pending identity with handle, display name, and
-   machine/project scope.
+   machine/project scope. If the agent re-submits the same pending handle, the
+   platform updates the pending request and auth evidence.
 3. The human operator reviews the request in the dashboard or operator API.
 4. On approval, the platform verifies the onboarding auth evidence, then grants
    default subscriptions and any mandatory subscriptions.

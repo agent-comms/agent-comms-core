@@ -686,31 +686,73 @@ async function requestSignup(request: Request, env: Env) {
   }
   const database = db.db;
   const authEvidence = await onboardingAuthEvidence(input, env, requestedAt);
-  await database
-    .prepare(
-      `INSERT INTO agent_identities
-        (id, handle, display_name, machine_scope, status, requested_at,
-         onboarding_auth_hash, onboarding_auth_status, onboarding_auth_length, onboarding_auth_checked_at)
-       VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      id,
-      input.handle,
-      input.displayName,
-      input.machineScope,
-      requestedAt,
-      authEvidence.hash,
-      authEvidence.status,
-      authEvidence.length,
-      authEvidence.checkedAt,
-    )
-    .run();
-  const profile = profileValues(input, id);
+  const existing = await database
+    .prepare("SELECT id, status, requested_at FROM agent_identities WHERE handle = ?")
+    .bind(input.handle)
+    .first<{ id: string; status: string; requested_at: string }>();
+  if (existing && existing.status !== "pending") {
+    return json({ error: "An agent with this handle already exists." }, 409);
+  }
+  const agentId = existing?.id ?? id;
+  const agentRequestedAt = existing?.requested_at ?? requestedAt;
+  if (existing) {
+    await database
+      .prepare(
+        `UPDATE agent_identities
+         SET display_name = ?,
+             machine_scope = ?,
+             onboarding_auth_hash = ?,
+             onboarding_auth_status = ?,
+             onboarding_auth_length = ?,
+             onboarding_auth_checked_at = ?
+         WHERE id = ? AND status = 'pending'`,
+      )
+      .bind(
+        input.displayName,
+        input.machineScope,
+        authEvidence.hash,
+        authEvidence.status,
+        authEvidence.length,
+        authEvidence.checkedAt,
+        agentId,
+      )
+      .run();
+  } else {
+    await database
+      .prepare(
+        `INSERT INTO agent_identities
+          (id, handle, display_name, machine_scope, status, requested_at,
+           onboarding_auth_hash, onboarding_auth_status, onboarding_auth_length, onboarding_auth_checked_at)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        agentId,
+        input.handle,
+        input.displayName,
+        input.machineScope,
+        agentRequestedAt,
+        authEvidence.hash,
+        authEvidence.status,
+        authEvidence.length,
+        authEvidence.checkedAt,
+      )
+      .run();
+  }
+  const profile = profileValues(input, agentId);
   await database
     .prepare(
       `INSERT INTO agent_profiles
         (agent_id, project, role, summary, tools_json, interested_projects_json, capabilities_json, operating_notes, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET
+         project = excluded.project,
+         role = excluded.role,
+         summary = excluded.summary,
+         tools_json = excluded.tools_json,
+         interested_projects_json = excluded.interested_projects_json,
+         capabilities_json = excluded.capabilities_json,
+         operating_notes = excluded.operating_notes,
+         updated_at = excluded.updated_at`,
     )
     .bind(
       profile.agentId,
@@ -724,7 +766,7 @@ async function requestSignup(request: Request, env: Env) {
       requestedAt,
     )
     .run();
-  return json({ id, status: "pending", requestedAt, profile }, 202);
+  return json({ id: agentId, status: "pending", requestedAt: agentRequestedAt, profile }, 202);
 }
 
 async function createDirectMessage(request: Request, env: Env, auth?: AuthContext) {
