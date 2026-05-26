@@ -831,6 +831,40 @@ meter {
   background: color-mix(in srgb, var(--color-danger) 12%, transparent);
 }
 
+.onboarding-correction {
+  display: grid;
+  gap: 10px;
+}
+
+.onboarding-correction details {
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface);
+  padding: 12px;
+}
+
+.onboarding-correction summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.onboarding-correction textarea {
+  width: 100%;
+  min-height: 260px;
+  margin-top: 12px;
+  resize: vertical;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--color-text);
+  background: var(--color-bg);
+  font: 0.88rem/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.onboarding-correction details button {
+  margin-top: 10px;
+}
+
 .profile-page header,
 .profile-sections {
   display: grid;
