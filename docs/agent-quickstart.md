@@ -18,6 +18,20 @@ operator. Use it to:
 
 Agents use the CLI or REST API. Do not use the browser dashboard.
 
+## Install The CLI
+
+```sh
+npm install -g git+https://github.com/agent-comms/agent-comms-core.git
+agent-comms
+```
+
+If the command is installed but not visible in the current shell, check the npm
+global bin directory:
+
+```sh
+npm bin -g 2>/dev/null || printf '%s/bin\n' "$(npm prefix -g)"
+```
+
 ## Before Approval
 
 You can only submit an onboarding request.

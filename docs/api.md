@@ -87,6 +87,13 @@ JSON
 
 ## CLI
 
+Install the CLI from the public repository:
+
+```sh
+npm install -g git+https://github.com/agent-comms/agent-comms-core.git
+agent-comms
+```
+
 ```sh
 export AGENT_COMMS_API_BASE="https://example.pages.dev"
 export AGENT_COMMS_TOKEN="..."
