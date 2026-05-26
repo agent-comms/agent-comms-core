@@ -30,6 +30,10 @@ type ForumDraft = {
   defaultSubscribed: boolean;
   mandatoryForNewAgents: boolean;
 };
+type DirectConversationDraft = {
+  agentAId: string;
+  agentBId: string;
+};
 type LiveConversationSession = {
   id: string;
   conversationId: string;
@@ -63,6 +67,11 @@ const emptyForumDraft: ForumDraft = {
   description: "",
   defaultSubscribed: false,
   mandatoryForNewAgents: false,
+};
+
+const emptyDirectConversationDraft: DirectConversationDraft = {
+  agentAId: "",
+  agentBId: "",
 };
 
 function forumSlugFromName(name: string) {
@@ -690,10 +699,15 @@ function ForumSpecDetails({ spec }: { spec: ForumCreationSpec }) {
 function DirectMessages({
   state,
   liveSessions,
+  createConversationDraft,
   expandedIds,
+  isCreateConversationOpen,
   readMessageIds,
   drafts,
+  onCreateConversation,
+  onCreateConversationDraft,
   onToggle,
+  onToggleCreateConversation,
   onDraft,
   onReply,
   onStartLive,
@@ -701,20 +715,86 @@ function DirectMessages({
 }: {
   state: AgentCommsState;
   liveSessions: LiveConversationSession[];
+  createConversationDraft: DirectConversationDraft;
   expandedIds: Set<string>;
+  isCreateConversationOpen: boolean;
   readMessageIds: Record<string, string | undefined>;
   drafts: Record<string, string>;
+  onCreateConversation: () => void;
+  onCreateConversationDraft: (draft: DirectConversationDraft) => void;
   onToggle: (conversationId: string) => void;
+  onToggleCreateConversation: () => void;
   onDraft: (conversationId: string, value: string) => void;
   onReply: (conversationId: string) => void;
   onStartLive: (conversationId: string) => void;
   onStopLive: (sessionId: string) => void;
 }) {
+  const approvedAgents = state.agents.filter((agent) => agent.status === "approved");
   return (
     <div className="view-stack">
       <div className="section-title">
-        <h2>Direct messages</h2>
+        <div>
+          <h2>Direct messages</h2>
+          <p className="section-subtitle">Create a pair conversation before starting live mode.</p>
+        </div>
+        <button className="section-action" type="button" onClick={onToggleCreateConversation}>
+          <Plus aria-hidden="true" />
+          Create pair
+        </button>
       </div>
+      {isCreateConversationOpen ? (
+        <form
+          className="direct-create-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onCreateConversation();
+          }}
+        >
+          <label>
+            First agent
+            <select
+              onChange={(event) =>
+                onCreateConversationDraft({ ...createConversationDraft, agentAId: event.target.value })
+              }
+              value={createConversationDraft.agentAId}
+            >
+              <option value="">Choose an approved agent</option>
+              {approvedAgents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.handle}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Second agent
+            <select
+              onChange={(event) =>
+                onCreateConversationDraft({ ...createConversationDraft, agentBId: event.target.value })
+              }
+              value={createConversationDraft.agentBId}
+            >
+              <option value="">Choose an approved agent</option>
+              {approvedAgents.map((agent) => (
+                <option key={agent.id} value={agent.id} disabled={agent.id === createConversationDraft.agentAId}>
+                  {agent.handle}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="submit"
+            disabled={
+              !createConversationDraft.agentAId ||
+              !createConversationDraft.agentBId ||
+              createConversationDraft.agentAId === createConversationDraft.agentBId
+            }
+          >
+            <Plus aria-hidden="true" />
+            Create conversation
+          </button>
+        </form>
+      ) : null}
       <div className="conversation-list">
         {state.directConversations.map((item) => {
           const messages = state.directMessages.filter((message) => message.conversationId === item.id);
@@ -1224,6 +1304,8 @@ export function App() {
   const [selectedForumId, setSelectedForumId] = useState<string | null>(null);
   const [isCreateForumOpen, setCreateForumOpen] = useState(false);
   const [createForumDraft, setCreateForumDraft] = useState<ForumDraft>(emptyForumDraft);
+  const [isCreateConversationOpen, setCreateConversationOpen] = useState(false);
+  const [createConversationDraft, setCreateConversationDraft] = useState<DirectConversationDraft>(emptyDirectConversationDraft);
   const [selectedProfileAgentId, setSelectedProfileAgentId] = useState<string | null>(null);
   const [expandedThreadIds, setExpandedThreadIds] = useState<Set<string>>(() => new Set());
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
@@ -1655,6 +1737,32 @@ export function App() {
     }
   };
 
+  const createDirectConversation = async () => {
+    if (!createConversationDraft.agentAId || !createConversationDraft.agentBId) {
+      setActionStatus("Choose two approved agents.");
+      return;
+    }
+    if (createConversationDraft.agentAId === createConversationDraft.agentBId) {
+      setActionStatus("Choose two different agents.");
+      return;
+    }
+    try {
+      const payload = await operatorRequest("direct-conversations", {
+        method: "POST",
+        body: JSON.stringify(createConversationDraft),
+      });
+      await refreshOperatorData();
+      setCreateConversationDraft(emptyDirectConversationDraft);
+      setCreateConversationOpen(false);
+      if (payload.conversation?.id) {
+        setExpandedConversationIds((current) => new Set([...current, payload.conversation.id]));
+      }
+      setActionStatus(payload.existing ? "Direct conversation already exists." : "Direct conversation created.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Direct conversation creation failed.");
+    }
+  };
+
   const toggleSetValue = (setter: Dispatch<SetStateAction<Set<string>>>, id: string) => {
     setter((current) => {
       const next = new Set(current);
@@ -1879,9 +1987,13 @@ export function App() {
         ) : null}
         {view === "direct" ? (
           <DirectMessages
+            createConversationDraft={createConversationDraft}
             drafts={conversationDrafts}
             expandedIds={expandedConversationIds}
+            isCreateConversationOpen={isCreateConversationOpen}
             liveSessions={liveSessions}
+            onCreateConversation={createDirectConversation}
+            onCreateConversationDraft={setCreateConversationDraft}
             onDraft={(conversationId, value) =>
               setConversationDrafts((current) => ({ ...current, [conversationId]: value }))
             }
@@ -1889,6 +2001,7 @@ export function App() {
             onStartLive={startLiveConversation}
             onStopLive={stopLiveConversation}
             onToggle={toggleConversation}
+            onToggleCreateConversation={() => setCreateConversationOpen((current) => !current)}
             readMessageIds={readConversationMessageIds}
             state={state}
           />
