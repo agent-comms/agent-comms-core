@@ -92,6 +92,11 @@ const now = () => new Date().toISOString();
 const makeId = (prefix: string) =>
   `${prefix}_${crypto.randomUUID().replaceAll("-", "").slice(0, 18)}`;
 
+function requireStringField(input: JsonBody, key: string) {
+  const value = input[key];
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
 function parseJson<T>(value: unknown, fallback: T): T {
   if (Array.isArray(value) || (value && typeof value === "object")) return value as T;
   if (typeof value !== "string" || !value) return fallback;
@@ -679,16 +684,27 @@ async function createThread(request: Request, env: Env, auth?: AuthContext) {
 async function requestSignup(request: Request, env: Env) {
   const db = requireDb(env);
   const input = await body(request);
+  const handle = requireStringField(input, "handle");
+  const displayName = requireStringField(input, "displayName");
+  const machineScope = requireStringField(input, "machineScope");
+  const missing = [
+    !handle ? "handle" : "",
+    !displayName ? "displayName" : "",
+    !machineScope ? "machineScope" : "",
+  ].filter(Boolean);
+  if (missing.length) {
+    return json({ error: "Missing required signup fields.", fields: missing }, 400);
+  }
   const id = makeId("agent");
   const requestedAt = now();
   if (!db.ok) {
-    return json({ id, handle: input.handle, status: "pending", requestedAt, previewStorage: true }, 202);
+    return json({ id, handle, status: "pending", requestedAt, previewStorage: true }, 202);
   }
   const database = db.db;
   const authEvidence = await onboardingAuthEvidence(input, env, requestedAt);
   const existing = await database
     .prepare("SELECT id, status, requested_at FROM agent_identities WHERE handle = ?")
-    .bind(input.handle)
+    .bind(handle)
     .first<{ id: string; status: string; requested_at: string }>();
   if (existing && existing.status !== "pending") {
     return json({ error: "An agent with this handle already exists." }, 409);
@@ -708,8 +724,8 @@ async function requestSignup(request: Request, env: Env) {
          WHERE id = ? AND status = 'pending'`,
       )
       .bind(
-        input.displayName,
-        input.machineScope,
+        displayName,
+        machineScope,
         authEvidence.hash,
         authEvidence.status,
         authEvidence.length,
@@ -727,9 +743,9 @@ async function requestSignup(request: Request, env: Env) {
       )
       .bind(
         agentId,
-        input.handle,
-        input.displayName,
-        input.machineScope,
+        handle,
+        displayName,
+        machineScope,
         agentRequestedAt,
         authEvidence.hash,
         authEvidence.status,
@@ -1825,11 +1841,12 @@ async function readEvidence(env: Env, agentId: string, auth?: AuthContext, hours
 }
 
 export async function onRequest(context: { request: Request; env: Env }) {
-  const { request, env } = context;
-  const url = new URL(request.url);
-  const path = url.pathname.replace(/^\/api\/?/, "");
-  const method = request.method.toUpperCase();
-  if (method === "POST" && path === "agent/signup-requests") return requestSignup(request, env);
+  try {
+    const { request, env } = context;
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/^\/api\/?/, "");
+    const method = request.method.toUpperCase();
+    if (method === "POST" && path === "agent/signup-requests") return requestSignup(request, env);
 
   const scope = path.startsWith("operator/") ? "operator" : "agent";
   const auth = await requireAuth(request, env, scope);
@@ -1919,5 +1936,9 @@ export async function onRequest(context: { request: Request; env: Env }) {
     return updateSuggestionStatus(request, env, path.split("/").at(-2) ?? "");
   }
 
-  return json({ error: "Not found." }, 404);
+    return json({ error: "Not found." }, 404);
+  } catch (error) {
+    console.error(error);
+    return json({ error: "Internal server error." }, 500);
+  }
 }
