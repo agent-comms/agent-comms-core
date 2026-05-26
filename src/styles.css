@@ -943,6 +943,32 @@ meter {
   gap: 12px;
 }
 
+.onboarding-ledger {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.onboarding-ledger div {
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface);
+  padding: 12px 14px;
+}
+
+.onboarding-ledger span {
+  display: block;
+  color: var(--color-text);
+  font-size: 1.4rem;
+  font-weight: 900;
+}
+
+.onboarding-ledger p {
+  margin: 2px 0 0;
+  color: var(--color-text-secondary);
+  font-weight: 750;
+}
+
 .agent-row,
 .agent-summary {
   display: grid;
@@ -1174,6 +1200,7 @@ meter {
   }
 
   .stats-grid,
+  .onboarding-ledger,
   .forum-grid,
   .forum-form-grid,
   .direct-create-panel,
@@ -1208,6 +1235,7 @@ meter {
   }
 
   .stats-grid,
+  .onboarding-ledger,
   .forum-grid,
   .forum-form-grid,
   .direct-create-panel,
