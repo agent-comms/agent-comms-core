@@ -675,7 +675,13 @@ function requireDb(env: Env): { ok: true; db: D1Database | PgDatabase } | { ok: 
 async function requireApprovedAgent(db: D1Database | PgDatabase, agentId: string, auth?: AuthContext) {
   if (!agentId) return { ok: false, response: json({ error: "Agent identity is required." }, 400) };
   if (auth?.ok && auth.agentId && auth.agentId !== agentId) {
-    return { ok: false, response: json({ error: "Token is bound to a different agent identity." }, 403) };
+    return {
+      ok: false,
+      response: json({
+        error: "Authenticated token is bound to a different agent identity.",
+        hint: "Use the token-bound agent id, omit the agent id where the CLI supports inference, or check command argument order.",
+      }, 403),
+    };
   }
   const agent = await db
     .prepare("SELECT status FROM agent_identities WHERE id = ?")
@@ -832,11 +838,23 @@ async function requestSignup(request: Request, env: Env) {
   }
   const id = makeId("agent");
   const requestedAt = now();
+  const authEvidence = await onboardingAuthEvidence(input, env, requestedAt);
+  const onboardingAuthConfigured = Boolean(
+    (env.ONBOARDING_AUTH_HASHES ?? "")
+      .split(/[\s,]+/)
+      .map((hash) => hash.trim())
+      .filter(Boolean).length,
+  );
+  if (onboardingAuthConfigured && authEvidence.status === "missing") {
+    return json({
+      error: "onboarding_auth_required",
+      message: "This deployment requires the operator-issued onboarding auth string.",
+    }, 400);
+  }
   if (!db.ok) {
-    return json({ id, handle, status: "pending", requestedAt, previewStorage: true }, 202);
+    return json({ id, handle, status: "pending", requestedAt, previewStorage: true, onboardingAuth: authEvidence.status }, 202);
   }
   const database = db.db;
-  const authEvidence = await onboardingAuthEvidence(input, env, requestedAt);
   const existing = await database
     .prepare("SELECT id, status, requested_at FROM agent_identities WHERE handle = ?")
     .bind(handle)
@@ -938,7 +956,14 @@ async function createDirectMessage(request: Request, env: Env, auth?: AuthContex
     return json({ message: normalizeDirectMessage(memory.directMessages.at(-1) ?? {}), previewStorage: true }, 201);
   }
   const database = db.db;
-  const agentAuth = await requireApprovedAgent(database, String(input.senderAgentId ?? ""), auth);
+  const senderAgentId = String(input.senderAgentId ?? (auth?.ok ? auth.agentId ?? "" : ""));
+  if (auth?.ok && auth.agentId && input.senderAgentId && String(input.senderAgentId) !== auth.agentId) {
+    return json({
+      error: "sender_agent_id does not match the authenticated agent.",
+      hint: "For the CLI, use `agent-comms dm-send <conversation-id> <body>` or `agent-comms dm-send <conversation-id> <sender-agent-id> <body>`.",
+    }, 403);
+  }
+  const agentAuth = await requireApprovedAgent(database, senderAgentId, auth);
   if (!agentAuth.ok) return agentAuth.response;
   const redaction = redactionBlock(input.body);
   if (!redaction.ok) return redaction.response;
@@ -956,17 +981,17 @@ async function createDirectMessage(request: Request, env: Env, auth?: AuthContex
       hint: "Create or reuse the pair first with POST /api/agent/direct-conversations or `agent-comms dm-create <agent-id> <peer-agent-id>`.",
     }, 404);
   }
-  if (![String(conversation.agent_a_id), String(conversation.agent_b_id)].includes(String(input.senderAgentId))) {
+  if (![String(conversation.agent_a_id), String(conversation.agent_b_id)].includes(senderAgentId)) {
     return json({ error: "Sender is not a participant in this direct conversation." }, 403);
   }
-  return idempotent(request, database, String(input.senderAgentId), async () => {
+  return idempotent(request, database, senderAgentId, async () => {
     await database
       .prepare(
         `INSERT INTO direct_messages
           (id, conversation_id, sender_agent_id, body, created_at)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .bind(id, conversationId, input.senderAgentId, input.body, createdAt)
+      .bind(id, conversationId, senderAgentId, input.body, createdAt)
       .run();
     const row = await database
       .prepare("SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, body, created_at FROM direct_messages WHERE id = ?")
@@ -1838,6 +1863,11 @@ async function upsertLiveReceipt(request: Request, env: Env, sessionId: string, 
   return json({ session: normalizeLiveSession(updated ?? {}, receipts), receipt: receipts.find((receipt) => receipt.agent_id === agentId) });
 }
 
+function readAgentMe(auth: AuthContext) {
+  if (auth.ok && auth.agentId) return json({ agentId: auth.agentId });
+  return json({ error: "Authenticated token is not bound to an agent identity." }, 400);
+}
+
 async function mintAgentToken(request: Request, env: Env, agentId: string) {
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Agent token minting requires durable storage." }, 503);
@@ -2099,6 +2129,7 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (!auth.ok) return auth.response;
 
   if (method === "GET" && path === "agent/schemas") return json({ schemas: apiSchemas() });
+  if (method === "GET" && path === "agent/me") return readAgentMe(auth);
   if (method === "POST" && path === "agent/redaction-check") return redactionCheck(request);
   if (method === "POST" && path === "agent/dry-run") return dryRun(request, env);
   if (method === "GET" && path === "agent/forums") return listForums(env);

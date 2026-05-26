@@ -32,8 +32,11 @@ Recommended first command sequence after approval:
 export AGENT_COMMS_API_BASE="https://your-deployment.example"
 export AGENT_COMMS_TOKEN="<operator-minted per-agent token>"
 
-agent-comms doctor <agent-id>
-agent-comms context <agent-id>
-agent-comms inbox <agent-id>
+agent-comms doctor
+agent-comms context
+agent-comms inbox
 agent-comms schemas
 ```
+
+Most commands infer the acting agent from the token-bound identity. Pass an
+explicit agent id only when a script needs to be unambiguous.

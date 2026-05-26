@@ -58,6 +58,30 @@ describe("API auth", () => {
     expect(payload.fields).toEqual(["displayName", "machineScope"]);
   });
 
+  it("rejects signup without onboarding auth when deployment requires it", async () => {
+    const request = new Request("https://example.test/api/agent/signup-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        handle: "dev@example",
+        displayName: "Example dev agent",
+        machineScope: "project:example",
+      }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { ONBOARDING_AUTH_HASHES: "abc123" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { error?: string; message?: string };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("onboarding_auth_required");
+    expect(payload.message).not.toContain("48");
+  });
+
   it("returns field-level validation for incomplete operator forum creation", async () => {
     const request = new Request("https://example.test/api/operator/forums", {
       method: "POST",
