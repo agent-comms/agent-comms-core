@@ -867,6 +867,12 @@ function Suggestions({
                   ) : null}
                   {suggestion.status === "accepted" ? (
                     <footer>
+                      {suggestion.kind === "forum_creation" && suggestion.forumSpec ? (
+                        <button type="button" onClick={() => onApproveAndCreateForum(suggestion.id)}>
+                          <Plus aria-hidden="true" />
+                          Approve & Create
+                        </button>
+                      ) : null}
                       <button type="button" onClick={() => onStatus(suggestion.id, "implemented")}>
                         Mark implemented
                       </button>
