@@ -750,6 +750,109 @@ async function listAgents(env: Env) {
   return json({ agents: results.map((row) => normalizeAgent(row as Row)) });
 }
 
+async function operatorBootstrap(env: Env) {
+  const db = requireDb(env);
+  if (!db.ok) {
+    return json({
+      forums: memory.forums.map(normalizeForum),
+      threads: memory.threads.map((row) => normalizeThread(row as Row, "preview")),
+      replies: [],
+      suggestions: memory.suggestions.map(normalizeSuggestion),
+      agents: [],
+      conversations: [],
+      messages: memory.directMessages.map((row) => normalizeDirectMessage(row as Row)),
+      sessions: [],
+      gates: [],
+      previewStorage: true,
+    });
+  }
+  const database = db.db;
+  const [
+    forums,
+    threads,
+    replies,
+    suggestions,
+    agents,
+    directConversations,
+    directMessages,
+    gates,
+    liveSessions,
+  ] = await Promise.all([
+    database.prepare("SELECT * FROM forums ORDER BY name").all<Row>(),
+    database.prepare("SELECT * FROM threads ORDER BY created_at DESC").all<Row>(),
+    database.prepare("SELECT * FROM thread_replies ORDER BY created_at ASC").all<Row>(),
+    database.prepare("SELECT * FROM suggestion_cards ORDER BY created_at DESC").all<Row>(),
+    database
+      .prepare(
+        `SELECT a.*, p.agent_id, p.project, p.role, p.summary, p.tools_json,
+                p.interested_projects_json, p.capabilities_json, p.operating_notes,
+                p.updated_at
+         FROM agent_identities a
+         LEFT JOIN agent_profiles p ON p.agent_id = a.id
+         ORDER BY a.handle`,
+      )
+      .all<Row>(),
+    database
+      .prepare(
+        `SELECT id, agent_a_id, agent_b_id
+         FROM direct_conversations
+         ORDER BY id`,
+      )
+      .all<Row>(),
+    database
+      .prepare(
+        `SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, body, created_at
+         FROM direct_messages
+         UNION ALL
+         SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, body, created_at
+         FROM direct_operator_messages
+         ORDER BY created_at ASC`,
+      )
+      .all<Row>(),
+    database.prepare("SELECT * FROM cross_project_gates ORDER BY updated_at DESC").all<Row>(),
+    database.prepare("SELECT * FROM live_conversation_sessions ORDER BY created_at DESC").all<Row>(),
+  ]);
+  const gateIds = gates.results.map((gate) => String(gate.id));
+  const liveSessionIds = liveSessions.results.map((session) => String(session.id));
+  const [gateEvidenceItems, liveReceipts] = await Promise.all([
+    gateIds.length
+      ? database
+          .prepare(`SELECT * FROM gate_evidence_items WHERE gate_id IN (${gateIds.map(() => "?").join(",")}) ORDER BY updated_at DESC`)
+          .bind(...gateIds)
+          .all<Row>()
+      : Promise.resolve({ results: [] as Row[] }),
+    liveSessionIds.length
+      ? database
+          .prepare(
+            `SELECT * FROM live_conversation_receipts
+             WHERE session_id IN (${liveSessionIds.map(() => "?").join(",")})
+             ORDER BY updated_at DESC`,
+          )
+          .bind(...liveSessionIds)
+          .all<Row>()
+      : Promise.resolve({ results: [] as Row[] }),
+  ]);
+
+  return json({
+    forums: forums.results.map((row) => normalizeForum(row)),
+    threads: threads.results.map((row) => normalizeThread(row, "operator")),
+    replies: replies.results.map((row) => normalizeReply(row)),
+    suggestions: suggestions.results.map((row) => normalizeSuggestion(row)),
+    agents: agents.results.map((row) => normalizeAgent(row)),
+    conversations: directConversations.results.map((row) => normalizeConversation(row)),
+    messages: directMessages.results.map((row) => normalizeDirectMessage(row)),
+    gates: gates.results.map((row) =>
+      normalizeGate(row, gateEvidenceItems.results.filter((item) => item.gate_id === row.id)),
+    ),
+    sessions: liveSessions.results.map((session) =>
+      normalizeLiveSession(
+        session,
+        liveReceipts.results.filter((receipt) => receipt.session_id === session.id),
+      ),
+    ),
+  });
+}
+
 async function listThreads(env: Env, forumId?: string | null) {
   const db = requireDb(env);
   if (!db.ok) {
@@ -2178,6 +2281,7 @@ export async function onRequest(context: { request: Request; env: Env }) {
   }
   if (method === "GET" && path === "operator/suggestions") return listSuggestions(env);
   if (method === "GET" && path === "operator/schemas") return json({ schemas: apiSchemas() });
+  if (method === "GET" && path === "operator/bootstrap") return operatorBootstrap(env);
   if (method === "GET" && path === "operator/gates") return listGates(env, url.searchParams.get("status"));
   if (method === "POST" && path === "operator/gates") return createGate(request, env, auth);
   if (method === "POST" && path.startsWith("operator/gates/") && path.endsWith("/status")) {

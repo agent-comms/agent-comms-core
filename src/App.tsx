@@ -1448,26 +1448,9 @@ export function App() {
     const refreshSequence = refreshSequenceRef.current + 1;
     refreshSequenceRef.current = refreshSequence;
     const mutationEpochAtStart = mutationEpochRef.current;
-    const requests = [
-      ["forums", "forums"],
-      ["threads", "threads"],
-      ["replies", "thread-replies"],
-      ["suggestions", "suggestions"],
-      ["agents", "agents"],
-      ["directConversations", "direct-conversations"],
-      ["directMessages", "direct-messages"],
-      ["liveConversations", "live-conversations"],
-      ["gates", "gates"],
-    ] as const;
-    const settled = await Promise.all(
-      requests.map(async ([key, path]) => {
-        try {
-          return { key, payload: await operatorRequest(path) };
-        } catch (error) {
-          return { key, error: error instanceof Error ? error.message : "request failed" };
-        }
-      }),
-    );
+    const bootstrap = await operatorRequest("bootstrap").catch((error) => ({
+      error: error instanceof Error ? error.message : "request failed",
+    }));
     if (!force && (
       refreshSequence !== refreshSequenceRef.current ||
       mutationEpochAtStart !== mutationEpochRef.current ||
@@ -1475,15 +1458,10 @@ export function App() {
     )) {
       return;
     }
-    const payloads = Object.fromEntries(
-      settled.filter((result) => "payload" in result).map((result) => [result.key, result.payload]),
-    ) as Record<string, any>;
-    const failures = settled.filter((result) => "error" in result) as Array<{ key: string; error: string }>;
-    const hasAnyPayload = Object.keys(payloads).length > 0;
-    if (hasAnyPayload) {
+    if (!("error" in bootstrap)) {
       setState((current) => ({
         ...current,
-        forums: (payloads.forums?.forums ?? current.forums).map((forum: any) => ({
+        forums: (bootstrap.forums ?? current.forums).map((forum: any) => ({
           id: forum.id,
           slug: forum.slug,
           name: forum.name,
@@ -1497,7 +1475,7 @@ export function App() {
             ? JSON.parse(forum.permanent_subscriber_ids_json)
             : (forum.permanentSubscriberIds ?? []),
         })),
-        threads: (payloads.threads?.threads ?? current.threads).map((thread: any) => ({
+        threads: (bootstrap.threads ?? current.threads).map((thread: any) => ({
           id: thread.id,
           forumId: thread.forum_id ?? thread.forumId,
           authorAgentId: thread.author_agent_id ?? thread.authorAgentId,
@@ -1508,7 +1486,7 @@ export function App() {
           createdAt: thread.created_at ?? thread.createdAt,
           updatedAt: thread.updated_at ?? thread.updatedAt,
         })),
-        replies: (payloads.replies?.replies ?? current.replies).map((reply: any) => ({
+        replies: (bootstrap.replies ?? current.replies).map((reply: any) => ({
           id: reply.id,
           threadId: reply.thread_id ?? reply.threadId,
           authorId: reply.author_id ?? reply.authorId,
@@ -1517,7 +1495,7 @@ export function App() {
           mentions: reply.mentions ?? JSON.parse(reply.mentions_json ?? "[]"),
           createdAt: reply.created_at ?? reply.createdAt,
         })),
-        suggestions: (payloads.suggestions?.suggestions ?? current.suggestions).map((suggestion: any) => ({
+        suggestions: (bootstrap.suggestions ?? current.suggestions).map((suggestion: any) => ({
           id: suggestion.id,
           kind: suggestion.kind,
           title: suggestion.title,
@@ -1531,7 +1509,7 @@ export function App() {
           downvotes: suggestion.downvotes ?? JSON.parse(suggestion.downvotes_json ?? "[]"),
           createdAt: suggestion.created_at ?? suggestion.createdAt,
         })),
-        gates: (payloads.gates?.gates ?? current.gates ?? []).map((gate: any) => ({
+        gates: (bootstrap.gates ?? current.gates ?? []).map((gate: any) => ({
           id: gate.id,
           title: gate.title,
           body: gate.body,
@@ -1546,7 +1524,7 @@ export function App() {
           createdAt: gate.created_at ?? gate.createdAt,
           updatedAt: gate.updated_at ?? gate.updatedAt,
         })),
-        agents: (payloads.agents?.agents ?? current.agents).map((agent: any) => ({
+        agents: (bootstrap.agents ?? current.agents).map((agent: any) => ({
           id: agent.id,
           handle: agent.handle,
           displayName: agent.display_name ?? agent.displayName,
@@ -1565,7 +1543,7 @@ export function App() {
           ),
           profile: agent.profile,
         })),
-        directConversations: (payloads.directConversations?.conversations ?? current.directConversations).map(
+        directConversations: (bootstrap.conversations ?? current.directConversations).map(
           (conversation: any) => ({
             id: conversation.id,
             participantAgentIds: [
@@ -1575,7 +1553,7 @@ export function App() {
             breakpointMessageIds: conversation.breakpointMessageIds ?? {},
           }),
         ),
-        directMessages: (payloads.directMessages?.messages ?? current.directMessages).map((message: any) => ({
+        directMessages: (bootstrap.messages ?? current.directMessages).map((message: any) => ({
           id: message.id,
           conversationId: message.conversation_id ?? message.conversationId,
           senderAgentId: message.sender_agent_id ?? message.senderAgentId ?? message.senderId,
@@ -1583,7 +1561,7 @@ export function App() {
           createdAt: message.created_at ?? message.createdAt,
         })),
       }));
-      setLiveSessions((payloads.liveConversations?.sessions ?? liveSessions).map((session: any) => ({
+      setLiveSessions((bootstrap.sessions ?? liveSessions).map((session: any) => ({
         id: session.id,
         conversationId: session.conversation_id ?? session.conversationId,
         status: session.status,
@@ -1592,11 +1570,9 @@ export function App() {
         createdAt: session.created_at ?? session.createdAt,
         receipts: session.receipts ?? [],
       })));
-    }
-    if (failures.length) {
-      setApiStatus(`${hasAnyPayload ? "partial durable storage" : "operator API unavailable"}; failed: ${failures.map((failure) => `${failure.key} (${failure.error})`).join(", ")}`);
+      setApiStatus(bootstrap.previewStorage ? "preview storage" : "durable storage");
     } else {
-      setApiStatus(payloads.forums?.previewStorage ? "preview storage" : "durable storage");
+      setApiStatus(`operator API unavailable; bootstrap (${bootstrap.error})`);
     }
   }, [liveSessions, operatorRequest, operatorToken]);
 
