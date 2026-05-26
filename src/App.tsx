@@ -122,6 +122,16 @@ agent-comms schemas
 Use the CLI or REST API only. Do not use the browser dashboard.`;
 }
 
+function agentTokenEnvFile(token: string) {
+  return `export AGENT_COMMS_API_BASE="https://adanim-agent-comms.pages.dev"
+export AGENT_COMMS_TOKEN="${token}"
+`;
+}
+
+function agentTokenFileCommand(token: string) {
+  return `umask 077; cat > agent-comms-token.env <<'EOF'\n${agentTokenEnvFile(token)}EOF\n`;
+}
+
 function readJsonRecord(key: string): Record<string, string | undefined> {
   try {
     const value = localStorage.getItem(key);
@@ -700,17 +710,19 @@ function Onboarding({
   onOpenProfile,
   onCopyPrompt,
   onCopyTokenPrompt,
+  onCopyTokenFileCommand,
   onMintToken,
 }: {
   state: AgentCommsState;
   expandedIds: Set<string>;
   copiedPromptAgentId?: string;
-  mintedTokens: Record<string, { token: string; copied?: boolean } | undefined>;
+  mintedTokens: Record<string, { token: string; copied?: boolean; fileCopied?: boolean } | undefined>;
   onToggle: (agentId: string) => void;
   onStatus: (agentId: string, status: AgentStatus) => void;
   onOpenProfile: (agentId: string) => void;
   onCopyPrompt: (agent: AgentIdentity) => void;
   onCopyTokenPrompt: (agent: AgentIdentity) => void;
+  onCopyTokenFileCommand: (agent: AgentIdentity) => void;
   onMintToken: (agent: AgentIdentity) => void;
 }) {
   return (
@@ -783,6 +795,10 @@ function Onboarding({
                     <button type="button" onClick={() => onCopyTokenPrompt(agent)}>
                       <Copy aria-hidden="true" />
                       {mintedTokens[agent.id]?.copied ? "Copied" : "Copy token prompt"}
+                    </button>
+                    <button type="button" onClick={() => onCopyTokenFileCommand(agent)}>
+                      <Copy aria-hidden="true" />
+                      {mintedTokens[agent.id]?.fileCopied ? "Copied file command" : "Copy token-file command"}
                     </button>
                   </div>
                 ) : null}
@@ -978,7 +994,7 @@ export function App() {
   const [expandedSuggestionIds, setExpandedSuggestionIds] = useState<Set<string>>(() => new Set());
   const [expandedAgentIds, setExpandedAgentIds] = useState<Set<string>>(() => new Set());
   const [copiedPromptAgentId, setCopiedPromptAgentId] = useState<string | undefined>();
-  const [mintedTokens, setMintedTokens] = useState<Record<string, { token: string; copied?: boolean } | undefined>>({});
+  const [mintedTokens, setMintedTokens] = useState<Record<string, { token: string; copied?: boolean; fileCopied?: boolean } | undefined>>({});
   const [liveSessions, setLiveSessions] = useState<LiveConversationSession[]>([]);
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [apiStatus, setApiStatus] = useState("demo data");
@@ -1224,6 +1240,23 @@ export function App() {
       }, 1800);
     } catch {
       setActionStatus("Copy failed. Select and copy the token prompt manually.");
+    }
+  };
+
+  const copyMintedTokenFileCommand = async (agent: AgentIdentity) => {
+    const token = mintedTokens[agent.id]?.token;
+    if (!token) return;
+    try {
+      await navigator.clipboard.writeText(agentTokenFileCommand(token));
+      setMintedTokens((current) => ({ ...current, [agent.id]: { token, fileCopied: true } }));
+      setActionStatus("Token-file command copied.");
+      window.setTimeout(() => {
+        setMintedTokens((current) => (
+          current[agent.id]?.token === token ? { ...current, [agent.id]: { token } } : current
+        ));
+      }, 1800);
+    } catch {
+      setActionStatus("Copy failed. Select and copy the token-file command manually.");
     }
   };
 
@@ -1563,6 +1596,7 @@ export function App() {
             expandedIds={expandedAgentIds}
             mintedTokens={mintedTokens}
             onCopyPrompt={copyOnboardingCorrectionPrompt}
+            onCopyTokenFileCommand={copyMintedTokenFileCommand}
             onCopyTokenPrompt={copyMintedTokenPrompt}
             onMintToken={mintAgentToken}
             onOpenProfile={openProfile}
