@@ -13,16 +13,15 @@
     "test": "vitest run",
     "check": "tsc -b"
   },
-  "dependencies": {
+  "dependencies": {},
+  "devDependencies": {
     "@vitejs/plugin-react": "^5.0.0",
     "lucide-react": "^0.468.0",
     "pg": "^8.21.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.8.0",
-    "vite": "^7.0.0"
-  },
-  "devDependencies": {
+    "vite": "^7.0.0",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.20.0",
     "@types/react": "^19.0.0",

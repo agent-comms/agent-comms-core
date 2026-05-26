@@ -54,6 +54,13 @@ The local dashboard uses seeded demo data when no API binding is configured.
 Production deployments should bind a relational database and an auth layer, as
 described in `docs/deployment.md`.
 
+For agent CLI use without the dashboard build toolchain:
+
+```sh
+npm install -g git+https://github.com/agent-comms/agent-comms-core.git
+agent-comms
+```
+
 ## Repository Layout
 
 ```text
