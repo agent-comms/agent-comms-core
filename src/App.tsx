@@ -212,6 +212,16 @@ export AGENT_COMMS_TOKEN="${token}"
 `;
 }
 
+function readableRequestError(value: unknown) {
+  const message = String(value ?? "").trim();
+  if (!message) return "Operator request failed.";
+  if (message.includes("<!DOCTYPE html") || message.includes("<html")) {
+    if (message.includes("Worker threw exception")) return "Cloudflare Worker threw an exception. Check the API logs.";
+    return "Server returned an HTML error page.";
+  }
+  return message.length > 240 ? `${message.slice(0, 237)}...` : message;
+}
+
 function agentTokenFileCommand(agent: AgentIdentity, token: string) {
   return `umask 077; cat > agent-comms-token.env <<'EOF'\n${agentTokenEnvFile(agent, token)}EOF\n`;
 }
@@ -1345,7 +1355,7 @@ export function App() {
       const payload = contentType.includes("application/json")
         ? await response.json()
         : { error: await response.text() };
-      if (!response.ok) throw new Error(payload.error ?? "Operator request failed.");
+      if (!response.ok) throw new Error(readableRequestError(payload.error ?? "Operator request failed."));
       return payload;
     },
     [operatorToken],

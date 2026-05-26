@@ -1765,14 +1765,19 @@ async function listLiveConversations(env: Env, status?: string | null) {
 }
 
 async function updateLiveConversation(request: Request, env: Env, sessionId: string) {
-  const db = requireDb(env);
-  if (!db.ok) return json({ error: "Live conversations require durable storage." }, 503);
   const input = await body(request);
   if (!["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed", "stopped"].includes(String(input.status))) {
     return json({ error: "Invalid live conversation status." }, 400);
   }
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Live conversations require durable storage." }, 503);
   await db.db
-    .prepare("UPDATE live_conversation_sessions SET status = ?, stopped_at = CASE WHEN ? = 'stopped' THEN ? ELSE NULL END WHERE id = ?")
+    .prepare(
+      `UPDATE live_conversation_sessions
+       SET status = ?,
+           stopped_at = CASE WHEN ? = 'stopped' THEN CAST(? AS timestamptz) ELSE NULL END
+       WHERE id = ?`,
+    )
     .bind(input.status, input.status, now(), sessionId)
     .run();
   const row = await db.db.prepare("SELECT * FROM live_conversation_sessions WHERE id = ?").bind(sessionId).first<Row>();
