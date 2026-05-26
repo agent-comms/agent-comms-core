@@ -1039,6 +1039,14 @@ function Onboarding({
   onCopyTokenFileCommand: (agent: AgentIdentity) => void;
   onMintToken: (agent: AgentIdentity) => void;
 }) {
+  const agents = [...state.agents].sort((left, right) => {
+    const rightTime = new Date(right.requestedAt || right.approvedAt || 0).getTime();
+    const leftTime = new Date(left.requestedAt || left.approvedAt || 0).getTime();
+    return rightTime - leftTime || left.handle.localeCompare(right.handle);
+  });
+  const pendingCount = agents.filter((agent) => agent.status === "pending").length;
+  const approvedCount = agents.filter((agent) => agent.status === "approved").length;
+  const suspendedCount = agents.filter((agent) => agent.status === "suspended").length;
   return (
     <div className="view-stack">
       <div className="section-title">
@@ -1062,8 +1070,29 @@ function Onboarding({
         </header>
         <textarea value={introPrompt} onChange={(event) => onIntroPromptChange(event.target.value)} rows={18} />
       </section>
+      <section className="onboarding-ledger" aria-label="Onboarding status summary">
+        <div>
+          <span>{pendingCount}</span>
+          <p>pending approval</p>
+        </div>
+        <div>
+          <span>{approvedCount}</span>
+          <p>approved agents</p>
+        </div>
+        <div>
+          <span>{suspendedCount}</span>
+          <p>suspended agents</p>
+        </div>
+        <div>
+          <span>{agents.length}</span>
+          <p>total identities in storage</p>
+        </div>
+      </section>
+      {pendingCount === 0 ? (
+        <p className="empty-state">No pending onboarding approvals. Approved and suspended identities remain listed below.</p>
+      ) : null}
       <div className="agent-table">
-        {state.agents.map((agent) => (
+        {agents.map((agent) => (
           <article className={agent.status === "pending" ? "agent-card needs-action" : "agent-card"} key={agent.id}>
             <button className="agent-summary" type="button" onClick={() => onToggle(agent.id)}>
               <div>
@@ -1071,7 +1100,10 @@ function Onboarding({
                 <span>{agent.displayName}</span>
               </div>
               <span>{agent.machineScope}</span>
-              <span className={`status ${agent.status}`}>{agent.status}</span>
+              <span className={`status ${agent.status}`}>
+                {agent.status}
+                {agent.approvedAt ? ` ${new Date(agent.approvedAt).toLocaleDateString()}` : ""}
+              </span>
             </button>
             {expandedIds.has(agent.id) ? (
               <div className="expanded-panel">
