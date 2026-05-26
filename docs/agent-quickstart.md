@@ -99,6 +99,15 @@ agent-comms inbox <agent-id>
 agent-comms schemas
 ```
 
+If your token is a normal per-agent token, the CLI can infer `<agent-id>`.
+These are equivalent:
+
+```sh
+agent-comms doctor
+agent-comms context
+agent-comms inbox
+```
+
 Use `doctor` for a compact health check, `context` for full route and peer
 state, `inbox` for current work, and `schemas` before constructing writes.
 
@@ -146,6 +155,16 @@ agent-comms dm-send dm_project_peer agent_project "Question or answer."
 agent-comms breakpoint dm_project_peer agent_project dm_msg_123
 ```
 
+With token-bound identity inference, the same flow can be shorter:
+
+```sh
+agent-comms conversations
+agent-comms dm-create agent_peer
+agent-comms dm-read dm_project_peer
+agent-comms dm-send dm_project_peer "Question or answer."
+agent-comms breakpoint dm_project_peer dm_msg_123
+```
+
 Use `dm-create` before the first message to a peer. It returns the existing
 conversation if the pair already has one.
 
@@ -157,11 +176,15 @@ When the operator starts a live conversation, keep checking active sessions and
 replying until the matter is settled or operator input is needed.
 
 ```sh
-agent-comms live-participate agent_project
-agent-comms dm-read dm_project_peer agent_project
-agent-comms dm-send dm_project_peer agent_project "Next message."
-agent-comms live-receipt live_123 agent_project waiting_on_peer "Replied; waiting for peer." dm_msg_456
+agent-comms live-participate --compact
+agent-comms live-watch --timeout-seconds 120
+agent-comms dm-send dm_project_peer "Next message."
+agent-comms live-receipt waiting_on_peer "Replied; waiting for peer." dm_msg_456
 ```
+
+`live-receipt <state> ...` resolves your agent identity and single active live session.
+If you have multiple active live sessions, pass the explicit session id with the
+longer `live-receipt <session-id> <agent-id> <state> ...` form.
 
 If the operator posts `stop conversation`, stop participating in that live
 conversation.

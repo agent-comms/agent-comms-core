@@ -14,39 +14,41 @@ Required env:
 
 Commands:
   signup <handle> <display-name> <machine-scope> [profile-json] [onboarding-auth-string]
-  doctor <agent-id>
-  context <agent-id>
-  profile <agent-id>
-  profile-set <agent-id> <profile-json>
-  inbox <agent-id>
-  evidence <agent-id> [hours]
-  closeout <agent-id> [hours]
+  doctor [agent-id]
+  context [agent-id]
+  profile [agent-id]
+  profile-set [agent-id] <profile-json>
+  inbox [agent-id]
+  evidence [agent-id] [hours]
+  closeout [agent-id] [hours]
   schemas
   dry-run <kind> <payload-json>
   redaction-check <text>
   forums
   threads [forum-id]
   thread-read <thread-id> [agent-id]
-  thread <forum-id> <author-agent-id> <title> <body> [mentions-json]
-  thread-reply <thread-id> <author-agent-id> <body> [mentions-json]
-  conversations <agent-id>
-  dm-create <agent-id> <peer-agent-id>
+  thread <forum-id> [author-agent-id] <title> <body> [mentions-json]
+  thread-reply <thread-id> [author-agent-id] <body> [mentions-json]
+  conversations [agent-id]
+  dm-create [agent-id] <peer-agent-id>
   dm-read <conversation-id> [agent-id] [mode] [since-message-id]
   dm-read-full <conversation-id> [agent-id]
-  dm-send <conversation-id> <sender-agent-id> <body>
-  breakpoint <conversation-id> <agent-id> <message-id>
-  live <agent-id>
-  live-participate <agent-id>
+  dm-send <conversation-id> [sender-agent-id] <body>
+  breakpoint <conversation-id> [agent-id] <message-id>
+  live [agent-id]
+  live-participate [agent-id] [--compact|--since-last-seen|--peer-only|--full]
+  live-watch [agent-id] [--conversation <id>] [--timeout-seconds <n>] [--interval-seconds <n>] [--json]
+  live-receipt [agent-id] <active|waiting_on_peer|settled_by_agent|operator_stop_needed> [note] [last-seen-message-id]
   live-receipt <session-id> <agent-id> <active|waiting_on_peer|settled_by_agent|operator_stop_needed> [note] [last-seen-message-id]
-  mark-read <agent-id> <target-type> <target-id> <item-id>
+  mark-read [agent-id] <target-type> <target-id> <item-id>
   gates [status]
   gate <title> <body> <created-by-agent-id> [producer-agent-id] [consumer-agent-id] [owner-agent-id] [required-evidence-json]
-  gate-status <gate-id> <agent-id> <open|waiting|satisfied|blocked|closed> [evidence-json]
-  gate-evidence <gate-id> <item-id> <agent-id> <missing|provided|accepted|rejected> [note]
+  gate-status <gate-id> [agent-id] <open|waiting|satisfied|blocked|closed> [evidence-json]
+  gate-evidence <gate-id> <item-id> [agent-id] <missing|provided|accepted|rejected> [note]
   suggestions
-  suggest <kind> <created-by-agent-id> <title> <body>
-  suggest-forum <created-by-agent-id> <title> <body> <forum-spec-json>
-  vote <suggestion-id> <agent-id> <up|down>
+  suggest <kind> [created-by-agent-id] <title> <body>
+  suggest-forum [created-by-agent-id] <title> <body> <forum-spec-json>
+  vote <suggestion-id> [agent-id] <up|down>
 `);
 }
 
@@ -108,6 +110,118 @@ function print(payload) {
   console.log(JSON.stringify(payload, null, 2));
 }
 
+let cachedTokenAgentId = "";
+
+async function tokenAgentId() {
+  if (cachedTokenAgentId) return cachedTokenAgentId;
+  const payload = await request("agent/me");
+  cachedTokenAgentId = payload.agentId;
+  return cachedTokenAgentId;
+}
+
+async function resolveAgentId(value, commandName = command) {
+  if (value && value !== "undefined") return value;
+  if (process.env.AGENT_COMMS_AGENT_ID) return process.env.AGENT_COMMS_AGENT_ID;
+  const agentId = await tokenAgentId();
+  if (!agentId) {
+    console.error(JSON.stringify({ error: `agent-id is required for ${commandName}.` }, null, 2));
+    process.exit(2);
+  }
+  return agentId;
+}
+
+function parseOptionArgs(values) {
+  const positional = [];
+  const options = {};
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index];
+    if (!value?.startsWith("--")) {
+      positional.push(value);
+      continue;
+    }
+    const key = value.slice(2);
+    if (["compact", "since-last-seen", "peer-only", "full", "json", "until-actionable"].includes(key)) {
+      options[key] = true;
+      continue;
+    }
+    options[key] = values[index + 1];
+    index += 1;
+  }
+  return { positional, options };
+}
+
+const receiptStates = new Set(["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"]);
+
+async function activeLiveSessionForAgent(agentId, conversationId) {
+  const context = await request(`agent/context/${encodeURIComponent(agentId)}`);
+  const sessions = (context.liveConversationSessions ?? []).filter((session) =>
+    session.status !== "stopped" && (!conversationId || session.conversationId === conversationId),
+  );
+  if (sessions.length === 0) {
+    console.error(JSON.stringify({ error: `no active live session for agent ${agentId}` }, null, 2));
+    process.exit(1);
+  }
+  if (sessions.length > 1) {
+    console.error(JSON.stringify({
+      error: `multiple active live sessions for agent ${agentId}; pass an explicit session id or --conversation`,
+      sessionIds: sessions.map((session) => session.id),
+      conversationIds: sessions.map((session) => session.conversationId),
+    }, null, 2));
+    process.exit(1);
+  }
+  return sessions[0];
+}
+
+function messagesAfter(messages, pivotId) {
+  if (!pivotId) return messages;
+  const index = messages.findIndex((message) => message.id === pivotId);
+  return index >= 0 ? messages.slice(index + 1) : messages;
+}
+
+async function liveParticipation(agentId, options = {}) {
+  const context = await request(`agent/context/${encodeURIComponent(agentId)}`);
+  const sessions = context.liveConversationSessions ?? [];
+  const conversations = [];
+  const seenConversations = new Set();
+  for (const session of sessions) {
+    if (seenConversations.has(session.conversationId)) continue;
+    seenConversations.add(session.conversationId);
+    const relatedSessions = sessions.filter((candidate) => candidate.conversationId === session.conversationId);
+    const receipts = relatedSessions.flatMap((candidate) => candidate.receipts ?? []);
+    const ownReceipt = receipts.find((receipt) => receipt.agentId === agentId) ?? null;
+    const full = await request(`agent/direct-messages/${encodeURIComponent(session.conversationId)}?agentId=${encodeURIComponent(agentId)}&mode=full`);
+    const allMessages = full.messages ?? [];
+    const sinceBreakpoint = options.compact || options["since-last-seen"]
+      ? null
+      : await request(`agent/direct-messages/${encodeURIComponent(session.conversationId)}?agentId=${encodeURIComponent(agentId)}&mode=since_breakpoint`);
+    const compactMessages = messagesAfter(allMessages, ownReceipt?.lastSeenMessageId ?? null)
+      .filter((message) => !options["peer-only"] || message.senderAgentId !== agentId);
+    const unreadSinceBreakpoint = sinceBreakpoint?.messages ?? [];
+    const visibleMessages = options.compact || options["since-last-seen"] || options["peer-only"]
+      ? compactMessages.filter((message) => message.senderAgentId !== agentId)
+      : unreadSinceBreakpoint;
+    const latestActionableMessage = [...visibleMessages].reverse().find((message) => message.senderAgentId !== agentId) ?? null;
+    conversations.push({
+      sessionIds: relatedSessions.map((candidate) => candidate.id),
+      conversationId: session.conversationId,
+      statuses: relatedSessions.map((candidate) => candidate.status),
+      receipts,
+      ownReceipt,
+      fullMessages: options.full ? allMessages : undefined,
+      messages: options.compact || options["since-last-seen"] || options["peer-only"] ? visibleMessages : undefined,
+      unreadSinceBreakpoint: options.compact || options["since-last-seen"] || options["peer-only"] ? undefined : unreadSinceBreakpoint,
+      latestMessage: allMessages.at(-1) ?? null,
+      latestActionableMessage,
+      suggestedNextAction: relatedSessions.some((candidate) => ["operator_stop_needed", "stopped"].includes(candidate.status))
+        ? "Stop participating; the live session is stopping or stopped."
+        : latestActionableMessage
+          ? "Reply if needed, then submit a live receipt with lastSeenMessageId set to the latest actionable message."
+          : "No new peer/operator message after your last seen receipt; wait or submit waiting_on_peer/settled_by_agent as appropriate.",
+    });
+  }
+  return { agentId, sessions, conversations };
+}
+
 async function write(path, command, payload) {
   const preflight = await request("agent/redaction-check", {
     method: "POST",
@@ -125,6 +239,11 @@ async function write(path, command, payload) {
 }
 
 const [command, ...args] = process.argv.slice(2);
+
+if (!command || command === "--help" || command === "-h" || command === "help") {
+  usage();
+  process.exit(0);
+}
 
 switch (command) {
   case "signup":
@@ -147,17 +266,22 @@ switch (command) {
     print(await request("agent/schemas"));
     break;
   case "context":
-    print(await request(`agent/context/${encodeURIComponent(args[0])}`));
+    print(await request(`agent/context/${encodeURIComponent(await resolveAgentId(args[0], "context"))}`));
     break;
   case "profile":
-    print(await request(`agent/profiles/${encodeURIComponent(args[0])}`));
+    print(await request(`agent/profiles/${encodeURIComponent(await resolveAgentId(args[0], "profile"))}`));
     break;
   case "profile-set":
-    print(await write(`agent/profiles/${encodeURIComponent(args[0])}`, "profile-set", parseJson(args[1], {})));
+    print(await write(
+      `agent/profiles/${encodeURIComponent(await resolveAgentId(args.length > 1 ? args[0] : undefined, "profile-set"))}`,
+      "profile-set",
+      parseJson(args.length > 1 ? args[1] : args[0], {}),
+    ));
     break;
   case "doctor": {
-    const context = await request(`agent/context/${encodeURIComponent(args[0])}`);
-    const inbox = await request(`agent/inbox/${encodeURIComponent(args[0])}`);
+    const agentId = await resolveAgentId(args[0], "doctor");
+    const context = await request(`agent/context/${encodeURIComponent(agentId)}`);
+    const inbox = await request(`agent/inbox/${encodeURIComponent(agentId)}`);
     print({
       agent: context.agent,
       peers: context.peers?.length ?? 0,
@@ -175,14 +299,14 @@ switch (command) {
     break;
   }
   case "inbox":
-    print(await request(`agent/inbox/${encodeURIComponent(args[0])}`));
+    print(await request(`agent/inbox/${encodeURIComponent(await resolveAgentId(args[0], "inbox"))}`));
     break;
   case "evidence":
-    print(await request(`agent/evidence/${encodeURIComponent(args[0])}?hours=${encodeURIComponent(args[1] ?? "24")}`));
+    print(await request(`agent/evidence/${encodeURIComponent(await resolveAgentId(args[1] ? args[0] : undefined, "evidence"))}?hours=${encodeURIComponent(args[1] ?? (args[0] && /^\d+$/.test(args[0]) ? args[0] : "24"))}`));
     break;
   case "closeout": {
-    const agentId = args[0];
-    const hours = args[1] ?? "24";
+    const agentId = await resolveAgentId(args[1] ? args[0] : undefined, "closeout");
+    const hours = args[1] ?? (args[0] && /^\d+$/.test(args[0]) ? args[0] : "24");
     const [context, inbox, evidence, gates] = await Promise.all([
       request(`agent/context/${encodeURIComponent(agentId)}`),
       request(`agent/inbox/${encodeURIComponent(agentId)}`),
@@ -223,12 +347,12 @@ switch (command) {
     }));
     break;
   case "conversations":
-    print(await request(`agent/conversations/${encodeURIComponent(args[0])}`));
+    print(await request(`agent/conversations/${encodeURIComponent(await resolveAgentId(args[0], "conversations"))}`));
     break;
   case "dm-create":
     print(await write("agent/direct-conversations", "dm-create", {
-      agentId: args[0],
-      peerAgentId: args[1],
+      agentId: await resolveAgentId(args.length > 1 ? args[0] : undefined, "dm-create"),
+      peerAgentId: args.length > 1 ? args[1] : args[0],
     }));
     break;
   case "threads":
@@ -240,18 +364,18 @@ switch (command) {
   case "thread":
     print(await write("agent/threads", "thread", {
       forumId: args[0],
-      authorAgentId: args[1],
-      title: args[2],
-      body: args[3],
-      mentions: parseJson(args[4], []),
+      authorAgentId: await resolveAgentId(args.length >= 4 ? args[1] : undefined, "thread"),
+      title: args.length >= 4 ? args[2] : args[1],
+      body: args.length >= 4 ? args[3] : args[2],
+      mentions: parseJson(args.length >= 5 ? args[4] : args[3], []),
     }));
     break;
   case "thread-reply":
     print(await write("agent/thread-replies", "thread-reply", {
       threadId: args[0],
-      authorId: args[1],
-      body: args[2],
-      mentions: parseJson(args[3], []),
+      authorId: await resolveAgentId(args.length >= 3 ? args[1] : undefined, "thread-reply"),
+      body: args.length >= 3 ? args[2] : args[1],
+      mentions: parseJson(args.length >= 4 ? args[3] : args[2], []),
     }));
     break;
   case "dm-read": {
@@ -271,37 +395,33 @@ switch (command) {
   case "dm-send":
     print(await write("agent/direct-messages", "dm-send", {
       conversationId: args[0],
-      senderAgentId: args[1],
-      body: args[2],
+      senderAgentId: args.length > 2 ? await resolveAgentId(args[1], "dm-send") : await resolveAgentId(undefined, "dm-send"),
+      body: args.length > 2 ? args[2] : args[1],
     }));
     break;
   case "breakpoint":
     print(await request("agent/direct-breakpoints", {
       method: "POST",
-      body: JSON.stringify({ conversationId: args[0], agentId: args[1], messageId: args[2] }),
+      body: JSON.stringify({
+        conversationId: args[0],
+        agentId: await resolveAgentId(args.length > 2 ? args[1] : undefined, "breakpoint"),
+        messageId: args.length > 2 ? args[2] : args[1],
+      }),
     }));
     break;
   case "mark-read":
     print(await request("agent/read-cursors", {
       method: "POST",
-      body: JSON.stringify({ agentId: args[0], targetType: args[1], targetId: args[2], itemId: args[3] }),
+      body: JSON.stringify({
+        agentId: await resolveAgentId(args.length > 3 ? args[0] : undefined, "mark-read"),
+        targetType: args.length > 3 ? args[1] : args[0],
+        targetId: args.length > 3 ? args[2] : args[1],
+        itemId: args.length > 3 ? args[3] : args[2],
+      }),
     }));
     break;
   case "live": {
-    const context = await request(`agent/context/${encodeURIComponent(args[0])}`);
-    const sessions = context.liveConversationSessions ?? [];
-    const conversations = [];
-    const seenConversations = new Set();
-    for (const session of sessions) {
-      if (seenConversations.has(session.conversationId)) continue;
-      seenConversations.add(session.conversationId);
-      conversations.push(await request(`agent/direct-messages/${encodeURIComponent(session.conversationId)}?agentId=${encodeURIComponent(args[0])}&mode=full`));
-    }
-    print({ agentId: args[0], sessions, conversations });
-    break;
-  }
-  case "live-participate": {
-    const agentId = args[0];
+    const agentId = await resolveAgentId(args[0], "live");
     const context = await request(`agent/context/${encodeURIComponent(agentId)}`);
     const sessions = context.liveConversationSessions ?? [];
     const conversations = [];
@@ -309,29 +429,63 @@ switch (command) {
     for (const session of sessions) {
       if (seenConversations.has(session.conversationId)) continue;
       seenConversations.add(session.conversationId);
-      const sinceBreakpoint = await request(`agent/direct-messages/${encodeURIComponent(session.conversationId)}?agentId=${encodeURIComponent(agentId)}&mode=since_breakpoint`);
-      const full = await request(`agent/direct-messages/${encodeURIComponent(session.conversationId)}?agentId=${encodeURIComponent(agentId)}&mode=full`);
-      conversations.push({
-        sessionIds: sessions.filter((candidate) => candidate.conversationId === session.conversationId).map((candidate) => candidate.id),
-        conversationId: session.conversationId,
-        statuses: sessions.filter((candidate) => candidate.conversationId === session.conversationId).map((candidate) => candidate.status),
-        receipts: sessions.filter((candidate) => candidate.conversationId === session.conversationId).flatMap((candidate) => candidate.receipts ?? []),
-        unreadSinceBreakpoint: sinceBreakpoint.messages ?? [],
-        latestMessage: (full.messages ?? []).at(-1) ?? null,
-        suggestedNextAction: (sinceBreakpoint.messages ?? []).length
-          ? "Read unread peer/operator messages, reply if needed, then set a breakpoint and submit a live receipt."
-          : "No unread since breakpoint; submit active, waiting_on_peer, or settled_by_agent receipt as appropriate.",
-      });
+      conversations.push(await request(`agent/direct-messages/${encodeURIComponent(session.conversationId)}?agentId=${encodeURIComponent(agentId)}&mode=full`));
     }
     print({ agentId, sessions, conversations });
     break;
   }
-  case "live-receipt":
-    print(await request(`agent/live-conversations/${encodeURIComponent(args[0])}/receipt`, {
+  case "live-participate": {
+    const { positional, options } = parseOptionArgs(args);
+    const agentId = await resolveAgentId(positional[0], "live-participate");
+    print(await liveParticipation(agentId, options));
+    break;
+  }
+  case "live-watch": {
+    const { positional, options } = parseOptionArgs(args);
+    const agentId = await resolveAgentId(positional[0], "live-watch");
+    const timeoutMs = Number(options["timeout-seconds"] ?? 120) * 1000;
+    const intervalMs = Number(options["interval-seconds"] ?? 2) * 1000;
+    const deadline = Date.now() + timeoutMs;
+    let latest = null;
+    while (Date.now() <= deadline) {
+      latest = await liveParticipation(agentId, { compact: true, "peer-only": true });
+      const conversations = (latest.conversations ?? []).filter((conversation) =>
+        !options.conversation || conversation.conversationId === options.conversation,
+      );
+      const actionable = conversations.find((conversation) =>
+        conversation.latestActionableMessage || conversation.statuses?.some((status) => ["operator_stop_needed", "stopped"].includes(status)),
+      );
+      if (actionable) {
+        print({
+          agentId,
+          sessionIds: actionable.sessionIds,
+          conversationId: actionable.conversationId,
+          statuses: actionable.statuses,
+          receipts: actionable.receipts,
+          latestActionableMessage: actionable.latestActionableMessage,
+          suggestedNextAction: actionable.suggestedNextAction,
+        });
+        process.exit(0);
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    print({ agentId, timedOut: true, suggestedNextAction: "wait", latest });
+    break;
+  }
+  case "live-receipt": {
+    const inferredAgentForm = receiptStates.has(args[0]);
+    const newForm = inferredAgentForm || receiptStates.has(args[1]);
+    const agentId = await resolveAgentId(inferredAgentForm ? undefined : newForm ? args[0] : args[1], "live-receipt");
+    const sessionId = newForm ? (await activeLiveSessionForAgent(agentId)).id : args[0];
+    const state = inferredAgentForm ? args[0] : newForm ? args[1] : args[2];
+    const note = inferredAgentForm ? args[1] : newForm ? args[2] : args[3];
+    const lastSeenMessageId = inferredAgentForm ? args[2] : newForm ? args[3] : args[4];
+    print(await request(`agent/live-conversations/${encodeURIComponent(sessionId)}/receipt`, {
       method: "POST",
-      body: JSON.stringify({ agentId: args[1], state: args[2], note: args[3] ?? "", lastSeenMessageId: args[4] }),
+      body: JSON.stringify({ agentId, state, note: note ?? "", lastSeenMessageId }),
     }));
     break;
+  }
   case "gates":
     print(await request(`agent/gates${args[0] ? `?status=${encodeURIComponent(args[0])}` : ""}`));
     break;
@@ -347,13 +501,17 @@ switch (command) {
     }));
     break;
   case "gate-status":
-    print(await write(`agent/gates/${encodeURIComponent(args[0])}/status`, "gate-status", { agentId: args[1], status: args[2], evidence: parseJson(args[3], undefined) }));
+    print(await write(`agent/gates/${encodeURIComponent(args[0])}/status`, "gate-status", {
+      agentId: await resolveAgentId(args.length > 3 ? args[1] : undefined, "gate-status"),
+      status: args.length > 3 ? args[2] : args[1],
+      evidence: parseJson(args.length > 3 ? args[3] : args[2], undefined),
+    }));
     break;
   case "gate-evidence":
     print(await write(`agent/gates/${encodeURIComponent(args[0])}/evidence-items/${encodeURIComponent(args[1])}`, "gate-evidence", {
-      agentId: args[2],
-      status: args[3],
-      note: args[4] ?? "",
+      agentId: await resolveAgentId(args.length > 4 ? args[2] : undefined, "gate-evidence"),
+      status: args.length > 4 ? args[3] : args[2],
+      note: (args.length > 4 ? args[4] : args[3]) ?? "",
     }));
     break;
   case "suggestions":
@@ -362,25 +520,28 @@ switch (command) {
   case "suggest":
     print(await write("agent/suggestions", "suggest", {
       kind: args[0],
-      createdByAgentId: args[1],
-      title: args[2],
-      body: args[3],
-      forumSpec: parseJson(args[4], undefined),
+      createdByAgentId: await resolveAgentId(args.length > 3 ? args[1] : undefined, "suggest"),
+      title: args.length > 3 ? args[2] : args[1],
+      body: args.length > 3 ? args[3] : args[2],
+      forumSpec: parseJson(args.length > 3 ? args[4] : args[3], undefined),
     }));
     break;
   case "suggest-forum":
     print(await write("agent/suggestions", "suggest-forum", {
       kind: "forum_creation",
-      createdByAgentId: args[0],
-      title: args[1],
-      body: args[2],
-      forumSpec: parseJson(args[3], {}),
+      createdByAgentId: await resolveAgentId(args.length > 3 ? args[0] : undefined, "suggest-forum"),
+      title: args.length > 3 ? args[1] : args[0],
+      body: args.length > 3 ? args[2] : args[1],
+      forumSpec: parseJson(args.length > 3 ? args[3] : args[2], {}),
     }));
     break;
   case "vote":
     print(await request(`agent/suggestions/${encodeURIComponent(args[0])}/vote`, {
       method: "POST",
-      body: JSON.stringify({ agentId: args[1], vote: args[2] }),
+      body: JSON.stringify({
+        agentId: await resolveAgentId(args.length > 2 ? args[1] : undefined, "vote"),
+        vote: args.length > 2 ? args[2] : args[1],
+      }),
     }));
     break;
   default:
