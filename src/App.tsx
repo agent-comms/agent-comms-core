@@ -8,6 +8,7 @@ import {
   Lock,
   MessageCircle,
   MessagesSquare,
+  Plus,
   Send,
   ThumbsDown,
   ThumbsUp,
@@ -17,11 +18,18 @@ import {
 import { useCallback, useEffect, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import { defaultBranding, loadDeploymentBranding } from "./branding";
 import { demoState } from "./demoState";
-import type { AgentCommsState, AgentIdentity, CrossProjectGate, Forum, SuggestionStatus, Thread } from "./domain";
+import type { AgentCommsState, AgentIdentity, CrossProjectGate, Forum, ForumCreationSpec, SuggestionStatus, Thread } from "./domain";
 import { readConversationSinceBreakpoint } from "./domain";
 
 type View = "overview" | "forums" | "direct" | "suggestions" | "onboarding" | "gates" | "profile";
 type AgentStatus = "pending" | "approved" | "suspended";
+type ForumDraft = {
+  slug: string;
+  name: string;
+  description: string;
+  defaultSubscribed: boolean;
+  mandatoryForNewAgents: boolean;
+};
 type LiveConversationSession = {
   id: string;
   conversationId: string;
@@ -48,6 +56,23 @@ const suggestionOrder: Record<SuggestionStatus, number> = {
   implemented: 3,
   rejected: 4,
 };
+
+const emptyForumDraft: ForumDraft = {
+  slug: "",
+  name: "",
+  description: "",
+  defaultSubscribed: false,
+  mandatoryForNewAgents: false,
+};
+
+function forumSlugFromName(name: string) {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
 
 const defaultAdanimOnboardingPrompt = `You are an Adanim project agent. Before using agent-comms, submit an onboarding request.
 
@@ -448,22 +473,32 @@ function Overview({
 function Forums({
   state,
   selectedForumId,
+  createForumDraft,
   expandedThreadIds,
+  isCreateForumOpen,
   readThreadActivityIds,
   threadDrafts,
   onSelectForum,
   onBack,
+  onCreateForum,
+  onCreateForumDraft,
+  onToggleCreateForum,
   onToggleThread,
   onThreadDraft,
   onThreadReply,
 }: {
   state: AgentCommsState;
   selectedForumId: string | null;
+  createForumDraft: ForumDraft;
   expandedThreadIds: Set<string>;
+  isCreateForumOpen: boolean;
   readThreadActivityIds: Record<string, string | undefined>;
   threadDrafts: Record<string, string>;
   onSelectForum: (forumId: string) => void;
   onBack: () => void;
+  onCreateForum: () => void;
+  onCreateForumDraft: (draft: ForumDraft) => void;
+  onToggleCreateForum: () => void;
   onToggleThread: (threadId: string) => void;
   onThreadDraft: (threadId: string, value: string) => void;
   onThreadReply: (threadId: string) => void;
@@ -525,7 +560,93 @@ function Forums({
           <h2>Forums</h2>
           <p className="section-subtitle">Open a forum to review its full thread list.</p>
         </div>
+        <button className="section-action" type="button" onClick={onToggleCreateForum}>
+          <Plus aria-hidden="true" />
+          Create Forum
+        </button>
       </div>
+      {isCreateForumOpen ? (
+        <form
+          className="forum-create-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onCreateForum();
+          }}
+        >
+          <div className="forum-form-grid">
+            <label>
+              Forum name
+              <input
+                autoFocus
+                onChange={(event) => {
+                  const name = event.target.value;
+                  const shouldSyncSlug =
+                    !createForumDraft.slug || createForumDraft.slug === forumSlugFromName(createForumDraft.name);
+                  onCreateForumDraft({
+                    ...createForumDraft,
+                    name,
+                    slug: shouldSyncSlug ? forumSlugFromName(name) : createForumDraft.slug,
+                  });
+                }}
+                placeholder="Data engineering"
+                value={createForumDraft.name}
+              />
+            </label>
+            <label>
+              Slug
+              <input
+                onChange={(event) =>
+                  onCreateForumDraft({
+                    ...createForumDraft,
+                    slug: forumSlugFromName(event.target.value),
+                  })
+                }
+                placeholder="data-engineering"
+                value={createForumDraft.slug}
+              />
+            </label>
+            <label className="wide">
+              Description
+              <textarea
+                onChange={(event) => onCreateForumDraft({ ...createForumDraft, description: event.target.value })}
+                placeholder="What belongs in this forum, and when agents should use it."
+                value={createForumDraft.description}
+              />
+            </label>
+          </div>
+          <div className="forum-form-options">
+            <label>
+              <input
+                checked={createForumDraft.defaultSubscribed}
+                onChange={(event) =>
+                  onCreateForumDraft({ ...createForumDraft, defaultSubscribed: event.target.checked })
+                }
+                type="checkbox"
+              />
+              Default for new agents
+            </label>
+            <label>
+              <input
+                checked={createForumDraft.mandatoryForNewAgents}
+                onChange={(event) =>
+                  onCreateForumDraft({ ...createForumDraft, mandatoryForNewAgents: event.target.checked })
+                }
+                type="checkbox"
+              />
+              Mandatory subscription
+            </label>
+          </div>
+          <footer>
+            <button
+              type="submit"
+              disabled={!createForumDraft.name.trim() || !createForumDraft.slug.trim() || !createForumDraft.description.trim()}
+            >
+              <Plus aria-hidden="true" />
+              Create forum
+            </button>
+          </footer>
+        </form>
+      ) : null}
       <div className="forum-grid">
         {state.forums.map((forum) => (
           <ForumPanel
@@ -537,6 +658,32 @@ function Forums({
         ))}
       </div>
     </div>
+  );
+}
+
+function ForumSpecDetails({ spec }: { spec: ForumCreationSpec }) {
+  return (
+    <section className="forum-spec-panel">
+      <h3>Forum to create</h3>
+      <dl className="detail-grid">
+        <div>
+          <dt>Name</dt>
+          <dd>{spec.name}</dd>
+        </div>
+        <div>
+          <dt>Slug</dt>
+          <dd>{spec.slug}</dd>
+        </div>
+        <div>
+          <dt>Subscription defaults</dt>
+          <dd>
+            {spec.defaultSubscribed ? "Default subscribed" : "Not default subscribed"}
+            {spec.mandatoryForNewAgents ? " · mandatory" : ""}
+          </dd>
+        </div>
+      </dl>
+      <p>{spec.description}</p>
+    </section>
   );
 }
 
@@ -650,11 +797,13 @@ function Suggestions({
   expandedIds,
   onToggle,
   onStatus,
+  onApproveAndCreateForum,
 }: {
   state: AgentCommsState;
   expandedIds: Set<string>;
   onToggle: (suggestionId: string) => void;
   onStatus: (suggestionId: string, status: SuggestionStatus) => void;
+  onApproveAndCreateForum: (suggestionId: string) => void;
 }) {
   return (
     <div className="view-stack">
@@ -677,6 +826,9 @@ function Suggestions({
               {expanded ? (
                 <div className="expanded-panel">
                   <p>{suggestion.body}</p>
+                  {suggestion.kind === "forum_creation" && suggestion.forumSpec ? (
+                    <ForumSpecDetails spec={suggestion.forumSpec} />
+                  ) : null}
                   <dl className="detail-grid">
                     <div>
                       <dt>Created by</dt>
@@ -696,6 +848,12 @@ function Suggestions({
                   </dl>
                   {suggestion.status === "open" ? (
                     <footer>
+                      {suggestion.kind === "forum_creation" && suggestion.forumSpec ? (
+                        <button type="button" onClick={() => onApproveAndCreateForum(suggestion.id)}>
+                          <Plus aria-hidden="true" />
+                          Approve & Create
+                        </button>
+                      ) : null}
                       <button type="button" onClick={() => onStatus(suggestion.id, "accepted")}>
                         Accept
                       </button>
@@ -1058,6 +1216,8 @@ export function App() {
   const [state, setState] = useState<AgentCommsState>(demoState);
   const [branding, setBranding] = useState(defaultBranding);
   const [selectedForumId, setSelectedForumId] = useState<string | null>(null);
+  const [isCreateForumOpen, setCreateForumOpen] = useState(false);
+  const [createForumDraft, setCreateForumDraft] = useState<ForumDraft>(emptyForumDraft);
   const [selectedProfileAgentId, setSelectedProfileAgentId] = useState<string | null>(null);
   const [expandedThreadIds, setExpandedThreadIds] = useState<Set<string>>(() => new Set());
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
@@ -1167,6 +1327,9 @@ export function App() {
           kind: suggestion.kind,
           title: suggestion.title,
           body: suggestion.body,
+          forumSpec: suggestion.forumSpec ?? (
+            suggestion.forum_spec_json ? JSON.parse(suggestion.forum_spec_json) : undefined
+          ),
           createdByAgentId: suggestion.created_by_agent_id ?? suggestion.createdByAgentId,
           status: suggestion.status,
           upvotes: suggestion.upvotes ?? JSON.parse(suggestion.upvotes_json ?? "[]"),
@@ -1441,6 +1604,51 @@ export function App() {
     }
   };
 
+  const approveAndCreateForumSuggestion = async (suggestionId: string) => {
+    try {
+      const payload = await operatorRequest(`suggestions/${suggestionId}/approve-create-forum`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      await refreshOperatorData();
+      if (payload.forum?.id) {
+        setSelectedForumId(payload.forum.id);
+        setView("forums");
+      }
+      setActionStatus("Suggestion approved and forum created.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Approve and create failed.");
+    }
+  };
+
+  const createForum = async () => {
+    const draft = {
+      ...createForumDraft,
+      slug: createForumDraft.slug.trim() || forumSlugFromName(createForumDraft.name),
+      name: createForumDraft.name.trim(),
+      description: createForumDraft.description.trim(),
+    };
+    if (!draft.name || !draft.slug || !draft.description) {
+      setActionStatus("Forum name, slug, and description are required.");
+      return;
+    }
+    try {
+      const payload = await operatorRequest("forums", {
+        method: "POST",
+        body: JSON.stringify(draft),
+      });
+      await refreshOperatorData();
+      setCreateForumDraft(emptyForumDraft);
+      setCreateForumOpen(false);
+      if (payload.forum?.id) {
+        setSelectedForumId(payload.forum.id);
+      }
+      setActionStatus("Forum created.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Forum creation failed.");
+    }
+  };
+
   const toggleSetValue = (setter: Dispatch<SetStateAction<Set<string>>>, id: string) => {
     setter((current) => {
       const next = new Set(current);
@@ -1644,13 +1852,18 @@ export function App() {
         ) : null}
         {view === "forums" ? (
           <Forums
+            createForumDraft={createForumDraft}
             expandedThreadIds={expandedThreadIds}
+            isCreateForumOpen={isCreateForumOpen}
             onBack={() => setSelectedForumId(null)}
+            onCreateForum={createForum}
+            onCreateForumDraft={setCreateForumDraft}
             onSelectForum={setSelectedForumId}
             onThreadDraft={(threadId, value) =>
               setThreadDrafts((current) => ({ ...current, [threadId]: value }))
             }
             onThreadReply={replyToThread}
+            onToggleCreateForum={() => setCreateForumOpen((current) => !current)}
             onToggleThread={toggleThread}
             readThreadActivityIds={readThreadActivityIds}
             state={state}
@@ -1677,6 +1890,7 @@ export function App() {
         {view === "suggestions" ? (
           <Suggestions
             expandedIds={expandedSuggestionIds}
+            onApproveAndCreateForum={approveAndCreateForumSuggestion}
             onStatus={updateSuggestionStatus}
             onToggle={(suggestionId) => toggleSetValue(setExpandedSuggestionIds, suggestionId)}
             state={state}

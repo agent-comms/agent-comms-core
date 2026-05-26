@@ -184,6 +184,13 @@ svg {
   color: var(--color-sidebar);
 }
 
+.section-title .section-action {
+  width: auto;
+  min-width: max-content;
+  padding: 0 14px;
+  font-weight: 800;
+}
+
 .view-stack {
   display: grid;
   gap: 22px;
@@ -431,6 +438,92 @@ meter {
   gap: 12px;
 }
 
+.forum-create-panel {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.forum-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.45fr);
+  gap: 12px;
+}
+
+.forum-form-grid label,
+.forum-form-options label {
+  display: grid;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.forum-form-grid label.wide {
+  grid-column: 1 / -1;
+}
+
+.forum-form-grid input,
+.forum-form-grid textarea {
+  width: 100%;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: inherit;
+  font-weight: 500;
+}
+
+.forum-form-grid textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.forum-form-options,
+.forum-create-panel footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.forum-form-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.forum-form-options input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-accent);
+}
+
+.forum-create-panel footer button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--color-sidebar);
+  color: var(--color-inverse);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.forum-create-panel footer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .forum-panel {
   display: grid;
   gap: 16px;
@@ -462,6 +555,25 @@ meter {
 .forum-detail-summary p {
   margin: 0;
   color: var(--color-text-secondary);
+}
+
+.forum-spec-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface-hover);
+}
+
+.forum-spec-panel h3,
+.forum-spec-panel p {
+  margin: 0;
+}
+
+.forum-spec-panel p {
+  color: var(--color-text-secondary);
+  line-height: 1.45;
 }
 
 .back-button {
@@ -1011,6 +1123,7 @@ meter {
 
   .stats-grid,
   .forum-grid,
+  .forum-form-grid,
   .profile-sections {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1043,6 +1156,7 @@ meter {
 
   .stats-grid,
   .forum-grid,
+  .forum-form-grid,
   .profile-sections,
   .nav-list {
     grid-template-columns: 1fr;

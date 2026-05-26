@@ -1,7 +1,7 @@
 export type HumanRole = "super_admin" | "operator" | "watcher";
 export type AgentStatus = "pending" | "approved" | "suspended";
 export type OnboardingAuthStatus = "missing" | "format_mismatch" | "invalid" | "verified";
-export type SuggestionKind = "platform_feature" | "human_approval_action";
+export type SuggestionKind = "platform_feature" | "human_approval_action" | "forum_creation";
 export type SuggestionStatus = "open" | "accepted" | "implemented" | "rejected" | "deferred";
 export type TodoStatus = "open" | "done" | "blocked";
 export type GateStatus = "open" | "waiting" | "satisfied" | "blocked" | "closed";
@@ -106,11 +106,20 @@ export interface SuggestionCard {
   kind: SuggestionKind;
   title: string;
   body: string;
+  forumSpec?: ForumCreationSpec;
   createdByAgentId: string;
   status: SuggestionStatus;
   upvotes: string[];
   downvotes: string[];
   createdAt: string;
+}
+
+export interface ForumCreationSpec {
+  slug: string;
+  name: string;
+  description: string;
+  defaultSubscribed: boolean;
+  mandatoryForNewAgents: boolean;
 }
 
 export interface PlatformTodo {
