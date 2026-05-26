@@ -15,7 +15,7 @@ import {
   UserCheck,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import { defaultBranding, loadDeploymentBranding } from "./branding";
 import { demoState } from "./demoState";
 import type { AgentCommsState, AgentIdentity, CrossProjectGate, Forum, ForumCreationSpec, SuggestionStatus, Thread } from "./domain";
@@ -1339,6 +1339,20 @@ export function App() {
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [apiStatus, setApiStatus] = useState("demo data");
   const [actionStatus, setActionStatus] = useState("");
+  const refreshSequenceRef = useRef(0);
+  const mutationEpochRef = useRef(0);
+  const activeOperatorMutationsRef = useRef(0);
+
+  const beginOperatorMutation = useCallback(() => {
+    mutationEpochRef.current += 1;
+    activeOperatorMutationsRef.current += 1;
+    let finished = false;
+    return () => {
+      if (finished) return;
+      finished = true;
+      activeOperatorMutationsRef.current = Math.max(0, activeOperatorMutationsRef.current - 1);
+    };
+  }, []);
 
   const operatorRequest = useCallback(
     async (path: string, options: RequestInit = {}) => {
@@ -1361,7 +1375,12 @@ export function App() {
     [operatorToken],
   );
 
-  const refreshOperatorData = useCallback(async () => {
+  const refreshOperatorData = useCallback(async (options?: { force?: boolean }) => {
+    const force = options?.force ?? false;
+    if (!force && activeOperatorMutationsRef.current > 0) return;
+    const refreshSequence = refreshSequenceRef.current + 1;
+    refreshSequenceRef.current = refreshSequence;
+    const mutationEpochAtStart = mutationEpochRef.current;
     try {
       const [
         forumsPayload,
@@ -1384,6 +1403,13 @@ export function App() {
         operatorRequest("live-conversations"),
         operatorRequest("gates"),
       ]);
+      if (!force && (
+        refreshSequence !== refreshSequenceRef.current ||
+        mutationEpochAtStart !== mutationEpochRef.current ||
+        activeOperatorMutationsRef.current > 0
+      )) {
+        return;
+      }
       setState((current) => ({
         ...current,
         forums: (forumsPayload.forums ?? current.forums).map((forum: any) => ({
@@ -1497,6 +1523,13 @@ export function App() {
       })));
       setApiStatus(forumsPayload.previewStorage ? "preview storage" : "durable storage");
     } catch (error) {
+      if (!force && (
+        refreshSequence !== refreshSequenceRef.current ||
+        mutationEpochAtStart !== mutationEpochRef.current ||
+        activeOperatorMutationsRef.current > 0
+      )) {
+        return;
+      }
       setApiStatus(error instanceof Error ? error.message : "operator API unavailable");
     }
   }, [operatorRequest, operatorToken]);
@@ -1620,6 +1653,7 @@ export function App() {
   };
 
   const mintAgentToken = async (agent: AgentIdentity) => {
+    const finishMutation = beginOperatorMutation();
     try {
       const payload = await operatorRequest(`agents/${agent.id}/tokens`, {
         method: "POST",
@@ -1629,23 +1663,29 @@ export function App() {
       setActionStatus("Token minted. Copy it now; it will not be shown after refresh.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Token minting failed.");
+    } finally {
+      finishMutation();
     }
   };
 
   const approveAgent = async (agentId: string) => {
+    const finishMutation = beginOperatorMutation();
     try {
       await operatorRequest("agent-approvals", {
         method: "POST",
         body: JSON.stringify({ agentId }),
       });
-      await refreshOperatorData();
+      await refreshOperatorData({ force: true });
       setActionStatus("Agent approved.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Approval failed.");
+    } finally {
+      finishMutation();
     }
   };
 
   const updateAgentStatus = async (agentId: string, status: AgentStatus) => {
+    const finishMutation = beginOperatorMutation();
     setState((current) => ({
       ...current,
       agents: current.agents.map((agent) =>
@@ -1675,15 +1715,18 @@ export function App() {
           body: JSON.stringify({ status }),
         });
       }
-      await refreshOperatorData();
+      await refreshOperatorData({ force: true });
       setActionStatus(`Agent ${status}.`);
     } catch (error) {
-      await refreshOperatorData();
+      await refreshOperatorData({ force: true });
       setActionStatus(error instanceof Error ? error.message : "Agent status update failed.");
+    } finally {
+      finishMutation();
     }
   };
 
   const updateSuggestionStatus = async (suggestionId: string, status: SuggestionStatus) => {
+    const finishMutation = beginOperatorMutation();
     setState((current) => ({
       ...current,
       suggestions: current.suggestions.map((suggestion) =>
@@ -1695,20 +1738,23 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ status }),
       });
-      await refreshOperatorData();
+      await refreshOperatorData({ force: true });
       setActionStatus(`Suggestion ${status}.`);
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Suggestion update failed.");
+    } finally {
+      finishMutation();
     }
   };
 
   const approveAndCreateForumSuggestion = async (suggestionId: string) => {
+    const finishMutation = beginOperatorMutation();
     try {
       const payload = await operatorRequest(`suggestions/${suggestionId}/approve-create-forum`, {
         method: "POST",
         body: JSON.stringify({}),
       });
-      await refreshOperatorData();
+      await refreshOperatorData({ force: true });
       if (payload.forum?.id) {
         setSelectedForumId(payload.forum.id);
         setView("forums");
@@ -1716,6 +1762,8 @@ export function App() {
       setActionStatus("Suggestion approved and forum created.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Approve and create failed.");
+    } finally {
+      finishMutation();
     }
   };
 
@@ -1730,12 +1778,13 @@ export function App() {
       setActionStatus("Forum name, slug, and description are required.");
       return;
     }
+    const finishMutation = beginOperatorMutation();
     try {
       const payload = await operatorRequest("forums", {
         method: "POST",
         body: JSON.stringify(draft),
       });
-      await refreshOperatorData();
+      await refreshOperatorData({ force: true });
       setCreateForumDraft(emptyForumDraft);
       setCreateForumOpen(false);
       if (payload.forum?.id) {
@@ -1744,6 +1793,8 @@ export function App() {
       setActionStatus("Forum created.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Forum creation failed.");
+    } finally {
+      finishMutation();
     }
   };
 
@@ -1756,12 +1807,13 @@ export function App() {
       setActionStatus("Choose two different agents.");
       return;
     }
+    const finishMutation = beginOperatorMutation();
     try {
       const payload = await operatorRequest("direct-conversations", {
         method: "POST",
         body: JSON.stringify(createConversationDraft),
       });
-      await refreshOperatorData();
+      await refreshOperatorData({ force: true });
       setCreateConversationDraft(emptyDirectConversationDraft);
       setCreateConversationOpen(false);
       if (payload.conversation?.id) {
@@ -1770,6 +1822,8 @@ export function App() {
       setActionStatus(payload.existing ? "Direct conversation already exists." : "Direct conversation created.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Direct conversation creation failed.");
+    } finally {
+      finishMutation();
     }
   };
 
@@ -1801,6 +1855,7 @@ export function App() {
   const replyToThread = async (threadId: string) => {
     const bodyText = threadDrafts[threadId]?.trim();
     if (!bodyText) return;
+    const finishMutation = beginOperatorMutation();
     const id = `local_reply_${Date.now()}`;
     setState((current) => ({
       ...current,
@@ -1832,12 +1887,15 @@ export function App() {
       setActionStatus("Thread reply posted.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Thread reply saved locally.");
+    } finally {
+      finishMutation();
     }
   };
 
   const replyToConversation = async (conversationId: string) => {
     const bodyText = conversationDrafts[conversationId]?.trim();
     if (!bodyText) return;
+    const finishMutation = beginOperatorMutation();
     const id = `local_dm_${Date.now()}`;
     setState((current) => ({
       ...current,
@@ -1879,10 +1937,13 @@ export function App() {
       setActionStatus("Direct reply posted.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Direct reply added locally.");
+    } finally {
+      finishMutation();
     }
   };
 
   const startLiveConversation = async (conversationId: string) => {
+    const finishMutation = beginOperatorMutation();
     try {
       await operatorRequest("live-conversations", {
         method: "POST",
@@ -1893,27 +1954,33 @@ export function App() {
           createdByHumanId: "human_shay",
         }),
       });
-      await refreshOperatorData();
+      await refreshOperatorData({ force: true });
       setActionStatus("Live conversation mode started.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Live mode start failed.");
+    } finally {
+      finishMutation();
     }
   };
 
   const stopLiveConversation = async (sessionId: string) => {
+    const finishMutation = beginOperatorMutation();
     try {
       await operatorRequest(`live-conversations/${sessionId}/status`, {
         method: "POST",
         body: JSON.stringify({ status: "stopped" }),
       });
-      await refreshOperatorData();
+      await refreshOperatorData({ force: true });
       setActionStatus("Live conversation mode stopped.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Live mode stop failed.");
+    } finally {
+      finishMutation();
     }
   };
 
   const updateGateStatus = async (gateId: string, status: CrossProjectGate["status"]) => {
+    const finishMutation = beginOperatorMutation();
     setState((current) => ({
       ...current,
       gates: (current.gates ?? []).map((gate) => (gate.id === gateId ? { ...gate, status } : gate)),
@@ -1923,10 +1990,12 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ status }),
       });
-      await refreshOperatorData();
+      await refreshOperatorData({ force: true });
       setActionStatus(`Gate ${status}.`);
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Gate update failed.");
+    } finally {
+      finishMutation();
     }
   };
 
