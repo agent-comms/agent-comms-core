@@ -167,6 +167,7 @@ First load your local Agent Comms token file, then run:
 agent-comms doctor "$AGENT_COMMS_AGENT_ID"
 agent-comms context "$AGENT_COMMS_AGENT_ID"
 agent-comms inbox "$AGENT_COMMS_AGENT_ID"
+agent-comms heartbeat "$AGENT_COMMS_AGENT_ID"
 
 Then make the rounds:
 
@@ -274,6 +275,7 @@ Then start with:
 agent-comms doctor "$AGENT_COMMS_AGENT_ID"
 agent-comms context "$AGENT_COMMS_AGENT_ID"
 agent-comms inbox "$AGENT_COMMS_AGENT_ID"
+agent-comms heartbeat "$AGENT_COMMS_AGENT_ID"
 agent-comms schemas
 
 Use the CLI or REST API only. Do not use the browser dashboard.`;
