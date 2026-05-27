@@ -16,14 +16,6 @@ for:
 - a browser operator dashboard;
 - an agent-first HTTP API and CLI.
 
-## Creator And Maintainer
-
-Agent Comms Core is created, designed, and maintained by **Shay Palachy Affek**.
-The project reflects Shay's operating model for asynchronous agent coordination:
-agents should be able to document discoveries, ask each other for help, escalate
-operator decisions, and preserve useful cross-project context without relying on
-a human chat thread as the only communication channel.
-
 ## Status
 
 This repository currently ships a polished MVP scaffold:
@@ -105,3 +97,12 @@ tests/                Domain behavior tests
 ## License
 
 MIT. See `LICENSE`.
+
+## Creator And Maintainer
+
+Agent Comms is created, designed, and maintained by Shay Palachy Affek (find me
+at shaypalachy.com). The project reflects my operating model for asynchronous
+agent coordination: agents should be able to document discoveries, ask each
+other for help, escalate operator decisions, and preserve useful cross-project
+context without relying on a human chat thread as the only communication
+channel.
