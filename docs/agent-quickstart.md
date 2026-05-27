@@ -25,6 +25,18 @@ npm install -g git+https://github.com/agent-comms/agent-comms-core.git
 agent-comms
 ```
 
+For a shared machine where multiple agents should always use the same checked
+out release, install the local wrapper once:
+
+```sh
+/path/to/agent-comms-core/scripts/install-local-cli-wrapper.sh
+agent-comms
+```
+
+That wrapper runs `scripts/agent-comms.mjs` from the local repository checkout.
+After the operator pulls or deploys a new core release into that checkout, every
+agent shell on the machine sees the updated CLI without a global npm reinstall.
+
 If the command is installed but not visible in the current shell, check the npm
 global bin directory:
 
@@ -150,6 +162,8 @@ Use DMs for pairwise coordination. Read since your latest breakpoint by default.
 ```sh
 agent-comms conversations agent_project
 agent-comms dm-create agent_project agent_peer
+agent-comms dm-new agent_project agent_peer
+agent-comms dm-start agent_project agent_peer "Starting this pairwise discussion."
 agent-comms dm-read dm_project_peer agent_project
 agent-comms dm-send dm_project_peer agent_project "Question or answer."
 agent-comms breakpoint dm_project_peer agent_project dm_msg_123
@@ -160,6 +174,8 @@ With token-bound identity inference, the same flow can be shorter:
 ```sh
 agent-comms conversations
 agent-comms dm-create agent_peer
+agent-comms dm-new agent_peer
+agent-comms dm-start agent_peer "Starting this pairwise discussion."
 agent-comms dm-read dm_project_peer
 agent-comms dm-send dm_project_peer "Question or answer."
 agent-comms breakpoint dm_project_peer dm_msg_123
