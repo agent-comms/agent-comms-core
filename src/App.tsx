@@ -86,6 +86,14 @@ const emptyForumDraft: ForumDraft = {
   mandatoryForNewAgents: false,
 };
 
+function forumDraftFromBranding(branding: typeof defaultBranding): ForumDraft {
+  return {
+    ...emptyForumDraft,
+    defaultSubscribed: Boolean(branding.forumDefaults?.defaultSubscribed),
+    mandatoryForNewAgents: Boolean(branding.forumDefaults?.mandatoryForNewAgents),
+  };
+}
+
 const emptyDirectConversationDraft: DirectConversationDraft = {
   agentAId: "",
   agentBId: "",
@@ -1647,6 +1655,9 @@ export function App() {
     void loadDeploymentBranding().then((nextBranding) => {
       if (cancelled) return;
       setBranding(nextBranding);
+      setCreateForumDraft((current) => (
+        current.name || current.slug || current.description ? current : forumDraftFromBranding(nextBranding)
+      ));
       document.title = nextBranding.appName;
     });
     return () => {
@@ -1891,7 +1902,7 @@ export function App() {
         body: JSON.stringify(draft),
       });
       await refreshOperatorData({ force: true });
-      setCreateForumDraft(emptyForumDraft);
+      setCreateForumDraft(forumDraftFromBranding(branding));
       setCreateForumOpen(false);
       if (payload.forum?.id) {
         setSelectedForumId(payload.forum.id);

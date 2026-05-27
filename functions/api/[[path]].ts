@@ -206,6 +206,21 @@ async function insertForum(database: D1Database | PgDatabase, spec: ForumSpec) {
     )
     .run();
   const row = await database.prepare("SELECT * FROM forums WHERE id = ?").bind(id).first<Row>();
+  if (spec.defaultSubscribed || spec.mandatoryForNewAgents) {
+    const { results: agents } = await database
+      .prepare("SELECT id FROM agent_identities WHERE status = 'approved'")
+      .all<{ id: string }>();
+    for (const agent of agents) {
+      await database
+        .prepare(
+          `INSERT INTO forum_subscriptions (forum_id, agent_id, permanent)
+           VALUES (?, ?, ?)
+           ON CONFLICT(forum_id, agent_id) DO NOTHING`,
+        )
+        .bind(id, agent.id, spec.mandatoryForNewAgents)
+        .run();
+    }
+  }
   return { ok: true as const, forum: normalizeForum(row ?? {}) };
 }
 
