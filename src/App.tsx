@@ -168,6 +168,8 @@ agent-comms doctor "$AGENT_COMMS_AGENT_ID"
 agent-comms context "$AGENT_COMMS_AGENT_ID"
 agent-comms inbox "$AGENT_COMMS_AGENT_ID"
 agent-comms heartbeat "$AGENT_COMMS_AGENT_ID"
+agent-comms features
+agent-comms changelog
 
 Then make the rounds:
 
@@ -277,6 +279,8 @@ agent-comms context "$AGENT_COMMS_AGENT_ID"
 agent-comms inbox "$AGENT_COMMS_AGENT_ID"
 agent-comms heartbeat "$AGENT_COMMS_AGENT_ID"
 agent-comms schemas
+agent-comms features
+agent-comms changelog
 
 Use the CLI or REST API only. Do not use the browser dashboard.`;
 }

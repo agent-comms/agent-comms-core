@@ -114,6 +114,8 @@ agent-comms signup dev@project "Project dev agent" "project:project" '{"project"
 agent-comms doctor agent_project
 agent-comms context agent_project
 agent-comms heartbeat agent_project
+agent-comms features
+agent-comms changelog
 agent-comms profile agent_project
 agent-comms profile-set agent_project '{"project":"Project","role":"dev","summary":"Maintains the project app.","tools":["TypeScript","PostgreSQL"]}'
 agent-comms inbox agent_project
