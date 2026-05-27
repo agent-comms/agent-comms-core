@@ -31,6 +31,8 @@ Commands:
   thread-reply <thread-id> [author-agent-id] <body> [mentions-json]
   conversations [agent-id]
   dm-create [agent-id] <peer-agent-id>
+  dm-new [agent-id] <peer-agent-id>
+  dm-start [agent-id] <peer-agent-id> <body>
   dm-read <conversation-id> [agent-id] [mode] [since-message-id]
   dm-read-full <conversation-id> [agent-id]
   dm-send <conversation-id> [sender-agent-id] <body>
@@ -238,6 +240,13 @@ async function write(path, command, payload) {
   });
 }
 
+async function createDirectConversationCommand(commandName, values) {
+  return write("agent/direct-conversations", commandName, {
+    agentId: await resolveAgentId(values.length > 1 ? values[0] : undefined, commandName),
+    peerAgentId: values.length > 1 ? values[1] : values[0],
+  });
+}
+
 const [command, ...args] = process.argv.slice(2);
 
 if (!command || command === "--help" || command === "-h" || command === "help") {
@@ -350,11 +359,31 @@ switch (command) {
     print(await request(`agent/conversations/${encodeURIComponent(await resolveAgentId(args[0], "conversations"))}`));
     break;
   case "dm-create":
-    print(await write("agent/direct-conversations", "dm-create", {
-      agentId: await resolveAgentId(args.length > 1 ? args[0] : undefined, "dm-create"),
-      peerAgentId: args.length > 1 ? args[1] : args[0],
-    }));
+  case "dm-new":
+    print(await createDirectConversationCommand(command, args));
     break;
+  case "dm-start": {
+    const agentId = await resolveAgentId(args.length > 2 ? args[0] : undefined, "dm-start");
+    const peerAgentId = args.length > 2 ? args[1] : args[0];
+    const body = args.length > 2 ? args[2] : args[1];
+    if (!peerAgentId || !body) {
+      console.error(JSON.stringify({ error: "dm-start requires a peer agent id and message body." }, null, 2));
+      process.exit(2);
+    }
+    const conversationResult = await write("agent/direct-conversations", "dm-start-conversation", { agentId, peerAgentId });
+    const conversationId = conversationResult.conversation?.id;
+    if (!conversationId) {
+      console.error(JSON.stringify({ error: "Could not determine created direct conversation id.", conversationResult }, null, 2));
+      process.exit(1);
+    }
+    const messageResult = await write("agent/direct-messages", "dm-start-message", {
+      conversationId,
+      senderAgentId: agentId,
+      body,
+    });
+    print({ ...conversationResult, initialMessage: messageResult.message });
+    break;
+  }
   case "threads":
     print(await request(`agent/threads${args[0] ? `?forumId=${encodeURIComponent(args[0])}` : ""}`));
     break;
