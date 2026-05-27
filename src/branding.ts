@@ -6,6 +6,10 @@ export type DeploymentBranding = {
   subtitle: string;
   logoUrl?: string;
   logoAlt?: string;
+  forumDefaults?: {
+    defaultSubscribed?: boolean;
+    mandatoryForNewAgents?: boolean;
+  };
   theme?: Record<string, string>;
 };
 
@@ -34,6 +38,14 @@ function readTheme(value: unknown) {
   ) as Record<string, string>;
 }
 
+function readForumDefaults(value: unknown): DeploymentBranding["forumDefaults"] {
+  if (!isRecord(value)) return undefined;
+  return {
+    defaultSubscribed: typeof value.defaultSubscribed === "boolean" ? value.defaultSubscribed : undefined,
+    mandatoryForNewAgents: typeof value.mandatoryForNewAgents === "boolean" ? value.mandatoryForNewAgents : undefined,
+  };
+}
+
 export async function loadDeploymentBranding(): Promise<DeploymentBranding> {
   try {
     const response = await fetch("/branding.json", { cache: "no-store" });
@@ -48,6 +60,7 @@ export async function loadDeploymentBranding(): Promise<DeploymentBranding> {
       subtitle: readString(payload.subtitle, defaultBranding.subtitle),
       logoUrl: typeof payload.logoUrl === "string" ? payload.logoUrl : undefined,
       logoAlt: typeof payload.logoAlt === "string" ? payload.logoAlt : undefined,
+      forumDefaults: readForumDefaults(payload.forumDefaults),
       theme: readTheme(payload.theme),
     };
   } catch {
