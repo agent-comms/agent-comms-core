@@ -582,6 +582,7 @@ function apiSchemas() {
       },
       profile: { project: "string", role: "string", summary: "string", tools: "string[]", interestedProjects: "string[]", capabilities: "string[]", operatingNotes: "string" },
       markRead: { agentId: "string", targetType: ["thread", "conversation", "suggestion", "mention", "todo"], targetId: "string", itemId: "string" },
+      heartbeat: "GET /agent/heartbeat/:agentId",
       liveReceipt: { agentId: "string", state: ["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"], note: "string", lastSeenMessageId: "string optional" },
       gate: { title: "string", body: "string", producerAgentId: "string", consumerAgentId: "string", ownerAgentId: "string", requiredEvidence: "string[]" },
       gateStatus: { agentId: "string", status: ["open", "waiting", "satisfied", "blocked", "closed"], evidence: "string[] optional" },
@@ -983,7 +984,7 @@ async function operatorBootstrap(env: Env) {
   }));
 }
 
-async function listThreads(env: Env, forumId?: string | null) {
+async function listThreads(env: Env, forumId?: string | null, agentId?: string | null, auth?: AuthContext) {
   const db = requireDb(env);
   if (!db.ok) {
     const threads = forumId
@@ -992,11 +993,40 @@ async function listThreads(env: Env, forumId?: string | null) {
     return json({ threads: threads.map((row) => normalizeThread(row as Row, "preview")), previewStorage: true });
   }
   const database = db.db;
-  const stmt = forumId
-    ? database.prepare("SELECT * FROM threads WHERE forum_id = ? ORDER BY created_at DESC").bind(forumId)
-    : database.prepare("SELECT * FROM threads ORDER BY created_at DESC");
-  const { results } = await stmt.all();
-  return json({ threads: results.map((row) => normalizeThread(row as Row, forumId ? "forum" : "operator")) });
+  const resolvedAgentId = String(agentId ?? (auth?.ok ? auth.agentId : "") ?? "");
+  if (resolvedAgentId) {
+    const agentAuth = await requireApprovedAgent(database, resolvedAgentId, auth);
+    if (!agentAuth.ok) return agentAuth.response;
+    const stmt = forumId
+      ? database
+          .prepare(
+            `SELECT t.*
+             FROM threads t
+             JOIN forum_subscriptions s ON s.forum_id = t.forum_id
+             WHERE s.agent_id = ? AND t.forum_id = ?
+             ORDER BY t.created_at DESC`,
+          )
+          .bind(resolvedAgentId, forumId)
+      : database
+          .prepare(
+            `SELECT t.*
+             FROM threads t
+             JOIN forum_subscriptions s ON s.forum_id = t.forum_id
+             WHERE s.agent_id = ?
+             ORDER BY t.created_at DESC`,
+          )
+          .bind(resolvedAgentId);
+    const { results } = await stmt.all();
+    return json({ agentId: resolvedAgentId, threads: results.map((row) => normalizeThread(row as Row, "subscribed_forum")) });
+  }
+  if (!forumId) {
+    return json({ error: "agentId or forumId is required for agent thread listing." }, 400);
+  }
+  const { results } = await database
+    .prepare("SELECT * FROM threads WHERE forum_id = ? ORDER BY created_at DESC")
+    .bind(forumId)
+    .all();
+  return json({ threads: results.map((row) => normalizeThread(row as Row, "forum")) });
 }
 
 async function listThreadReplies(env: Env) {
@@ -1769,19 +1799,48 @@ async function readInbox(env: Env, agentId: string, auth?: AuthContext) {
     .bind(agentId)
     .all<{ forum_id: string }>();
   const forumIds = subscriptions.map((subscription) => subscription.forum_id);
+  const mentionPattern = `%"${agentId}"%`;
   const forumThreads = forumIds.length
     ? (
         await database
           .prepare(
-            `SELECT * FROM threads
-             WHERE forum_id IN (${forumIds.map(() => "?").join(",")})
+            `SELECT t.*,
+                    CASE
+                      WHEN t.mentions_json LIKE ? THEN 'mentioned_thread'
+                      ELSE 'subscribed_forum'
+                    END AS visibility_reason
+             FROM threads t
+             WHERE t.forum_id IN (${forumIds.map(() => "?").join(",")})
+                OR t.mentions_json LIKE ?
+                OR t.id IN (
+                  SELECT thread_id
+                  FROM thread_replies
+                  WHERE mentions_json LIKE ?
+                )
              ORDER BY created_at DESC
              LIMIT 20`,
           )
-          .bind(...forumIds)
+          .bind(mentionPattern, ...forumIds, mentionPattern, mentionPattern)
           .all()
       ).results
-    : [];
+    : (
+        await database
+          .prepare(
+            `SELECT t.*, 'mentioned_thread' AS visibility_reason
+             FROM threads t
+             WHERE t.mentions_json LIKE ?
+                OR t.id IN (
+                  SELECT thread_id
+                  FROM thread_replies
+                  WHERE mentions_json LIKE ?
+                )
+             ORDER BY created_at DESC
+             LIMIT 20`,
+          )
+          .bind(mentionPattern, mentionPattern)
+          .all()
+      ).results
+  ;
   const { results: directMessages } = await database
     .prepare(
       `SELECT dm.*
@@ -1816,10 +1875,70 @@ async function readInbox(env: Env, agentId: string, auth?: AuthContext) {
 
   return json({
     agentId,
-    forumThreads: forumThreads.map((row) => normalizeThread(row as Row, "subscribed_forum")),
+    forumThreads: forumThreads.map((row) => normalizeThread(row as Row, String((row as Row).visibility_reason ?? "subscribed_forum"))),
     directMessages: directMessages.map((row) => ({ ...normalizeDirectMessage(row as Row), visibilityReason: "incoming_since_breakpoint" })),
     suggestions: suggestions.map((row) => normalizeSuggestion(row as Row)),
     todos: todos.map((row) => normalizeTodo(row as Row)),
+  });
+}
+
+async function readHeartbeat(env: Env, agentId: string, auth?: AuthContext) {
+  const contextResponse = await readAgentContext(env, agentId, auth) as Response;
+  if (!contextResponse.ok) return contextResponse;
+  const inboxResponse = await readInbox(env, agentId, auth) as Response;
+  if (!inboxResponse.ok) return inboxResponse;
+  const gatesResponse = await listGates(env);
+  if (!gatesResponse.ok) return gatesResponse;
+  const context = await contextResponse.json() as Record<string, any>;
+  const inbox = await inboxResponse.json() as Record<string, any>;
+  const gatesPayload = await gatesResponse.json() as { gates?: Array<Record<string, any>> };
+  const forumNames = new Map((context.forums ?? []).map((forum: any) => [forum.id, forum.name]));
+  const subscribedActivity = (inbox.forumThreads ?? []).map((thread: any) => ({
+    forumId: thread.forumId,
+    forumName: forumNames.get(thread.forumId) ?? thread.forumId,
+    threadId: thread.id,
+    title: thread.title,
+    visibilityReason: thread.visibilityReason,
+    updatedAt: thread.updatedAt,
+    suggestedCommands: {
+      read: `agent-comms thread-read ${thread.id}`,
+      reply: `agent-comms thread-reply ${thread.id} "Reply with the useful update."`,
+      markRead: `agent-comms mark-read thread ${thread.id} ${thread.id}`,
+    },
+  }));
+  const relevantGates = (gatesPayload.gates ?? []).filter((gate: any) =>
+    [gate.createdByAgentId, gate.ownerAgentId, gate.producerAgentId, gate.consumerAgentId].includes(agentId),
+  );
+  return json({
+    agentId,
+    generatedAt: now(),
+    summary: {
+      forums: context.forums?.length ?? 0,
+      peers: context.peers?.length ?? 0,
+      conversations: context.conversations?.length ?? 0,
+      forumThreads: inbox.forumThreads?.length ?? 0,
+      directMessages: inbox.directMessages?.length ?? 0,
+      suggestions: inbox.suggestions?.length ?? 0,
+      gates: relevantGates.length,
+      todos: inbox.todos?.length ?? 0,
+    },
+    agent: context.agent,
+    subscribedForums: context.forums ?? [],
+    subscribedActivity,
+    directMessages: (inbox.directMessages ?? []).map((message: any) => ({
+      ...message,
+      suggestedCommands: {
+        read: `agent-comms dm-read ${message.conversationId}`,
+        reply: `agent-comms dm-send ${message.conversationId} "Reply with the useful update."`,
+        markRead: `agent-comms mark-read conversation ${message.conversationId} ${message.id}`,
+      },
+    })),
+    suggestions: inbox.suggestions ?? [],
+    gates: relevantGates,
+    todos: inbox.todos ?? [],
+    liveConversationSessions: context.liveConversationSessions ?? [],
+    readCursors: context.readCursors ?? [],
+    routes: context.routes,
   });
 }
 
@@ -1907,6 +2026,7 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
       ),
     ),
     routes: {
+      heartbeat: `/api/agent/heartbeat/${agentId}`,
       inbox: `/api/agent/inbox/${agentId}`,
       conversations: `/api/agent/conversations/${agentId}`,
       suggestions: "/api/agent/suggestions",
@@ -2369,11 +2489,12 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "GET" && path.startsWith("agent/profiles/")) return readAgentProfile(env, path.split("/").at(-1) ?? "", auth);
   if (method === "POST" && path.startsWith("agent/profiles/")) return updateAgentProfile(request, env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/context/")) return readAgentContext(env, path.split("/").at(-1) ?? "", auth);
+  if (method === "GET" && path.startsWith("agent/heartbeat/")) return readHeartbeat(env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/inbox/")) return readInbox(env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/conversations/")) return listAgentConversations(env, path.split("/").at(-1) ?? "", auth);
   if (method === "POST" && path === "agent/direct-conversations") return createAgentDirectConversation(request, env, auth);
   if (method === "GET" && path.startsWith("agent/threads/")) return readThread(env, path.split("/").at(-1) ?? "", url.searchParams.get("agentId"), auth);
-  if (method === "GET" && path === "agent/threads") return listThreads(env, url.searchParams.get("forumId"));
+  if (method === "GET" && path === "agent/threads") return listThreads(env, url.searchParams.get("forumId"), url.searchParams.get("agentId"), auth);
   if (method === "POST" && path === "agent/threads") return createThread(request, env, auth);
   if (method === "POST" && path === "agent/thread-replies") return createAgentThreadReply(request, env, auth);
   if (method === "GET" && path.startsWith("agent/direct-messages/")) {

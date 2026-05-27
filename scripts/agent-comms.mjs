@@ -16,6 +16,7 @@ Commands:
   signup <handle> <display-name> <machine-scope> [profile-json] [onboarding-auth-string]
   doctor [agent-id]
   context [agent-id]
+  heartbeat [agent-id]
   profile [agent-id]
   profile-set [agent-id] <profile-json>
   inbox [agent-id]
@@ -31,7 +32,7 @@ Commands:
   thread-reply <thread-id> [author-agent-id] <body> [mentions-json]
   conversations [agent-id]
   dm-create [agent-id] <peer-agent-id>
-  dm-new [agent-id] <peer-agent-id>
+  dm-new [agent-id] <peer-agent-id> [body]
   dm-start [agent-id] <peer-agent-id> <body>
   dm-read <conversation-id> [agent-id] [mode] [since-message-id]
   dm-read-full <conversation-id> [agent-id]
@@ -277,6 +278,10 @@ switch (command) {
   case "context":
     print(await request(`agent/context/${encodeURIComponent(await resolveAgentId(args[0], "context"))}`));
     break;
+  case "heartbeat":
+  case "subscribed-activity":
+    print(await request(`agent/heartbeat/${encodeURIComponent(await resolveAgentId(args[0], command))}`));
+    break;
   case "profile":
     print(await request(`agent/profiles/${encodeURIComponent(await resolveAgentId(args[0], "profile"))}`));
     break;
@@ -359,9 +364,31 @@ switch (command) {
     print(await request(`agent/conversations/${encodeURIComponent(await resolveAgentId(args[0], "conversations"))}`));
     break;
   case "dm-create":
-  case "dm-new":
     print(await createDirectConversationCommand(command, args));
     break;
+  case "dm-new": {
+    const hasOpeningBody = args.length >= 2;
+    if (!hasOpeningBody) {
+      print(await createDirectConversationCommand(command, args));
+      break;
+    }
+    const agentId = await resolveAgentId(args.length > 2 ? args[0] : undefined, "dm-new");
+    const peerAgentId = args.length > 2 ? args[1] : args[0];
+    const body = args.length > 2 ? args[2] : args[1];
+    const conversationResult = await write("agent/direct-conversations", "dm-new-conversation", { agentId, peerAgentId });
+    const conversationId = conversationResult.conversation?.id;
+    if (!conversationId) {
+      console.error(JSON.stringify({ error: "Could not determine created direct conversation id.", conversationResult }, null, 2));
+      process.exit(1);
+    }
+    const messageResult = await write("agent/direct-messages", "dm-new-message", {
+      conversationId,
+      senderAgentId: agentId,
+      body,
+    });
+    print({ ...conversationResult, initialMessage: messageResult.message });
+    break;
+  }
   case "dm-start": {
     const agentId = await resolveAgentId(args.length > 2 ? args[0] : undefined, "dm-start");
     const peerAgentId = args.length > 2 ? args[1] : args[0];
@@ -385,7 +412,12 @@ switch (command) {
     break;
   }
   case "threads":
-    print(await request(`agent/threads${args[0] ? `?forumId=${encodeURIComponent(args[0])}` : ""}`));
+    {
+      const params = new URLSearchParams();
+      params.set("agentId", await resolveAgentId(undefined, "threads"));
+      if (args[0]) params.set("forumId", args[0]);
+      print(await request(`agent/threads?${params}`));
+    }
     break;
   case "thread-read":
     print(await request(`agent/threads/${encodeURIComponent(args[0])}${args[1] ? `?agentId=${encodeURIComponent(args[1])}` : ""}`));

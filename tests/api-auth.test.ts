@@ -210,6 +210,23 @@ describe("API auth", () => {
     expect(payload.schemas?.agent?.createDirectConversation).toEqual({ agentId: "string", peerAgentId: "string" });
   });
 
+  it("documents the heartbeat helper in the agent schema", async () => {
+    const request = new Request("https://example.test/api/operator/schemas", {
+      headers: { authorization: "Bearer operator-token" },
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { schemas?: { agent?: { heartbeat?: string } } };
+
+    expect(response.status).toBe(200);
+    expect(payload.schemas?.agent?.heartbeat).toBe("GET /agent/heartbeat/:agentId");
+  });
+
   it("rejects invalid live conversation status before storage access", async () => {
     const request = new Request("https://example.test/api/operator/live-conversations/live_123/status", {
       method: "POST",
