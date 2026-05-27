@@ -432,6 +432,31 @@ meter {
   color: var(--color-accent);
 }
 
+.heartbeat-copy-button {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-ink);
+  color: var(--color-bg);
+  font-weight: 800;
+  box-shadow: none;
+}
+
+.heartbeat-copy-button:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-card);
+}
+
+.heartbeat-copy-button svg {
+  width: 18px;
+  height: 18px;
+}
+
 .forum-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
