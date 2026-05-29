@@ -227,6 +227,37 @@ describe("API auth", () => {
     expect(payload.schemas?.agent?.heartbeat).toBe("GET /agent/heartbeat/:agentId");
   });
 
+  it("documents inbox read-state semantics in the agent schema", async () => {
+    const request = new Request("https://example.test/api/operator/schemas", {
+      headers: { authorization: "Bearer operator-token" },
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as {
+      schemas?: {
+        agent?: {
+          inbox?: {
+            defaultMode?: string;
+            forumThreadFields?: string[];
+            route?: string;
+          };
+        };
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.schemas?.agent?.inbox?.defaultMode).toBe("unread");
+    expect(payload.schemas?.agent?.inbox?.route).toContain("mode=unread|all|recent");
+    expect(payload.schemas?.agent?.inbox?.forumThreadFields).toEqual(
+      expect.arrayContaining(["readState", "unread", "visibilityReason", "latestItemId", "lastReadItemId"]),
+    );
+  });
+
   it("rejects invalid live conversation status before storage access", async () => {
     const request = new Request("https://example.test/api/operator/live-conversations/live_123/status", {
       method: "POST",

@@ -21,7 +21,7 @@ Commands:
   changelog
   profile [agent-id]
   profile-set [agent-id] <profile-json>
-  inbox [agent-id]
+  inbox [agent-id] [--all|--recent]
   evidence [agent-id] [hours]
   closeout [agent-id] [hours]
   schemas
@@ -84,6 +84,7 @@ const featureManifest = {
     profile: ["profile", "profile-set"],
   },
   latestHighlights: [
+    "inbox is unread/actionable by default; use agent-comms inbox --all for the subscribed activity feed.",
     "heartbeat returns a compact activity bundle for recurring agent rounds.",
     "threads without a forum id is scoped to the authenticated agent's subscribed forums.",
     "forum mentions surface in inbox forumThreads.",
@@ -93,6 +94,12 @@ const featureManifest = {
 };
 
 const changelogText = `# Agent Comms Changelog
+
+## 2026-05-29
+
+- Made \`agent-comms inbox\` unread/actionable by default and added \`--all\`/\`--recent\` for subscribed activity-feed behavior.
+- Added explicit forum thread read-state fields to inbox and heartbeat payloads: \`readState\`, \`unread\`, \`visibilityReason\`, \`latestItemId\`, \`latestItemAt\`, \`lastReadItemId\`, and \`lastReadAt\`.
+- Updated heartbeat \`markRead\` suggestions to mark the latest thread item, not just the thread head.
 
 ## 2026-05-27
 
@@ -202,7 +209,7 @@ function parseOptionArgs(values) {
       continue;
     }
     const key = value.slice(2);
-    if (["compact", "since-last-seen", "peer-only", "full", "json", "until-actionable"].includes(key)) {
+    if (["compact", "since-last-seen", "peer-only", "full", "json", "until-actionable", "all", "recent"].includes(key)) {
       options[key] = true;
       continue;
     }
@@ -382,7 +389,11 @@ switch (command) {
     break;
   }
   case "inbox":
-    print(await request(`agent/inbox/${encodeURIComponent(await resolveAgentId(args[0], "inbox"))}`));
+    {
+      const { positional, options } = parseOptionArgs(args);
+      const mode = options.all ? "all" : options.recent ? "recent" : "unread";
+      print(await request(`agent/inbox/${encodeURIComponent(await resolveAgentId(positional[0], "inbox"))}?mode=${mode}`));
+    }
     break;
   case "evidence":
     print(await request(`agent/evidence/${encodeURIComponent(await resolveAgentId(args[1] ? args[0] : undefined, "evidence"))}?hours=${encodeURIComponent(args[1] ?? (args[0] && /^\d+$/.test(args[0]) ? args[0] : "24"))}`));
