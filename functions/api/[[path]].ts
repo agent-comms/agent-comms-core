@@ -870,6 +870,7 @@ function operatorBootstrapPayload(input: {
   replies: Row[];
   suggestions: Row[];
   agents: Row[];
+  subscriptions: Row[];
   directConversations: Row[];
   directMessages: Row[];
   gates: Row[];
@@ -884,6 +885,11 @@ function operatorBootstrapPayload(input: {
     replies: input.replies.map((row) => normalizeReply(row)),
     suggestions: input.suggestions.map((row) => normalizeSuggestion(row)),
     agents: input.agents.map((row) => normalizeAgent(row)),
+    subscriptions: input.subscriptions.map((row) => ({
+      forumId: row.forum_id ?? row.forumId,
+      agentId: row.agent_id ?? row.agentId,
+      permanent: bool(row.permanent),
+    })),
     conversations: input.directConversations.map((row) => normalizeConversation(row)),
     messages: input.directMessages.map((row) => normalizeDirectMessage(row)),
     gates: input.gates.map((row) =>
@@ -908,6 +914,7 @@ async function operatorBootstrap(env: Env) {
       replies: [],
       suggestions: memory.suggestions as Row[],
       agents: [],
+      subscriptions: [],
       directConversations: [],
       directMessages: memory.directMessages as Row[],
       gates: [],
@@ -932,6 +939,10 @@ async function operatorBootstrap(env: Env) {
          FROM agent_identities a
          LEFT JOIN agent_profiles p ON p.agent_id = a.id
          ORDER BY a.handle`,
+      );
+      const subscriptions = await pgAll<Row>(
+        client,
+        "SELECT forum_id, agent_id, permanent FROM forum_subscriptions ORDER BY forum_id, agent_id",
       );
       const directConversations = await pgAll<Row>(
         client,
@@ -975,6 +986,7 @@ async function operatorBootstrap(env: Env) {
         replies: replies.results,
         suggestions: suggestions.results,
         agents: agents.results,
+        subscriptions: subscriptions.results,
         directConversations: directConversations.results,
         directMessages: directMessages.results,
         gates: gates.results,
@@ -990,6 +1002,7 @@ async function operatorBootstrap(env: Env) {
     replies,
     suggestions,
     agents,
+    subscriptions,
     directConversations,
     directMessages,
     gates,
@@ -1009,6 +1022,7 @@ async function operatorBootstrap(env: Env) {
          ORDER BY a.handle`,
       )
       .all<Row>(),
+    database.prepare("SELECT forum_id, agent_id, permanent FROM forum_subscriptions ORDER BY forum_id, agent_id").all<Row>(),
     database
       .prepare(
         `SELECT id, agent_a_id, agent_b_id
@@ -1056,6 +1070,7 @@ async function operatorBootstrap(env: Env) {
     replies: replies.results,
     suggestions: suggestions.results,
     agents: agents.results,
+    subscriptions: subscriptions.results,
     directConversations: directConversations.results,
     directMessages: directMessages.results,
     gates: gates.results,

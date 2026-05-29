@@ -1612,6 +1612,11 @@ export function App() {
           ),
           profile: agent.profile,
         })),
+        subscriptions: (bootstrap.subscriptions ?? current.subscriptions).map((subscription: any) => ({
+          forumId: subscription.forum_id ?? subscription.forumId,
+          agentId: subscription.agent_id ?? subscription.agentId,
+          permanent: Boolean(subscription.permanent),
+        })),
         directConversations: (bootstrap.conversations ?? current.directConversations).map(
           (conversation: any) => ({
             id: conversation.id,
