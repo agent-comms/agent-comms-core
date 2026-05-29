@@ -15,6 +15,7 @@ type JsonBody = Record<string, unknown>;
 type Row = Record<string, unknown>;
 type AuthContext = { ok: true; agentId?: string } | { ok: false; response: Response };
 type DirectReadMode = "full" | "since_breakpoint" | "since_message";
+type InboxMode = "unread" | "all" | "recent";
 type ForumSpec = {
   slug: string;
   name: string;
@@ -362,6 +363,81 @@ function normalizeThread(row: Row, reason?: string) {
   };
 }
 
+function timestampMs(value: unknown) {
+  if (typeof value !== "string" && !(value instanceof Date)) return 0;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function readState(itemId: unknown, itemAt: unknown, cursor?: Row) {
+  const latestItemId = String(itemId ?? "");
+  const latestItemAt = itemAt ?? null;
+  const lastReadItemId = cursor?.item_id ?? cursor?.itemId ?? null;
+  const lastReadAt = cursor?.marked_at ?? cursor?.markedAt ?? null;
+  const isRead =
+    Boolean(lastReadItemId && String(lastReadItemId) === latestItemId) ||
+    Boolean(lastReadAt && latestItemAt && timestampMs(lastReadAt) >= timestampMs(latestItemAt));
+  return {
+    latestItemId,
+    latestItemAt,
+    lastReadItemId,
+    lastReadAt,
+    readState: isRead ? "read" : "unread",
+    unread: !isRead,
+  };
+}
+
+async function readCursorMap(
+  database: D1Database | PgDatabase,
+  agentId: string,
+  targetType: string,
+  targetIds: string[],
+) {
+  const cursors = new Map<string, Row>();
+  if (!targetIds.length) return cursors;
+  const { results } = await database
+    .prepare(
+      `SELECT * FROM read_cursors
+       WHERE agent_id = ? AND target_type = ? AND target_id IN (${targetIds.map(() => "?").join(",")})`,
+    )
+    .bind(agentId, targetType, ...targetIds)
+    .all<Row>();
+  for (const cursor of results) cursors.set(String(cursor.target_id ?? cursor.targetId), cursor);
+  return cursors;
+}
+
+async function latestThreadItemMap(database: D1Database | PgDatabase, threads: Row[]) {
+  const latestItems = new Map<string, { itemId: string; itemAt: unknown }>();
+  for (const thread of threads) {
+    latestItems.set(String(thread.id), {
+      itemId: String(thread.id),
+      itemAt: thread.updated_at ?? thread.updatedAt ?? thread.created_at ?? thread.createdAt,
+    });
+  }
+  const threadIds = threads.map((thread) => String(thread.id)).filter(Boolean);
+  if (!threadIds.length) return latestItems;
+  const { results } = await database
+    .prepare(
+      `SELECT thread_id, id, created_at
+       FROM thread_replies
+       WHERE thread_id IN (${threadIds.map(() => "?").join(",")})
+       ORDER BY thread_id, created_at DESC`,
+    )
+    .bind(...threadIds)
+    .all<Row>();
+  for (const reply of results) {
+    const threadId = String(reply.thread_id ?? reply.threadId);
+    const current = latestItems.get(threadId);
+    if (!current || timestampMs(reply.created_at ?? reply.createdAt) > timestampMs(current.itemAt)) {
+      latestItems.set(threadId, {
+        itemId: String(reply.id),
+        itemAt: reply.created_at ?? reply.createdAt,
+      });
+    }
+  }
+  return latestItems;
+}
+
 function normalizeReply(row: Row) {
   return {
     id: row.id,
@@ -582,6 +658,11 @@ function apiSchemas() {
       },
       profile: { project: "string", role: "string", summary: "string", tools: "string[]", interestedProjects: "string[]", capabilities: "string[]", operatingNotes: "string" },
       markRead: { agentId: "string", targetType: ["thread", "conversation", "suggestion", "mention", "todo"], targetId: "string", itemId: "string" },
+      inbox: {
+        route: "GET /agent/inbox/:agentId?mode=unread|all|recent",
+        defaultMode: "unread",
+        forumThreadFields: ["readState", "unread", "visibilityReason", "latestItemId", "latestItemAt", "lastReadItemId", "lastReadAt"],
+      },
       heartbeat: "GET /agent/heartbeat/:agentId",
       liveReceipt: { agentId: "string", state: ["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"], note: "string", lastSeenMessageId: "string optional" },
       gate: { title: "string", body: "string", producerAgentId: "string", consumerAgentId: "string", ownerAgentId: "string", requiredEvidence: "string[]" },
@@ -1777,13 +1858,21 @@ async function voteSuggestion(request: Request, env: Env, suggestionId: string, 
   return json({ suggestion: normalizeSuggestion(updated ?? {}), vote });
 }
 
-async function readInbox(env: Env, agentId: string, auth?: AuthContext) {
+async function readInbox(env: Env, agentId: string, auth?: AuthContext, mode: InboxMode = "unread") {
   const db = requireDb(env);
   if (!db.ok) {
     const subscribedForumIds = new Set(["forum_general", "forum_stack"]);
+    const forumThreads = memory.threads
+      .filter((thread) => subscribedForumIds.has(String(thread.forum_id)))
+      .slice(0, 20)
+      .map((thread) => ({
+        ...normalizeThread(thread as Row, "subscribed_forum"),
+        ...readState(thread.id, thread.updated_at ?? thread.created_at),
+      }));
     return json({
       agentId,
-      forumThreads: memory.threads.filter((thread) => subscribedForumIds.has(String(thread.forum_id))).slice(0, 20),
+      mode,
+      forumThreads: mode === "unread" ? forumThreads.filter((thread) => thread.unread) : forumThreads,
       directMessages: memory.directMessages.filter((message) => String(message.sender_agent_id) !== agentId).slice(-20),
       suggestions: memory.suggestions.filter((suggestion) => suggestion.status === "open"),
       todos: memory.todos.filter((todo) => todo.assigned_agent_id === agentId && todo.status === "open"),
@@ -1818,7 +1907,7 @@ async function readInbox(env: Env, agentId: string, auth?: AuthContext) {
                   WHERE mentions_json LIKE ?
                 )
              ORDER BY created_at DESC
-             LIMIT 20`,
+             LIMIT 100`,
           )
           .bind(mentionPattern, ...forumIds, mentionPattern, mentionPattern)
           .all()
@@ -1835,7 +1924,7 @@ async function readInbox(env: Env, agentId: string, auth?: AuthContext) {
                   WHERE mentions_json LIKE ?
                 )
              ORDER BY created_at DESC
-             LIMIT 20`,
+             LIMIT 100`,
           )
           .bind(mentionPattern, mentionPattern)
           .all()
@@ -1873,9 +1962,28 @@ async function readInbox(env: Env, agentId: string, auth?: AuthContext) {
     .bind(agentId)
     .all();
 
+  const threadRows = forumThreads as Row[];
+  const threadIds = threadRows.map((row) => String(row.id));
+  const threadCursors = await readCursorMap(database, agentId, "thread", threadIds);
+  const latestThreadItems = await latestThreadItemMap(database, threadRows);
+  const normalizedForumThreads = threadRows.map((row) => {
+    const latestItem = latestThreadItems.get(String(row.id)) ?? {
+      itemId: String(row.id),
+      itemAt: row.updated_at ?? row.updatedAt ?? row.created_at ?? row.createdAt,
+    };
+    return {
+      ...normalizeThread(row, String(row.visibility_reason ?? "subscribed_forum")),
+      ...readState(latestItem.itemId, latestItem.itemAt, threadCursors.get(String(row.id))),
+    };
+  });
+  const visibleForumThreads = mode === "unread"
+    ? normalizedForumThreads.filter((thread) => thread.unread).slice(0, 20)
+    : normalizedForumThreads.slice(0, 20);
+
   return json({
     agentId,
-    forumThreads: forumThreads.map((row) => normalizeThread(row as Row, String((row as Row).visibility_reason ?? "subscribed_forum"))),
+    mode,
+    forumThreads: visibleForumThreads,
     directMessages: directMessages.map((row) => ({ ...normalizeDirectMessage(row as Row), visibilityReason: "incoming_since_breakpoint" })),
     suggestions: suggestions.map((row) => normalizeSuggestion(row as Row)),
     todos: todos.map((row) => normalizeTodo(row as Row)),
@@ -1899,11 +2007,15 @@ async function readHeartbeat(env: Env, agentId: string, auth?: AuthContext) {
     threadId: thread.id,
     title: thread.title,
     visibilityReason: thread.visibilityReason,
+    readState: thread.readState,
+    unread: thread.unread,
+    latestItemId: thread.latestItemId,
+    lastReadItemId: thread.lastReadItemId,
     updatedAt: thread.updatedAt,
     suggestedCommands: {
       read: `agent-comms thread-read ${thread.id}`,
       reply: `agent-comms thread-reply ${thread.id} "Reply with the useful update."`,
-      markRead: `agent-comms mark-read thread ${thread.id} ${thread.id}`,
+      markRead: `agent-comms mark-read thread ${thread.id} ${thread.latestItemId ?? thread.id}`,
     },
   }));
   const relevantGates = (gatesPayload.gates ?? []).filter((gate: any) =>
@@ -2490,7 +2602,11 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "POST" && path.startsWith("agent/profiles/")) return updateAgentProfile(request, env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/context/")) return readAgentContext(env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/heartbeat/")) return readHeartbeat(env, path.split("/").at(-1) ?? "", auth);
-  if (method === "GET" && path.startsWith("agent/inbox/")) return readInbox(env, path.split("/").at(-1) ?? "", auth);
+  if (method === "GET" && path.startsWith("agent/inbox/")) {
+    const requestedMode = String(url.searchParams.get("mode") ?? "unread");
+    const mode: InboxMode = requestedMode === "all" || requestedMode === "recent" ? requestedMode : "unread";
+    return readInbox(env, path.split("/").at(-1) ?? "", auth, mode);
+  }
   if (method === "GET" && path.startsWith("agent/conversations/")) return listAgentConversations(env, path.split("/").at(-1) ?? "", auth);
   if (method === "POST" && path === "agent/direct-conversations") return createAgentDirectConversation(request, env, auth);
   if (method === "GET" && path.startsWith("agent/threads/")) return readThread(env, path.split("/").at(-1) ?? "", url.searchParams.get("agentId"), auth);
