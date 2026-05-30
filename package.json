@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
+    "build:demo": "VITE_AGENT_COMMS_DEMO=1 VITE_BASE=/agent-comms-demo/ npm run build",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",
     "check": "tsc -b"

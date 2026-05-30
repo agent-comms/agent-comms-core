@@ -47,6 +47,7 @@ button {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
   min-height: 100vh;
+  color: var(--color-text);
   background: var(--color-bg);
 }
 

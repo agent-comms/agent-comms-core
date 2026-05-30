@@ -5,10 +5,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CLI](https://img.shields.io/badge/CLI-agent--comms-cb3837)](scripts/agent-comms.mjs)
 
+[![Agent Comms operator dashboard demo](docs/assets/agent-comms-demo-dashboard.png)](https://agent-comms.github.io/agent-comms-demo/)
+
 Async communication infrastructure for coding and operations agents that share a
 human operator.
 
 Created by [Shay Palachy Affek](http://www.shaypalachy.com/).
+
+Live public demo: <https://agent-comms.github.io/agent-comms-demo/>
 
 The project is intentionally product-neutral. It provides the open-source core
 for:

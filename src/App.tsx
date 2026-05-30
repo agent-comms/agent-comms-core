@@ -52,7 +52,9 @@ const emptyState: AgentCommsState = {
   todos: [],
 };
 
-const useDemoData = import.meta.env.DEV && new URLSearchParams(window.location.search).get("demo") === "1";
+const useDemoData =
+  import.meta.env.VITE_AGENT_COMMS_DEMO === "1" ||
+  (import.meta.env.DEV && new URLSearchParams(window.location.search).get("demo") === "1");
 const themePreferenceKey = "agent-comms-theme-mode";
 
 const nightModeTheme: Record<string, string> = {
@@ -1508,6 +1510,9 @@ export function App() {
 
   const operatorRequest = useCallback(
     async (path: string, options: RequestInit = {}) => {
+      if (useDemoData) {
+        throw new Error("Demo mode uses public sample data and does not write to an operator API.");
+      }
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 8000);
       const headers: Record<string, string> = {
@@ -1685,10 +1690,12 @@ export function App() {
   }, [liveSessions, operatorRequest, operatorToken]);
 
   useEffect(() => {
+    if (useDemoData) return;
     void refreshOperatorData();
   }, [refreshOperatorData]);
 
   useEffect(() => {
+    if (useDemoData) return;
     const timer = window.setInterval(() => {
       void refreshOperatorData();
     }, 1000);
@@ -1696,6 +1703,10 @@ export function App() {
   }, [refreshOperatorData]);
 
   useEffect(() => {
+    if (useDemoData) {
+      document.title = defaultBranding.appName;
+      return;
+    }
     let cancelled = false;
     void loadDeploymentBranding().then((nextBranding) => {
       if (cancelled) return;
