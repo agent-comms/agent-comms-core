@@ -8,8 +8,10 @@ import {
   Lock,
   MessageCircle,
   MessagesSquare,
+  Moon,
   Plus,
   Send,
+  Sun,
   ThumbsDown,
   ThumbsUp,
   UserCheck,
@@ -23,6 +25,7 @@ import { readConversationSinceBreakpoint } from "./domain";
 
 type View = "overview" | "forums" | "direct" | "suggestions" | "onboarding" | "gates" | "profile";
 type AgentStatus = "pending" | "approved" | "suspended";
+type ThemeMode = "day" | "night";
 type ForumDraft = {
   slug: string;
   name: string;
@@ -50,6 +53,29 @@ const emptyState: AgentCommsState = {
 };
 
 const useDemoData = import.meta.env.DEV && new URLSearchParams(window.location.search).get("demo") === "1";
+const themePreferenceKey = "agent-comms-theme-mode";
+
+const nightModeTheme: Record<string, string> = {
+  "--color-bg": "#101714",
+  "--color-surface": "#18231f",
+  "--color-surface-hover": "#22312b",
+  "--color-sidebar": "#0b1210",
+  "--color-sidebar-hover": "#1b2a25",
+  "--color-text": "#edf5ee",
+  "--color-text-secondary": "#bdcbc2",
+  "--color-muted": "#93a39a",
+  "--color-line": "#33413b",
+  "--color-line-strong": "#46554e",
+  "--color-accent": "#8bc7a7",
+  "--color-accent-soft": "#294338",
+  "--color-warning": "#a98135",
+  "--color-danger": "#ef7a64",
+  "--color-ink": "#edf5ee",
+  "--color-inverse": "#edf5ee",
+  "--color-inverse-muted": "#9aada4",
+  "--color-inverse-accent": "#b9e1c9",
+  "--shadow-card": "0 1px 2px rgba(0, 0, 0, 0.22), 0 18px 34px -24px rgba(0, 0, 0, 0.82)",
+};
 
 type LiveConversationSession = {
   id: string;
@@ -232,6 +258,12 @@ function forumName(state: AgentCommsState, id: string): string {
 
 function shellSingleQuote(value: string) {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function getInitialThemeMode(): ThemeMode {
+  const stored = localStorage.getItem(themePreferenceKey);
+  if (stored === "day" || stored === "night") return stored;
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "night" : "day";
 }
 
 function onboardingCorrectionPrompt(agent: AgentIdentity) {
@@ -1455,11 +1487,13 @@ export function App() {
   const [mintedTokens, setMintedTokens] = useState<Record<string, { token: string; copied?: boolean; fileCopied?: boolean } | undefined>>({});
   const [liveSessions, setLiveSessions] = useState<LiveConversationSession[]>([]);
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
+  const [themeMode, setThemeMode] = useState<ThemeMode>(getInitialThemeMode);
   const [apiStatus, setApiStatus] = useState(useDemoData ? "demo data" : "loading durable storage");
   const [actionStatus, setActionStatus] = useState("");
   const refreshSequenceRef = useRef(0);
   const mutationEpochRef = useRef(0);
   const activeOperatorMutationsRef = useRef(0);
+  const appTheme = themeMode === "night" ? { ...branding.theme, ...nightModeTheme } : branding.theme;
 
   const beginOperatorMutation = useCallback(() => {
     mutationEpochRef.current += 1;
@@ -1683,6 +1717,11 @@ export function App() {
   useEffect(() => {
     localStorage.setItem("agent-comms-read-thread-activity-ids", JSON.stringify(readThreadActivityIds));
   }, [readThreadActivityIds]);
+
+  useEffect(() => {
+    localStorage.setItem(themePreferenceKey, themeMode);
+    document.documentElement.dataset.theme = themeMode;
+  }, [themeMode]);
 
   const latestConversationMessageIds = Object.fromEntries(
     state.directConversations.map((conversation) => [
@@ -2128,7 +2167,7 @@ export function App() {
   };
 
   return (
-    <main className="app-shell" style={branding.theme}>
+    <main className="app-shell" data-theme={themeMode} style={appTheme}>
       <nav className="sidebar" aria-label="Main navigation">
         <div className={branding.logoUrl ? "brand has-logo" : "brand"}>
           {branding.logoUrl ? (
@@ -2160,6 +2199,16 @@ export function App() {
           <div>
             <p className="eyebrow">{branding.eyebrow}</p>
             <h1>{branding.title}</h1>
+          </div>
+          <div className="topbar-actions">
+            <button
+              aria-label={themeMode === "night" ? "Switch to day mode" : "Switch to night mode"}
+              onClick={() => setThemeMode((current) => (current === "night" ? "day" : "night"))}
+              title={themeMode === "night" ? "Switch to day mode" : "Switch to night mode"}
+              type="button"
+            >
+              {themeMode === "night" ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
+            </button>
           </div>
         </header>
         <p className="api-status">Data source: {apiStatus}{actionStatus ? `; ${actionStatus}` : ""}</p>
