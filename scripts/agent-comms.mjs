@@ -4,6 +4,24 @@ import { randomUUID } from "node:crypto";
 
 const apiBase = process.env.AGENT_COMMS_API_BASE;
 const token = process.env.AGENT_COMMS_TOKEN;
+const markReadTargetAliases = {
+  thread: "thread",
+  "forum-thread": "thread",
+  forum_thread: "thread",
+  conversation: "conversation",
+  dm: "conversation",
+  "direct-message": "conversation",
+  direct_message: "conversation",
+  "direct-conversation": "conversation",
+  direct_conversation: "conversation",
+  suggestion: "suggestion",
+  suggestions: "suggestion",
+  mention: "mention",
+  mentions: "mention",
+  todo: "todo",
+  todos: "todo",
+};
+const markReadTargetHelp = "thread (aliases: forum-thread), conversation (aliases: dm, direct-message, direct-conversation), suggestion, mention, todo";
 
 function usage() {
   console.log(`agent-comms
@@ -46,6 +64,7 @@ Commands:
   live-receipt [agent-id] <active|waiting_on_peer|settled_by_agent|operator_stop_needed> [note] [last-seen-message-id]
   live-receipt <session-id> <agent-id> <active|waiting_on_peer|settled_by_agent|operator_stop_needed> [note] [last-seen-message-id]
   mark-read [agent-id] <target-type> <target-id> <item-id>
+      target-type: ${markReadTargetHelp}
   gates [status]
   gate <title> <body> <created-by-agent-id> [producer-agent-id] [consumer-agent-id] [owner-agent-id] [required-evidence-json]
   gate-status <gate-id> [agent-id] <open|waiting|satisfied|blocked|closed> [evidence-json]
@@ -220,6 +239,23 @@ function parseOptionArgs(values) {
 }
 
 const receiptStates = new Set(["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"]);
+
+function normalizeMarkReadTargetType(value) {
+  const normalized = markReadTargetAliases[String(value ?? "").trim().toLowerCase()];
+  if (normalized) return normalized;
+  console.error(JSON.stringify({
+    error: "Invalid targetType.",
+    validTargetTypes: ["thread", "conversation", "suggestion", "mention", "todo"],
+    acceptedAliases: {
+      thread: ["forum-thread", "forum_thread"],
+      conversation: ["dm", "direct-message", "direct_message", "direct-conversation", "direct_conversation"],
+      suggestion: ["suggestions"],
+      mention: ["mentions"],
+      todo: ["todos"],
+    },
+  }, null, 2));
+  process.exit(2);
+}
 
 async function activeLiveSessionForAgent(agentId, conversationId) {
   const context = await request(`agent/context/${encodeURIComponent(agentId)}`);
@@ -551,16 +587,20 @@ switch (command) {
     }));
     break;
   case "mark-read":
+  {
+    const hasAgentId = args.length > 3;
+    const targetType = normalizeMarkReadTargetType(hasAgentId ? args[1] : args[0]);
     print(await request("agent/read-cursors", {
       method: "POST",
       body: JSON.stringify({
-        agentId: await resolveAgentId(args.length > 3 ? args[0] : undefined, "mark-read"),
-        targetType: args.length > 3 ? args[1] : args[0],
-        targetId: args.length > 3 ? args[2] : args[1],
-        itemId: args.length > 3 ? args[3] : args[2],
+        agentId: await resolveAgentId(hasAgentId ? args[0] : undefined, "mark-read"),
+        targetType,
+        targetId: hasAgentId ? args[2] : args[1],
+        itemId: hasAgentId ? args[3] : args[2],
       }),
     }));
     break;
+  }
   case "live": {
     const agentId = await resolveAgentId(args[0], "live");
     const context = await request(`agent/context/${encodeURIComponent(agentId)}`);

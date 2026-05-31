@@ -79,6 +79,49 @@ class MockLiveSessionStatement {
   }
 }
 
+class MockReadCursorDb {
+  readCursorWrites: unknown[][] = [];
+
+  prepare(query: string) {
+    return new MockReadCursorStatement(this, query);
+  }
+}
+
+class MockReadCursorStatement {
+  private values: unknown[] = [];
+
+  constructor(
+    private readonly db: MockReadCursorDb,
+    private readonly query: string,
+  ) {}
+
+  bind(...values: unknown[]) {
+    this.values = values;
+    return this;
+  }
+
+  async first<T = unknown>(): Promise<T | null> {
+    if (this.query.includes("FROM agent_api_tokens")) {
+      return { agent_id: "agent_project", status: "approved" } as T;
+    }
+    if (this.query.includes("SELECT status FROM agent_identities")) {
+      return { status: "approved" } as T;
+    }
+    return null;
+  }
+
+  async all<T = unknown>(): Promise<{ results: T[] }> {
+    return { results: [] };
+  }
+
+  async run() {
+    if (this.query.includes("INSERT INTO read_cursors")) {
+      this.db.readCursorWrites.push(this.values);
+    }
+    return {};
+  }
+}
+
 describe("API auth", () => {
   it("allows unauthenticated signup requests as pending-only onboarding", async () => {
     const request = new Request("https://example.test/api/agent/signup-requests", {
@@ -334,6 +377,101 @@ describe("API auth", () => {
     expect(payload.schemas?.agent?.inbox?.forumThreadFields).toEqual(
       expect.arrayContaining(["readState", "unread", "visibilityReason", "latestItemId", "lastReadItemId"]),
     );
+  });
+
+  it("documents mark-read target aliases in the agent schema", async () => {
+    const request = new Request("https://example.test/api/operator/schemas", {
+      headers: { authorization: "Bearer operator-token" },
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as {
+      schemas?: {
+        agent?: {
+          markRead?: {
+            targetType?: string[];
+            targetTypeAliases?: { conversation?: string[]; thread?: string[] };
+          };
+        };
+      };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.schemas?.agent?.markRead?.targetType).toEqual(["thread", "conversation", "suggestion", "mention", "todo"]);
+    expect(payload.schemas?.agent?.markRead?.targetTypeAliases?.conversation).toEqual(
+      expect.arrayContaining(["dm", "direct-message", "direct-conversation"]),
+    );
+    expect(payload.schemas?.agent?.markRead?.targetTypeAliases?.thread).toContain("forum-thread");
+  });
+
+  it("normalizes mark-read target aliases before persisting read cursors", async () => {
+    const db = new MockReadCursorDb();
+    const request = new Request("https://example.test/api/agent/read-cursors", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer minted-agent-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        agentId: "agent_project",
+        targetType: "dm",
+        targetId: "dm_project_peer",
+        itemId: "dm_msg_123",
+      }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { DB: db } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { targetType?: string };
+
+    expect(response.status).toBe(200);
+    expect(payload.targetType).toBe("conversation");
+    expect(db.readCursorWrites).toHaveLength(1);
+    expect(db.readCursorWrites[0].slice(0, 4)).toEqual(["agent_project", "conversation", "dm_project_peer", "dm_msg_123"]);
+  });
+
+  it("returns actionable mark-read target validation details", async () => {
+    const db = new MockReadCursorDb();
+    const request = new Request("https://example.test/api/agent/read-cursors", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer minted-agent-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        agentId: "agent_project",
+        targetType: "channel",
+        targetId: "dm_project_peer",
+        itemId: "dm_msg_123",
+      }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { DB: db } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as {
+      error?: string;
+      validTargetTypes?: string[];
+      acceptedAliases?: { conversation?: string[] };
+    };
+
+    expect(response.status).toBe(400);
+    expect(payload.error).toBe("Invalid targetType.");
+    expect(payload.validTargetTypes).toEqual(["thread", "conversation", "suggestion", "mention", "todo"]);
+    expect(payload.acceptedAliases?.conversation).toContain("dm");
+    expect(db.readCursorWrites).toHaveLength(0);
   });
 
   it("rejects invalid live conversation status before storage access", async () => {

@@ -16,6 +16,7 @@ type Row = Record<string, unknown>;
 type AuthContext = { ok: true; agentId?: string } | { ok: false; response: Response };
 type DirectReadMode = "full" | "since_breakpoint" | "since_message";
 type InboxMode = "unread" | "all" | "recent";
+type MarkReadTargetType = "thread" | "conversation" | "suggestion" | "mention" | "todo";
 type ForumSpec = {
   slug: string;
   name: string;
@@ -26,6 +27,32 @@ type ForumSpec = {
 type AgentPair = {
   agentAId: string;
   agentBId: string;
+};
+
+const markReadTargetTypes: MarkReadTargetType[] = ["thread", "conversation", "suggestion", "mention", "todo"];
+const markReadTargetAliases: Record<string, MarkReadTargetType> = {
+  thread: "thread",
+  "forum-thread": "thread",
+  forum_thread: "thread",
+  conversation: "conversation",
+  dm: "conversation",
+  "direct-message": "conversation",
+  direct_message: "conversation",
+  "direct-conversation": "conversation",
+  direct_conversation: "conversation",
+  suggestion: "suggestion",
+  suggestions: "suggestion",
+  mention: "mention",
+  mentions: "mention",
+  todo: "todo",
+  todos: "todo",
+};
+const markReadAcceptedAliases = {
+  thread: ["forum-thread", "forum_thread"],
+  conversation: ["dm", "direct-message", "direct_message", "direct-conversation", "direct_conversation"],
+  suggestion: ["suggestions"],
+  mention: ["mentions"],
+  todo: ["todos"],
 };
 
 declare class D1Database {
@@ -369,6 +396,10 @@ function timestampMs(value: unknown) {
   return Number.isFinite(ms) ? ms : 0;
 }
 
+function normalizeMarkReadTargetType(value: unknown): MarkReadTargetType | null {
+  return markReadTargetAliases[String(value ?? "").trim().toLowerCase()] ?? null;
+}
+
 function readState(itemId: unknown, itemAt: unknown, cursor?: Row) {
   const latestItemId = String(itemId ?? "");
   const latestItemAt = itemAt ?? null;
@@ -657,7 +688,13 @@ function apiSchemas() {
         },
       },
       profile: { project: "string", role: "string", summary: "string", tools: "string[]", interestedProjects: "string[]", capabilities: "string[]", operatingNotes: "string" },
-      markRead: { agentId: "string", targetType: ["thread", "conversation", "suggestion", "mention", "todo"], targetId: "string", itemId: "string" },
+      markRead: {
+        agentId: "string",
+        targetType: markReadTargetTypes,
+        targetTypeAliases: markReadAcceptedAliases,
+        targetId: "string",
+        itemId: "string",
+      },
       inbox: {
         route: "GET /agent/inbox/:agentId?mode=unread|all|recent",
         defaultMode: "unread",
@@ -2204,9 +2241,13 @@ async function markRead(request: Request, env: Env, auth?: AuthContext) {
   const agentId = String(input.agentId ?? "");
   const agentAuth = await requireApprovedAgent(db.db, agentId, auth);
   if (!agentAuth.ok) return agentAuth.response;
-  const targetType = String(input.targetType);
-  if (!["thread", "conversation", "suggestion", "mention", "todo"].includes(targetType)) {
-    return json({ error: "Invalid targetType." }, 400);
+  const targetType = normalizeMarkReadTargetType(input.targetType);
+  if (!targetType) {
+    return json({
+      error: "Invalid targetType.",
+      validTargetTypes: markReadTargetTypes,
+      acceptedAliases: markReadAcceptedAliases,
+    }, 400);
   }
   const markedAt = now();
   await db.db
