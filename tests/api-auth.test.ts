@@ -1,6 +1,79 @@
 import { describe, expect, it } from "vitest";
 import { onRequest } from "../functions/api/[[path]]";
 
+type MockLiveSession = {
+  id: string;
+  conversation_id: string;
+  status: string;
+  topic: string;
+  stop_command: string;
+  created_by_human_id: string;
+  created_at: string;
+};
+
+class MockLiveSessionDb {
+  sessions: MockLiveSession[];
+
+  insertCount = 0;
+
+  constructor(sessions: MockLiveSession[] = []) {
+    this.sessions = sessions;
+  }
+
+  prepare(query: string) {
+    return new MockLiveSessionStatement(this, query);
+  }
+}
+
+class MockLiveSessionStatement {
+  private values: unknown[] = [];
+
+  constructor(
+    private readonly db: MockLiveSessionDb,
+    private readonly query: string,
+  ) {}
+
+  bind(...values: unknown[]) {
+    this.values = values;
+    return this;
+  }
+
+  async first<T = unknown>(): Promise<T | null> {
+    if (this.query.includes("WHERE conversation_id = ? AND status <> 'stopped'")) {
+      const conversationId = String(this.values[0]);
+      return this.db.sessions
+        .filter((session) => session.conversation_id === conversationId && session.status !== "stopped")
+        .sort((left, right) => right.created_at.localeCompare(left.created_at))[0] as T ?? null;
+    }
+    if (this.query.includes("WHERE id = ?")) {
+      const sessionId = String(this.values[0]);
+      return this.db.sessions.find((session) => session.id === sessionId) as T ?? null;
+    }
+    return null;
+  }
+
+  async all<T = unknown>(): Promise<{ results: T[] }> {
+    return { results: [] };
+  }
+
+  async run() {
+    if (this.query.includes("INSERT INTO live_conversation_sessions")) {
+      const [id, conversationId, topic, stopCommand, createdByHumanId, createdAt] = this.values.map(String);
+      this.db.insertCount += 1;
+      this.db.sessions.push({
+        id,
+        conversation_id: conversationId,
+        status: "active",
+        topic,
+        stop_command: stopCommand,
+        created_by_human_id: createdByHumanId,
+        created_at: createdAt,
+      });
+    }
+    return {};
+  }
+}
+
 describe("API auth", () => {
   it("allows unauthenticated signup requests as pending-only onboarding", async () => {
     const request = new Request("https://example.test/api/agent/signup-requests", {
@@ -278,5 +351,95 @@ describe("API auth", () => {
 
     expect(response.status).toBe(400);
     expect(payload.error).toBe("Invalid live conversation status.");
+  });
+
+  it("reuses an existing active live session for a direct conversation", async () => {
+    const db = new MockLiveSessionDb([
+      {
+        id: "live_existing",
+        conversation_id: "dm_existing",
+        status: "active",
+        topic: "Existing operator request.",
+        stop_command: "stop conversation",
+        created_by_human_id: "human_shay",
+        created_at: "2026-05-31T08:00:00.000Z",
+      },
+    ]);
+    const request = new Request("https://example.test/api/operator/live-conversations", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer operator-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        conversationId: "dm_existing",
+        topic: "Second operator request.",
+      }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token", DB: db } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as {
+      existing?: boolean;
+      session?: { id?: string; conversationId?: string; topic?: string };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.existing).toBe(true);
+    expect(payload.session).toMatchObject({
+      id: "live_existing",
+      conversationId: "dm_existing",
+      topic: "Existing operator request.",
+    });
+    expect(db.insertCount).toBe(0);
+  });
+
+  it("creates a live session when the conversation only has stopped sessions", async () => {
+    const db = new MockLiveSessionDb([
+      {
+        id: "live_stopped",
+        conversation_id: "dm_restart",
+        status: "stopped",
+        topic: "Previous operator request.",
+        stop_command: "stop conversation",
+        created_by_human_id: "human_shay",
+        created_at: "2026-05-31T08:00:00.000Z",
+      },
+    ]);
+    const request = new Request("https://example.test/api/operator/live-conversations", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer operator-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        conversationId: "dm_restart",
+        topic: "Fresh operator request.",
+      }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token", DB: db } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as {
+      existing?: boolean;
+      session?: { conversationId?: string; status?: string; topic?: string };
+    };
+
+    expect(response.status).toBe(201);
+    expect(payload.existing).toBe(false);
+    expect(payload.session).toMatchObject({
+      conversationId: "dm_restart",
+      status: "active",
+      topic: "Fresh operator request.",
+    });
+    expect(db.insertCount).toBe(1);
   });
 });

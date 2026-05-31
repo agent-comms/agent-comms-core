@@ -2225,6 +2225,19 @@ async function createLiveConversation(request: Request, env: Env) {
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Live conversations require durable storage." }, 503);
   const input = await body(request);
+  const conversationId = requireStringField(input, "conversationId");
+  if (!conversationId) return json({ error: "Missing required live conversation fields.", fields: ["conversationId"] }, 400);
+  const existing = await db.db
+    .prepare(
+      `SELECT *
+       FROM live_conversation_sessions
+       WHERE conversation_id = ? AND status <> 'stopped'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .bind(conversationId)
+    .first<Row>();
+  if (existing) return json({ session: normalizeLiveSession(existing), existing: true });
   const id = makeId("live");
   const createdAt = now();
   await db.db
@@ -2233,10 +2246,10 @@ async function createLiveConversation(request: Request, env: Env) {
         (id, conversation_id, status, topic, stop_command, created_by_human_id, created_at)
        VALUES (?, ?, 'active', ?, ?, ?, ?)`,
     )
-    .bind(id, input.conversationId, input.topic ?? "", input.stopCommand ?? "stop conversation", input.createdByHumanId ?? "human_shay", createdAt)
+    .bind(id, conversationId, input.topic ?? "", input.stopCommand ?? "stop conversation", input.createdByHumanId ?? "human_shay", createdAt)
     .run();
   const row = await db.db.prepare("SELECT * FROM live_conversation_sessions WHERE id = ?").bind(id).first<Row>();
-  return json({ session: row }, 201);
+  return json({ session: normalizeLiveSession(row ?? {}), existing: false }, 201);
 }
 
 async function listLiveConversations(env: Env, status?: string | null) {

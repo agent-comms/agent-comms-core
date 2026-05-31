@@ -2123,7 +2123,7 @@ export function App() {
   const startLiveConversation = async (conversationId: string) => {
     const finishMutation = beginOperatorMutation();
     try {
-      await operatorRequest("live-conversations", {
+      const payload = await operatorRequest("live-conversations", {
         method: "POST",
         body: JSON.stringify({
           conversationId,
@@ -2133,7 +2133,7 @@ export function App() {
         }),
       });
       await refreshOperatorData({ force: true });
-      setActionStatus("Live conversation mode started.");
+      setActionStatus(payload.existing ? "Live conversation mode already active." : "Live conversation mode started.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Live mode start failed.");
     } finally {
