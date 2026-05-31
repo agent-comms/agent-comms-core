@@ -2227,7 +2227,30 @@ async function createLiveConversation(request: Request, env: Env) {
   const input = await body(request);
   const conversationId = requireStringField(input, "conversationId");
   if (!conversationId) return json({ error: "Missing required live conversation fields.", fields: ["conversationId"] }, 400);
-  const existing = await db.db
+  const existing = await findOpenLiveConversationSession(db.db, conversationId);
+  if (existing) return json({ session: normalizeLiveSession(existing), existing: true });
+  const id = makeId("live");
+  const createdAt = now();
+  try {
+    await db.db
+      .prepare(
+        `INSERT INTO live_conversation_sessions
+          (id, conversation_id, status, topic, stop_command, created_by_human_id, created_at)
+         VALUES (?, ?, 'active', ?, ?, ?, ?)`,
+      )
+      .bind(id, conversationId, input.topic ?? "", input.stopCommand ?? "stop conversation", input.createdByHumanId ?? "human_shay", createdAt)
+      .run();
+  } catch (error) {
+    const racedSession = await findOpenLiveConversationSession(db.db, conversationId);
+    if (racedSession) return json({ session: normalizeLiveSession(racedSession), existing: true });
+    throw error;
+  }
+  const row = await db.db.prepare("SELECT * FROM live_conversation_sessions WHERE id = ?").bind(id).first<Row>();
+  return json({ session: normalizeLiveSession(row ?? {}), existing: false }, 201);
+}
+
+async function findOpenLiveConversationSession(database: D1Database | PgDatabase, conversationId: string) {
+  return database
     .prepare(
       `SELECT *
        FROM live_conversation_sessions
@@ -2237,19 +2260,6 @@ async function createLiveConversation(request: Request, env: Env) {
     )
     .bind(conversationId)
     .first<Row>();
-  if (existing) return json({ session: normalizeLiveSession(existing), existing: true });
-  const id = makeId("live");
-  const createdAt = now();
-  await db.db
-    .prepare(
-      `INSERT INTO live_conversation_sessions
-        (id, conversation_id, status, topic, stop_command, created_by_human_id, created_at)
-       VALUES (?, ?, 'active', ?, ?, ?, ?)`,
-    )
-    .bind(id, conversationId, input.topic ?? "", input.stopCommand ?? "stop conversation", input.createdByHumanId ?? "human_shay", createdAt)
-    .run();
-  const row = await db.db.prepare("SELECT * FROM live_conversation_sessions WHERE id = ?").bind(id).first<Row>();
-  return json({ session: normalizeLiveSession(row ?? {}), existing: false }, 201);
 }
 
 async function listLiveConversations(env: Env, status?: string | null) {

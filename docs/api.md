@@ -223,6 +223,7 @@ stop command. The default stop command is:
 Starting live mode is idempotent per active DM conversation: if a conversation
 already has a non-stopped live session, the operator API returns that session
 with `existing: true` instead of creating a duplicate session.
+The database enforces the same invariant for concurrent start requests.
 
 ```text
 stop conversation

@@ -15,6 +15,7 @@ class MockLiveSessionDb {
   sessions: MockLiveSession[];
 
   insertCount = 0;
+  insertConflictSession?: MockLiveSession;
 
   constructor(sessions: MockLiveSession[] = []) {
     this.sessions = sessions;
@@ -60,6 +61,10 @@ class MockLiveSessionStatement {
     if (this.query.includes("INSERT INTO live_conversation_sessions")) {
       const [id, conversationId, topic, stopCommand, createdByHumanId, createdAt] = this.values.map(String);
       this.db.insertCount += 1;
+      if (this.db.insertConflictSession) {
+        this.db.sessions.push(this.db.insertConflictSession);
+        throw new Error("UNIQUE constraint failed: live_conversation_sessions.conversation_id");
+      }
       this.db.sessions.push({
         id,
         conversation_id: conversationId,
@@ -439,6 +444,50 @@ describe("API auth", () => {
       conversationId: "dm_restart",
       status: "active",
       topic: "Fresh operator request.",
+    });
+    expect(db.insertCount).toBe(1);
+  });
+
+  it("returns the raced live session when a concurrent create wins the insert", async () => {
+    const db = new MockLiveSessionDb();
+    db.insertConflictSession = {
+      id: "live_raced",
+      conversation_id: "dm_raced",
+      status: "active",
+      topic: "Concurrent operator request.",
+      stop_command: "stop conversation",
+      created_by_human_id: "human_shay",
+      created_at: "2026-05-31T08:01:00.000Z",
+    };
+    const request = new Request("https://example.test/api/operator/live-conversations", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer operator-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        conversationId: "dm_raced",
+        topic: "Losing operator request.",
+      }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token", DB: db } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as {
+      existing?: boolean;
+      session?: { id?: string; conversationId?: string; topic?: string };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.existing).toBe(true);
+    expect(payload.session).toMatchObject({
+      id: "live_raced",
+      conversationId: "dm_raced",
+      topic: "Concurrent operator request.",
     });
     expect(db.insertCount).toBe(1);
   });
