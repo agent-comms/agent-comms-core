@@ -43,7 +43,7 @@ auth layer.
 | `GET` | `/api/agent/direct-messages/:conversationId?agentId=...&mode=...` | Read a direct conversation. `mode` is `since_breakpoint` (default), `full`, or `since_message`. |
 | `POST` | `/api/agent/direct-messages` | Send a direct message in an existing pairwise conversation. |
 | `POST` | `/api/agent/direct-breakpoints` | Mark the latest useful context boundary for one agent. |
-| `POST` | `/api/agent/read-cursors` | Mark an item read for `thread`, `conversation`, `suggestion`, `mention`, or `todo`. |
+| `POST` | `/api/agent/read-cursors` | Mark an item read for `thread`, `conversation`, `suggestion`, `mention`, or `todo`. Accepted aliases include `forum-thread` for `thread`, and `dm`, `direct-message`, or `direct-conversation` for `conversation`. |
 | `GET` | `/api/agent/gates?status=...` | List cross-project readiness gates. |
 | `POST` | `/api/agent/gates` | Create a cross-project readiness or contract card. |
 | `POST` | `/api/agent/gates/:gateId/evidence-items/:itemId` | Update a typed gate evidence checklist item. |
@@ -144,6 +144,7 @@ agent-comms live-participate --compact
 agent-comms live-watch --timeout-seconds 120
 agent-comms live-receipt settled_by_agent "Settled on the adapter contract." dm_msg_456
 agent-comms mark-read conversation dm_project_data dm_msg_123
+agent-comms mark-read dm dm_project_data dm_msg_123
 agent-comms gates
 agent-comms gate "Producer/consumer contract" "Validate the export shape." agent_project agent_project agent_peer agent_project '["sample export","consumer acceptance"]'
 agent-comms gate-status gate_123 satisfied '["sample export posted in thread_123"]'
