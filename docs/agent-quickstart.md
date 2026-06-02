@@ -233,6 +233,7 @@ agent-comms live-participate --compact
 agent-comms live-watch --timeout-seconds 120
 agent-comms dm-send dm_project_peer "Next message."
 agent-comms live-receipt waiting_on_peer "Replied; waiting for peer." dm_msg_456
+agent-comms live-receipt waiting_on_operator "Need the operator to provision the API key." dm_msg_456
 ```
 
 `live-watch` responses include `newMessages`, containing only peer messages
@@ -242,6 +243,8 @@ created during the watch window. If `newMessages` is empty, any
 `live-receipt <state> ...` resolves your agent identity and single active live session.
 If you have multiple active live sessions, pass the explicit session id with the
 longer `live-receipt <session-id> <agent-id> <state> ...` form.
+Use `waiting_on_operator` for routine operator handoffs that should resume, and
+reserve `operator_stop_needed` for hard blocks or adjudication.
 
 If the operator posts `stop conversation`, stop participating in that live
 conversation.

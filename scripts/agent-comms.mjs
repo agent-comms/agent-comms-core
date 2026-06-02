@@ -61,8 +61,8 @@ Commands:
   live [agent-id]
   live-participate [agent-id] [--compact|--since-last-seen|--peer-only|--full]
   live-watch [agent-id] [--conversation <id>] [--timeout-seconds <n>] [--interval-seconds <n>] [--json]
-  live-receipt [agent-id] <active|waiting_on_peer|settled_by_agent|operator_stop_needed> [note] [last-seen-message-id]
-  live-receipt <session-id> <agent-id> <active|waiting_on_peer|settled_by_agent|operator_stop_needed> [note] [last-seen-message-id]
+  live-receipt [agent-id] <active|waiting_on_peer|waiting_on_operator|settled_by_agent|operator_stop_needed> [note] [last-seen-message-id]
+  live-receipt <session-id> <agent-id> <active|waiting_on_peer|waiting_on_operator|settled_by_agent|operator_stop_needed> [note] [last-seen-message-id]
   mark-read [agent-id] <target-type> <target-id> <item-id>
       target-type: ${markReadTargetHelp}
   gates [status]
@@ -240,7 +240,7 @@ function parseOptionArgs(values) {
   return { positional, options };
 }
 
-const receiptStates = new Set(["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"]);
+const receiptStates = new Set(["active", "waiting_on_peer", "waiting_on_operator", "settled_by_agent", "operator_stop_needed"]);
 
 function normalizeMarkReadTargetType(value) {
   const normalized = markReadTargetAliases[String(value ?? "").trim().toLowerCase()];
@@ -328,9 +328,11 @@ async function liveParticipation(agentId, options = {}) {
       latestActionableMessage,
       suggestedNextAction: relatedSessions.some((candidate) => ["operator_stop_needed", "stopped"].includes(candidate.status))
         ? "Stop participating; the live session is stopping or stopped."
+        : relatedSessions.some((candidate) => candidate.status === "waiting_on_operator")
+          ? "Wait for the routine operator action, then continue when a peer/operator message arrives."
         : latestActionableMessage
           ? "Reply if needed, then submit a live receipt with lastSeenMessageId set to the latest actionable message."
-          : "No new peer/operator message after your last seen receipt; wait or submit waiting_on_peer/settled_by_agent as appropriate.",
+          : "No new peer/operator message after your last seen receipt; wait or submit waiting_on_peer/waiting_on_operator/settled_by_agent as appropriate.",
     });
   }
   return { agentId, sessions, conversations };
@@ -647,7 +649,7 @@ switch (command) {
         newMessages: messagesCreatedDuringWatch(conversation.messages, watchStartedAtMs),
       }));
       const actionable = conversations.find((conversation) =>
-        conversation.latestActionableMessage || conversation.statuses?.some((status) => ["operator_stop_needed", "stopped"].includes(status)),
+        conversation.latestActionableMessage || conversation.statuses?.some((status) => ["waiting_on_operator", "operator_stop_needed", "stopped"].includes(status)),
       );
       if (actionable) {
         print({

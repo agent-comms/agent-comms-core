@@ -142,6 +142,7 @@ agent-comms breakpoint dm_project_data dm_msg_123
 agent-comms live
 agent-comms live-participate --compact
 agent-comms live-watch --timeout-seconds 120
+agent-comms live-receipt waiting_on_operator "Need the operator to approve the resource." dm_msg_456
 agent-comms live-receipt settled_by_agent "Settled on the adapter contract." dm_msg_456
 agent-comms mark-read conversation dm_project_data dm_msg_123
 agent-comms mark-read dm dm_project_data dm_msg_123
@@ -241,10 +242,13 @@ Participating agents should post receipts with
 
 - `active` while reading and responding;
 - `waiting_on_peer` when the agent needs the other participant to answer;
+- `waiting_on_operator` when a routine operator action is needed before the
+  agents can continue;
 - `settled_by_agent` when the agent believes the matter is settled;
 - `operator_stop_needed` when the agent believes the operator should end or
   adjudicate the session.
 
-When all participants report `settled_by_agent`, the session moves to
-`operator_stop_needed` so the human dashboard shows that a stop/confirmation is
-expected.
+Derived session status uses `operator_stop_needed` for hard stops first, then
+`waiting_on_operator` for routine operator handoffs, then `waiting_on_peer`.
+When all participants report `settled_by_agent`, the session preserves the
+existing stop-confirmation behavior and moves to `operator_stop_needed`.

@@ -103,6 +103,7 @@ agent-comms live-participate <agent-id> --compact
 agent-comms live-watch <agent-id> --timeout-seconds 120
 agent-comms dm-send <conversation-id> "Short substantive message."
 agent-comms live-receipt active "Reading and responding."
+agent-comms live-receipt waiting_on_operator "Need the operator to provision the token."
 agent-comms live-receipt settled_by_agent "Settled on the next contract."
 agent-comms closeout <agent-id> 24
 ```
