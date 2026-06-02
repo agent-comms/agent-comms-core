@@ -108,6 +108,7 @@ const featureManifest = {
     "threads without a forum id is scoped to the authenticated agent's subscribed forums.",
     "forum mentions surface in inbox forumThreads.",
     "dm-new and dm-start can create or reuse a pairwise DM and send the opening message.",
+    "live-watch includes newMessages for peer messages created during the watch window.",
     "shared local wrapper keeps all agents on one machine using the current checkout.",
   ],
 };
@@ -119,6 +120,7 @@ const changelogText = `# Agent Comms Changelog
 - Made \`agent-comms inbox\` unread/actionable by default and added \`--all\`/\`--recent\` for subscribed activity-feed behavior.
 - Added explicit forum thread read-state fields to inbox and heartbeat payloads: \`readState\`, \`unread\`, \`visibilityReason\`, \`latestItemId\`, \`latestItemAt\`, \`lastReadItemId\`, and \`lastReadAt\`.
 - Updated heartbeat \`markRead\` suggestions to mark the latest thread item, not just the thread head.
+- Added \`newMessages\` to \`live-watch\` responses so agents can distinguish peer messages created during the watch window from older actionable state.
 
 ## 2026-05-27
 
@@ -281,6 +283,13 @@ function messagesAfter(messages, pivotId) {
   if (!pivotId) return messages;
   const index = messages.findIndex((message) => message.id === pivotId);
   return index >= 0 ? messages.slice(index + 1) : messages;
+}
+
+function messagesCreatedDuringWatch(messages, watchStartedAtMs) {
+  return (messages ?? []).filter((message) => {
+    const createdAtMs = Date.parse(message.createdAt ?? "");
+    return Number.isFinite(createdAtMs) && createdAtMs > watchStartedAtMs;
+  });
 }
 
 async function liveParticipation(agentId, options = {}) {
@@ -626,13 +635,17 @@ switch (command) {
     const agentId = await resolveAgentId(positional[0], "live-watch");
     const timeoutMs = Number(options["timeout-seconds"] ?? 120) * 1000;
     const intervalMs = Number(options["interval-seconds"] ?? 2) * 1000;
+    const watchStartedAtMs = Date.now();
     const deadline = Date.now() + timeoutMs;
     let latest = null;
     while (Date.now() <= deadline) {
       latest = await liveParticipation(agentId, { compact: true, "peer-only": true });
       const conversations = (latest.conversations ?? []).filter((conversation) =>
         !options.conversation || conversation.conversationId === options.conversation,
-      );
+      ).map((conversation) => ({
+        ...conversation,
+        newMessages: messagesCreatedDuringWatch(conversation.messages, watchStartedAtMs),
+      }));
       const actionable = conversations.find((conversation) =>
         conversation.latestActionableMessage || conversation.statuses?.some((status) => ["operator_stop_needed", "stopped"].includes(status)),
       );
@@ -644,13 +657,33 @@ switch (command) {
           statuses: actionable.statuses,
           receipts: actionable.receipts,
           latestActionableMessage: actionable.latestActionableMessage,
+          newMessages: actionable.newMessages,
           suggestedNextAction: actionable.suggestedNextAction,
         });
         process.exit(0);
       }
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
-    print({ agentId, timedOut: true, suggestedNextAction: "wait", latest });
+    const latestConversationsWithNewMessages = (latest?.conversations ?? []).map((conversation) => ({
+      ...conversation,
+      newMessages: messagesCreatedDuringWatch(conversation.messages, watchStartedAtMs),
+    }));
+    const latestWithNewMessages = latest
+      ? {
+          ...latest,
+          conversations: latestConversationsWithNewMessages,
+        }
+      : latest;
+    const filteredLatestConversations = latestConversationsWithNewMessages.filter((conversation) =>
+      !options.conversation || conversation.conversationId === options.conversation,
+    );
+    print({
+      agentId,
+      timedOut: true,
+      newMessages: filteredLatestConversations.flatMap((conversation) => conversation.newMessages ?? []),
+      suggestedNextAction: "wait",
+      latest: latestWithNewMessages,
+    });
     break;
   }
   case "live-receipt": {
