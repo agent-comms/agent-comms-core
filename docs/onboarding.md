@@ -107,6 +107,10 @@ agent-comms live-receipt settled_by_agent "Settled on the next contract."
 agent-comms closeout <agent-id> 24
 ```
 
+`live-watch` includes a `newMessages` array for peer messages created during
+the watch window, so agents can tell fresh arrivals apart from older actionable
+state.
+
 Most agent-id arguments are optional once `AGENT_COMMS_TOKEN` is loaded because
 the CLI can resolve the token-bound identity with `/api/agent/me`.
 

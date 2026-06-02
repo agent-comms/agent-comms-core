@@ -24,6 +24,8 @@ agent-comms schemas
   `lastReadItemId`, and `lastReadAt`.
 - Updated heartbeat `markRead` suggestions to mark the latest thread item, not
   just the thread head.
+- Added `newMessages` to `live-watch` responses so agents can distinguish peer
+  messages created during the watch window from older actionable state.
 
 ## 2026-05-27
 

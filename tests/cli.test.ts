@@ -1,5 +1,62 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import http from "node:http";
 import { describe, expect, it } from "vitest";
+
+type CliResult = {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+};
+
+async function withApiServer(
+  handler: (request: http.IncomingMessage, response: http.ServerResponse) => void,
+  callback: (baseUrl: string) => Promise<void>,
+) {
+  const server = http.createServer(handler);
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("Expected TCP server address.");
+  }
+  try {
+    await callback(`http://127.0.0.1:${address.port}`);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+async function runCli(args: string[], apiBase: string): Promise<CliResult> {
+  const child = spawn(process.execPath, ["scripts/agent-comms.mjs", ...args], {
+    cwd: process.cwd(),
+    env: {
+      PATH: process.env.PATH ?? "",
+      AGENT_COMMS_API_BASE: apiBase,
+      AGENT_COMMS_TOKEN: "test-token",
+    },
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const status = await new Promise<number | null>((resolve) => {
+    child.on("close", resolve);
+  });
+  return { status, stdout, stderr };
+}
+
+function sendJson(response: http.ServerResponse, payload: unknown) {
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify(payload));
+}
 
 describe("CLI", () => {
   it("reports invalid mark-read target types before requiring API configuration", () => {
@@ -21,5 +78,162 @@ describe("CLI", () => {
     expect(payload.error).toBe("Invalid targetType.");
     expect(payload.validTargetTypes).toEqual(["thread", "conversation", "suggestion", "mention", "todo"]);
     expect(payload.acceptedAliases?.conversation).toContain("dm");
+  });
+
+  it("reports only peer messages created during the live-watch window as newMessages", async () => {
+    const oldMessage = {
+      id: "dm_msg_old",
+      body: "Already handled.",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      senderAgentId: "agent_peer",
+    };
+    const newMessage = {
+      id: "dm_msg_new",
+      body: "Fresh during watch.",
+      createdAt: new Date(Date.now() + 1_000).toISOString(),
+      senderAgentId: "agent_peer",
+    };
+    let directMessageReads = 0;
+
+    await withApiServer((request, response) => {
+      const url = request.url ?? "";
+      if (url.startsWith("/api/agent/context/agent_test")) {
+        sendJson(response, {
+          liveConversationSessions: [
+            {
+              id: "live_1",
+              conversationId: "dm_1",
+              status: "active",
+              receipts: [{ agentId: "agent_test", lastSeenMessageId: null }],
+            },
+          ],
+        });
+        return;
+      }
+      if (url.startsWith("/api/agent/direct-messages/dm_1")) {
+        directMessageReads += 1;
+        sendJson(response, {
+          messages: directMessageReads === 1 ? [] : [oldMessage, newMessage],
+        });
+        return;
+      }
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: `Unexpected ${url}` }));
+    }, async (apiBase) => {
+      const result = await runCli([
+        "live-watch",
+        "agent_test",
+        "--timeout-seconds",
+        "2",
+        "--interval-seconds",
+        "0.01",
+      ], apiBase);
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      const payload = JSON.parse(result.stdout) as {
+        latestActionableMessage?: { id?: string };
+        newMessages?: Array<{ id?: string }>;
+      };
+      expect(payload.latestActionableMessage?.id).toBe("dm_msg_new");
+      expect(payload.newMessages?.map((message) => message.id)).toEqual(["dm_msg_new"]);
+    });
+  });
+
+  it("returns an empty newMessages array for pre-existing live-watch actionable state", async () => {
+    await withApiServer((request, response) => {
+      const url = request.url ?? "";
+      if (url.startsWith("/api/agent/context/agent_test")) {
+        sendJson(response, {
+          liveConversationSessions: [
+            {
+              id: "live_1",
+              conversationId: "dm_1",
+              status: "active",
+              receipts: [{ agentId: "agent_test", lastSeenMessageId: null }],
+            },
+          ],
+        });
+        return;
+      }
+      if (url.startsWith("/api/agent/direct-messages/dm_1")) {
+        sendJson(response, {
+          messages: [
+            {
+              id: "dm_msg_old",
+              body: "Already waiting.",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              senderAgentId: "agent_peer",
+            },
+          ],
+        });
+        return;
+      }
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: `Unexpected ${url}` }));
+    }, async (apiBase) => {
+      const result = await runCli([
+        "live-watch",
+        "agent_test",
+        "--timeout-seconds",
+        "2",
+        "--interval-seconds",
+        "0.01",
+      ], apiBase);
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      const payload = JSON.parse(result.stdout) as {
+        latestActionableMessage?: { id?: string };
+        newMessages?: Array<{ id?: string }>;
+      };
+      expect(payload.latestActionableMessage?.id).toBe("dm_msg_old");
+      expect(payload.newMessages).toEqual([]);
+    });
+  });
+
+  it("includes newMessages on timed-out live-watch responses", async () => {
+    await withApiServer((request, response) => {
+      const url = request.url ?? "";
+      if (url.startsWith("/api/agent/context/agent_test")) {
+        sendJson(response, {
+          liveConversationSessions: [
+            {
+              id: "live_1",
+              conversationId: "dm_1",
+              status: "active",
+              receipts: [{ agentId: "agent_test", lastSeenMessageId: null }],
+            },
+          ],
+        });
+        return;
+      }
+      if (url.startsWith("/api/agent/direct-messages/dm_1")) {
+        sendJson(response, { messages: [] });
+        return;
+      }
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: `Unexpected ${url}` }));
+    }, async (apiBase) => {
+      const result = await runCli([
+        "live-watch",
+        "agent_test",
+        "--timeout-seconds",
+        "0.05",
+        "--interval-seconds",
+        "0.01",
+      ], apiBase);
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      const payload = JSON.parse(result.stdout) as {
+        timedOut?: boolean;
+        newMessages?: unknown[];
+        latest?: { conversations?: Array<{ newMessages?: unknown[] }> };
+      };
+      expect(payload.timedOut).toBe(true);
+      expect(payload.newMessages).toEqual([]);
+      expect(payload.latest?.conversations?.[0]?.newMessages).toEqual([]);
+    });
   });
 });

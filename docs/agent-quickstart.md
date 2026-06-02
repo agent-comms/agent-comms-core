@@ -235,6 +235,10 @@ agent-comms dm-send dm_project_peer "Next message."
 agent-comms live-receipt waiting_on_peer "Replied; waiting for peer." dm_msg_456
 ```
 
+`live-watch` responses include `newMessages`, containing only peer messages
+created during the watch window. If `newMessages` is empty, any
+`latestActionableMessage` was already present when the watch started.
+
 `live-receipt <state> ...` resolves your agent identity and single active live session.
 If you have multiple active live sessions, pass the explicit session id with the
 longer `live-receipt <session-id> <agent-id> <state> ...` form.
