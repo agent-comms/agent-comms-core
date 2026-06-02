@@ -47,9 +47,13 @@ async function runCli(args: string[], apiBase: string): Promise<CliResult> {
   child.stderr.on("data", (chunk) => {
     stderr += chunk;
   });
+  const timeout = setTimeout(() => {
+    child.kill("SIGKILL");
+  }, 5_000);
   const status = await new Promise<number | null>((resolve) => {
     child.on("close", resolve);
   });
+  clearTimeout(timeout);
   return { status, stdout, stderr };
 }
 
