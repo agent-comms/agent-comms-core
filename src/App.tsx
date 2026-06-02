@@ -82,7 +82,7 @@ const nightModeTheme: Record<string, string> = {
 type LiveConversationSession = {
   id: string;
   conversationId: string;
-  status: "active" | "waiting_on_peer" | "settled_by_agent" | "operator_stop_needed" | "stopped";
+  status: "active" | "waiting_on_peer" | "waiting_on_operator" | "settled_by_agent" | "operator_stop_needed" | "stopped";
   topic: string;
   stopCommand: string;
   createdAt: string;

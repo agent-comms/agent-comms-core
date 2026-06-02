@@ -17,6 +17,8 @@ type AuthContext = { ok: true; agentId?: string } | { ok: false; response: Respo
 type DirectReadMode = "full" | "since_breakpoint" | "since_message";
 type InboxMode = "unread" | "all" | "recent";
 type MarkReadTargetType = "thread" | "conversation" | "suggestion" | "mention" | "todo";
+type LiveReceiptState = "active" | "waiting_on_peer" | "waiting_on_operator" | "settled_by_agent" | "operator_stop_needed";
+type LiveSessionStatus = LiveReceiptState | "stopped";
 type ForumSpec = {
   slug: string;
   name: string;
@@ -54,6 +56,8 @@ const markReadAcceptedAliases = {
   mention: ["mentions"],
   todo: ["todos"],
 };
+const liveReceiptStates: LiveReceiptState[] = ["active", "waiting_on_peer", "waiting_on_operator", "settled_by_agent", "operator_stop_needed"];
+const liveSessionStatuses: LiveSessionStatus[] = [...liveReceiptStates, "stopped"];
 
 declare class D1Database {
   prepare(query: string): D1PreparedStatement;
@@ -701,7 +705,7 @@ function apiSchemas() {
         forumThreadFields: ["readState", "unread", "visibilityReason", "latestItemId", "latestItemAt", "lastReadItemId", "lastReadAt"],
       },
       heartbeat: "GET /agent/heartbeat/:agentId",
-      liveReceipt: { agentId: "string", state: ["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"], note: "string", lastSeenMessageId: "string optional" },
+      liveReceipt: { agentId: "string", state: liveReceiptStates, note: "string", lastSeenMessageId: "string optional" },
       gate: { title: "string", body: "string", producerAgentId: "string", consumerAgentId: "string", ownerAgentId: "string", requiredEvidence: "string[]" },
       gateStatus: { agentId: "string", status: ["open", "waiting", "satisfied", "blocked", "closed"], evidence: "string[] optional" },
     },
@@ -2335,7 +2339,7 @@ async function listLiveConversations(env: Env, status?: string | null) {
 
 async function updateLiveConversation(request: Request, env: Env, sessionId: string) {
   const input = await body(request);
-  if (!["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed", "stopped"].includes(String(input.status))) {
+  if (!liveSessionStatuses.includes(String(input.status) as LiveSessionStatus)) {
     return json({ error: "Invalid live conversation status." }, 400);
   }
   const db = requireDb(env);
@@ -2359,7 +2363,7 @@ async function upsertLiveReceipt(request: Request, env: Env, sessionId: string, 
   const input = await body(request);
   const agentId = String(input.agentId ?? "");
   const state = String(input.state ?? "");
-  if (!["active", "waiting_on_peer", "settled_by_agent", "operator_stop_needed"].includes(state)) {
+  if (!liveReceiptStates.includes(state as LiveReceiptState)) {
     return json({ error: "Invalid receipt state." }, 400);
   }
   const database = db.db;
@@ -2396,6 +2400,8 @@ async function upsertLiveReceipt(request: Request, env: Env, sessionId: string, 
   );
   const nextStatus = receipts.some((receipt) => receipt.state === "operator_stop_needed") || settled
     ? "operator_stop_needed"
+    : receipts.some((receipt) => receipt.state === "waiting_on_operator")
+      ? "waiting_on_operator"
     : receipts.some((receipt) => receipt.state === "waiting_on_peer")
       ? "waiting_on_peer"
       : "active";

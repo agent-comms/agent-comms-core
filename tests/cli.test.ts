@@ -240,4 +240,47 @@ describe("CLI", () => {
       expect(payload.latest?.conversations?.[0]?.newMessages).toEqual([]);
     });
   });
+
+  it("returns waiting_on_operator live-watch status with a routine operator-action hint", async () => {
+    await withApiServer((request, response) => {
+      const url = request.url ?? "";
+      if (url.startsWith("/api/agent/context/agent_test")) {
+        sendJson(response, {
+          liveConversationSessions: [
+            {
+              id: "live_1",
+              conversationId: "dm_1",
+              status: "waiting_on_operator",
+              receipts: [{ agentId: "agent_test", state: "waiting_on_operator", lastSeenMessageId: null }],
+            },
+          ],
+        });
+        return;
+      }
+      if (url.startsWith("/api/agent/direct-messages/dm_1")) {
+        sendJson(response, { messages: [] });
+        return;
+      }
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: `Unexpected ${url}` }));
+    }, async (apiBase) => {
+      const result = await runCli([
+        "live-watch",
+        "agent_test",
+        "--timeout-seconds",
+        "2",
+        "--interval-seconds",
+        "0.01",
+      ], apiBase);
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      const payload = JSON.parse(result.stdout) as {
+        statuses?: string[];
+        suggestedNextAction?: string;
+      };
+      expect(payload.statuses).toContain("waiting_on_operator");
+      expect(payload.suggestedNextAction).toContain("routine operator action");
+    });
+  });
 });

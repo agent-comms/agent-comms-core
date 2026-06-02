@@ -11,14 +11,37 @@ type MockLiveSession = {
   created_at: string;
 };
 
+type MockLiveReceipt = {
+  session_id: string;
+  agent_id: string;
+  state: string;
+  note: string;
+  last_seen_message_id: string | null;
+  updated_at: string;
+};
+
+type MockDirectConversation = {
+  id: string;
+  agent_a_id: string;
+  agent_b_id: string;
+};
+
 class MockLiveSessionDb {
   sessions: MockLiveSession[];
+  receipts: MockLiveReceipt[];
+  conversations: MockDirectConversation[];
 
   insertCount = 0;
   insertConflictSession?: MockLiveSession;
 
-  constructor(sessions: MockLiveSession[] = []) {
+  constructor(
+    sessions: MockLiveSession[] = [],
+    conversations: MockDirectConversation[] = [],
+    receipts: MockLiveReceipt[] = [],
+  ) {
     this.sessions = sessions;
+    this.conversations = conversations;
+    this.receipts = receipts;
   }
 
   prepare(query: string) {
@@ -40,6 +63,19 @@ class MockLiveSessionStatement {
   }
 
   async first<T = unknown>(): Promise<T | null> {
+    if (this.query.includes("FROM agent_api_tokens")) {
+      return { agent_id: "agent_a", status: "approved" } as T;
+    }
+    if (this.query.includes("SELECT status FROM agent_identities")) {
+      return { status: "approved" } as T;
+    }
+    if (this.query.includes("FROM live_conversation_sessions s") && this.query.includes("JOIN direct_conversations c")) {
+      const sessionId = String(this.values[0]);
+      const session = this.db.sessions.find((candidate) => candidate.id === sessionId);
+      const conversation = this.db.conversations.find((candidate) => candidate.id === session?.conversation_id);
+      if (!session || !conversation) return null;
+      return { ...session, ...conversation } as T;
+    }
     if (this.query.includes("WHERE conversation_id = ? AND status <> 'stopped'")) {
       const conversationId = String(this.values[0]);
       return this.db.sessions
@@ -54,6 +90,10 @@ class MockLiveSessionStatement {
   }
 
   async all<T = unknown>(): Promise<{ results: T[] }> {
+    if (this.query.includes("FROM live_conversation_receipts WHERE session_id = ?")) {
+      const sessionId = String(this.values[0]);
+      return { results: this.db.receipts.filter((receipt) => receipt.session_id === sessionId) as T[] };
+    }
     return { results: [] };
   }
 
@@ -74,6 +114,27 @@ class MockLiveSessionStatement {
         created_by_human_id: createdByHumanId,
         created_at: createdAt,
       });
+    }
+    if (this.query.includes("INSERT INTO live_conversation_receipts")) {
+      const [sessionId, agentId, state, note, lastSeenMessageId, updatedAt] = this.values.map((value) =>
+        value === null || value === undefined ? null : String(value)
+      );
+      const existing = this.db.receipts.find((receipt) => receipt.session_id === sessionId && receipt.agent_id === agentId);
+      const receipt = {
+        session_id: String(sessionId),
+        agent_id: String(agentId),
+        state: String(state),
+        note: String(note ?? ""),
+        last_seen_message_id: lastSeenMessageId,
+        updated_at: String(updatedAt),
+      };
+      if (existing) Object.assign(existing, receipt);
+      else this.db.receipts.push(receipt);
+    }
+    if (this.query.includes("UPDATE live_conversation_sessions SET status = ? WHERE id = ? AND status <> 'stopped'")) {
+      const [status, sessionId] = this.values.map(String);
+      const session = this.db.sessions.find((candidate) => candidate.id === sessionId && candidate.status !== "stopped");
+      if (session) session.status = status;
     }
     return {};
   }
@@ -409,6 +470,25 @@ describe("API auth", () => {
     expect(payload.schemas?.agent?.markRead?.targetTypeAliases?.thread).toContain("forum-thread");
   });
 
+  it("documents waiting_on_operator in the agent live receipt schema", async () => {
+    const request = new Request("https://example.test/api/operator/schemas", {
+      headers: { authorization: "Bearer operator-token" },
+    });
+
+    const response = await onRequest({
+      request,
+      env: { OPERATOR_API_TOKEN: "operator-token" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as {
+      schemas?: { agent?: { liveReceipt?: { state?: string[] } } };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.schemas?.agent?.liveReceipt?.state).toContain("waiting_on_operator");
+  });
+
   it("normalizes mark-read target aliases before persisting read cursors", async () => {
     const db = new MockReadCursorDb();
     const request = new Request("https://example.test/api/agent/read-cursors", {
@@ -494,6 +574,117 @@ describe("API auth", () => {
 
     expect(response.status).toBe(400);
     expect(payload.error).toBe("Invalid live conversation status.");
+  });
+
+  it("accepts waiting_on_operator receipts and derives waiting_on_operator before waiting_on_peer", async () => {
+    const db = new MockLiveSessionDb(
+      [
+        {
+          id: "live_waiting",
+          conversation_id: "dm_waiting",
+          status: "active",
+          topic: "Needs an operator handoff.",
+          stop_command: "stop conversation",
+          created_by_human_id: "human_shay",
+          created_at: "2026-05-31T08:00:00.000Z",
+        },
+      ],
+      [{ id: "dm_waiting", agent_a_id: "agent_a", agent_b_id: "agent_b" }],
+      [
+        {
+          session_id: "live_waiting",
+          agent_id: "agent_b",
+          state: "waiting_on_peer",
+          note: "Waiting on peer.",
+          last_seen_message_id: "dm_msg_1",
+          updated_at: "2026-05-31T08:00:00.000Z",
+        },
+      ],
+    );
+    const request = new Request("https://example.test/api/agent/live-conversations/live_waiting/receipt", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer minted-agent-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        agentId: "agent_a",
+        state: "waiting_on_operator",
+        note: "Need the operator to provision the API key.",
+        lastSeenMessageId: "dm_msg_2",
+      }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { DB: db } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as {
+      session?: { status?: string };
+      receipt?: { state?: string; note?: string; last_seen_message_id?: string };
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload.receipt).toMatchObject({
+      state: "waiting_on_operator",
+      note: "Need the operator to provision the API key.",
+      last_seen_message_id: "dm_msg_2",
+    });
+    expect(payload.session?.status).toBe("waiting_on_operator");
+    expect(db.sessions[0].status).toBe("waiting_on_operator");
+  });
+
+  it("keeps operator_stop_needed ahead of waiting_on_operator when deriving live status", async () => {
+    const db = new MockLiveSessionDb(
+      [
+        {
+          id: "live_stop",
+          conversation_id: "dm_stop",
+          status: "active",
+          topic: "Needs adjudication.",
+          stop_command: "stop conversation",
+          created_by_human_id: "human_shay",
+          created_at: "2026-05-31T08:00:00.000Z",
+        },
+      ],
+      [{ id: "dm_stop", agent_a_id: "agent_a", agent_b_id: "agent_b" }],
+      [
+        {
+          session_id: "live_stop",
+          agent_id: "agent_b",
+          state: "operator_stop_needed",
+          note: "Hard stop.",
+          last_seen_message_id: "dm_msg_1",
+          updated_at: "2026-05-31T08:00:00.000Z",
+        },
+      ],
+    );
+    const request = new Request("https://example.test/api/agent/live-conversations/live_stop/receipt", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer minted-agent-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        agentId: "agent_a",
+        state: "waiting_on_operator",
+        note: "Routine operator action also needed.",
+      }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { DB: db } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { session?: { status?: string } };
+
+    expect(response.status).toBe(200);
+    expect(payload.session?.status).toBe("operator_stop_needed");
+    expect(db.sessions[0].status).toBe("operator_stop_needed");
   });
 
   it("reuses an existing active live session for a direct conversation", async () => {
