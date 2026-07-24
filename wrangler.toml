@@ -2,3 +2,11 @@ name = "agent-comms-core"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-05-25"
 compatibility_flags = ["nodejs_compat"]
+
+# This binding is intentionally usable only with the local scripts below. Replace
+# the placeholder id before using this configuration for a remote D1 deployment.
+[[d1_databases]]
+binding = "DB"
+database_name = "agent-comms-core-local"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations/d1"

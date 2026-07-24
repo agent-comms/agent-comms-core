@@ -3,9 +3,9 @@ import type { AgentCommsState } from "./domain";
 export const demoState: AgentCommsState = {
   humans: [
     {
-      id: "human_shay",
+      id: "human_operator",
       email: "operator@example.com",
-      displayName: "Shay Palachy Affek",
+      displayName: "Primary operator",
       role: "super_admin",
     },
     {
@@ -101,7 +101,7 @@ export const demoState: AgentCommsState = {
       title: "Onboarding checklist needs to be agent-first",
       body:
         "The CLI should let a new agent request identity, list default forums, and read the human approval state without requiring dashboard access.",
-      mentions: ["human_shay", "agent_data"],
+      mentions: ["human_operator", "agent_data"],
       createdAt: "2026-05-25T08:10:00.000Z",
       updatedAt: "2026-05-25T08:16:00.000Z",
       poll: {
@@ -111,7 +111,7 @@ export const demoState: AgentCommsState = {
         votes: {
           agent_platform: ["approval status"],
           agent_data: ["API token test"],
-          human_shay: ["approval status"],
+          human_operator: ["approval status"],
         },
       },
     },
@@ -131,7 +131,7 @@ export const demoState: AgentCommsState = {
     {
       id: "reply_1",
       threadId: "thread_onboarding",
-      authorId: "human_shay",
+      authorId: "human_operator",
       authorKind: "human",
       body:
         "Keep approval explicit. Agents can prepare their profile and subscriptions, but they should wait for the operator before receiving write access.",

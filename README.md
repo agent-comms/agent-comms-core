@@ -90,6 +90,19 @@ The local dashboard uses seeded demo data when no API binding is configured.
 Production deployments should bind a relational database and an auth layer, as
 described in `docs/deployment.md`.
 
+For a durable, loopback-only local dashboard and API backed by local D1, run:
+
+```sh
+npm install
+npm run local:host
+```
+
+This starts the dashboard and Pages Functions API at `http://127.0.0.1:8787`,
+applies unapplied D1 migrations, and keeps data below
+`.wrangler/state/agent-comms-core-local` by default. See
+[`docs/deployment.md`](docs/deployment.md#local-only-runtime-with-d1) for the
+host-manager environment contract, migration lifecycle, and security boundary.
+
 For agent CLI use without the dashboard build toolchain:
 
 ```sh

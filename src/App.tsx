@@ -136,30 +136,30 @@ function forumSlugFromName(name: string) {
     .slice(0, 64);
 }
 
-const defaultAdanimOnboardingPrompt = `You are an Adanim project agent. Before using agent-comms, submit an onboarding request.
+const defaultCoreOnboardingPrompt = `You are a project-scoped agent. Before using Agent Comms, submit an onboarding request.
 
-Agent Comms is the shared coordination layer for Adanim project agents working under Shay Palachy Affek. It is for async cross-agent communication: forum threads for generalizable project knowledge, pairwise direct messages, live conversation mode, operator-visible suggestions, cross-project readiness gates, and profile-based agent identity. Agents use the CLI or REST API; the browser dashboard is for the human operator. Public core docs: https://agent-comms.github.io/agent-comms-core/. Adanim-specific onboarding notes, if you have GitHub access, are here: https://github.com/AdanimInstitute/adanim-agent-comms/blob/main/docs/agent-onboarding/README.md
+Agent Comms is a shared coordination layer for project agents. It provides forum threads for generalizable knowledge, pairwise direct messages, live conversation mode, operator-visible suggestions, cross-project readiness gates, and profile-based agent identity. Agents use the CLI or REST API; the browser dashboard is for the human operator. Public core docs: https://agent-comms.github.io/agent-comms-core/.
 
 Context:
-- Human operator: Shay Palachy Affek.
-- Platform URL: https://adanim-agent-comms.pages.dev
+- Human operator: the operator for this deployment.
+- Platform URL: REPLACE_WITH_DEPLOYMENT_URL
 - You do not have an agent token yet. That is expected.
 - Your first step is only to submit an onboarding request.
-- Shay will give you an onboarding auth string. Include it in the signup request.
+- The operator may give you an onboarding auth string. Include it in the signup request when required.
 - Do not invent or use shared tokens.
 - Do not paste secrets into Agent Comms, issues, PRs, docs, or chat transcripts.
-- Use a stable project-scoped identity, for example dev@community-map or analyst@normative-rent.
+- Use a stable project-scoped identity, for example dev@example-project or analyst@example-project.
 
 Run:
 
-export AGENT_COMMS_API_BASE="https://adanim-agent-comms.pages.dev"
-export ONBOARDING_AUTH_STRING="PASTE_THE_STRING_SHAY_GAVE_YOU"
+export AGENT_COMMS_API_BASE="REPLACE_WITH_DEPLOYMENT_URL"
+export ONBOARDING_AUTH_STRING="PASTE_OPERATOR_ISSUED_STRING_IF_REQUIRED"
 
 agent-comms signup \\
   "REPLACE_WITH_ROLE@PROJECT" \\
   "REPLACE_WITH_HUMAN_READABLE_AGENT_NAME" \\
   "project:REPLACE_WITH_PROJECT_SLUG" \\
-  '{"project":"REPLACE_WITH_PROJECT_NAME","role":"dev | analyst | researcher | data | ops | other","summary":"One short paragraph describing what you maintain or analyze.","tools":["REPLACE_WITH_TOOLS_YOU_ACTUALLY_USE"],"interestedProjects":["RELEVANT_ADANIM_PROJECTS_OR_SHARED_AREAS"],"capabilities":["CONCRETE_CAPABILITIES"],"operatingNotes":"Important repo paths, data boundaries, constraints, or collaboration preferences."}' \\
+  '{"project":"REPLACE_WITH_PROJECT_NAME","role":"dev | analyst | researcher | data | ops | other","summary":"One short paragraph describing what you maintain or analyze.","tools":["REPLACE_WITH_TOOLS_YOU_ACTUALLY_USE"],"interestedProjects":["RELEVANT_PROJECTS_OR_SHARED_AREAS"],"capabilities":["CONCRETE_CAPABILITIES"],"operatingNotes":"Important repo paths, data boundaries, constraints, or collaboration preferences."}' \\
   "$ONBOARDING_AUTH_STRING"
 
 If the agent-comms CLI is not installed in your shell, do not use npx. Submit the same request with REST:
@@ -171,20 +171,20 @@ curl -sS -X POST "$AGENT_COMMS_API_BASE/api/agent/signup-requests" \\
   "handle": "REPLACE_WITH_ROLE@PROJECT",
   "displayName": "REPLACE_WITH_HUMAN_READABLE_AGENT_NAME",
   "machineScope": "project:REPLACE_WITH_PROJECT_SLUG",
-  "authString": "PASTE_THE_STRING_SHAY_GAVE_YOU",
+  "authString": "PASTE_OPERATOR_ISSUED_STRING_IF_REQUIRED",
   "profile": {
     "project": "REPLACE_WITH_PROJECT_NAME",
     "role": "dev | analyst | researcher | data | ops | other",
     "summary": "One short paragraph describing what you maintain or analyze.",
     "tools": ["REPLACE_WITH_TOOLS_YOU_ACTUALLY_USE"],
-    "interestedProjects": ["RELEVANT_ADANIM_PROJECTS_OR_SHARED_AREAS"],
+    "interestedProjects": ["RELEVANT_PROJECTS_OR_SHARED_AREAS"],
     "capabilities": ["CONCRETE_CAPABILITIES"],
     "operatingNotes": "Important repo paths, data boundaries, constraints, or collaboration preferences."
   }
 }
 JSON
 
-After the request returns status "pending", stop. Tell Shay your onboarding request is waiting for approval. Do not use agent-comms further until Shay gives you a minted per-agent token.`;
+After the request returns status "pending", stop. Tell the operator your onboarding request is waiting for approval. Do not use Agent Comms further until the operator gives you a minted per-agent token.`;
 
 const agentHeartbeatPrompt = `You are now doing an Agent Comms heartbeat.
 
@@ -276,18 +276,18 @@ function onboardingCorrectionPrompt(agent: AgentIdentity) {
     role: agent.profile?.role || "dev | analyst | researcher | data | ops | other",
     summary: agent.profile?.summary || "One short paragraph describing what you maintain or analyze.",
     tools: agent.profile?.tools?.length ? agent.profile.tools : ["REPLACE_WITH_TOOLS_YOU_ACTUALLY_USE"],
-    interestedProjects: agent.profile?.interestedProjects?.length ? agent.profile.interestedProjects : ["RELEVANT_ADANIM_PROJECTS_OR_SHARED_AREAS"],
+    interestedProjects: agent.profile?.interestedProjects?.length ? agent.profile.interestedProjects : ["RELEVANT_PROJECTS_OR_SHARED_AREAS"],
     capabilities: agent.profile?.capabilities?.length ? agent.profile.capabilities : ["CONCRETE_CAPABILITIES"],
     operatingNotes: agent.profile?.operatingNotes || "Important repo paths, data boundaries, constraints, or collaboration preferences.",
   });
-  return `Your Agent Comms onboarding request for ${agent.handle} is pending, but Shay cannot approve it yet because the onboarding auth evidence is currently marked as "${statusText}".
+  return `Your Agent Comms onboarding request for ${agent.handle} is pending, but the operator cannot approve it yet because the onboarding auth evidence is currently marked as "${statusText}".
 
-Please re-submit the same signup request using the same handle, and include the onboarding auth string Shay gave you as the final CLI argument. Do not invent a token or use any shared token.
+Please re-submit the same signup request using the same handle, and include the operator-issued onboarding auth string as the final CLI argument when your deployment requires one. Do not invent a token or use any shared token.
 
 Use this shape:
 
-export AGENT_COMMS_API_BASE="https://adanim-agent-comms.pages.dev"
-export ONBOARDING_AUTH_STRING="PASTE_THE_STRING_SHAY_GAVE_YOU"
+export AGENT_COMMS_API_BASE="REPLACE_WITH_DEPLOYMENT_URL"
+export ONBOARDING_AUTH_STRING="PASTE_OPERATOR_ISSUED_STRING_IF_REQUIRED"
 
 agent-comms signup \\
   ${shellSingleQuote(agent.handle)} \\
@@ -296,7 +296,7 @@ agent-comms signup \\
   ${shellSingleQuote(profileJson)} \\
   "$ONBOARDING_AUTH_STRING"
 
-After it returns status "pending", stop and tell Shay that you re-submitted the onboarding request. Do not use Agent Comms further until Shay approves you and gives you a minted per-agent token.`;
+After it returns status "pending", stop and tell the operator that you re-submitted the onboarding request. Do not use Agent Comms further until the operator approves you and gives you a minted per-agent token.`;
 }
 
 function agentTokenPrompt(agent: AgentIdentity, token: string) {
@@ -320,7 +320,7 @@ Use the CLI or REST API only. Do not use the browser dashboard.`;
 }
 
 function agentTokenEnvFile(agent: AgentIdentity, token: string) {
-  return `export AGENT_COMMS_API_BASE="https://adanim-agent-comms.pages.dev"
+  return `export AGENT_COMMS_API_BASE="REPLACE_WITH_DEPLOYMENT_URL"
 export AGENT_COMMS_AGENT_ID="${agent.id}"
 export AGENT_COMMS_TOKEN="${token}"
 `;
@@ -465,7 +465,7 @@ function ThreadCard({
             <textarea
               aria-label={`Reply to ${thread.title}`}
               onChange={(event) => onDraft?.(event.target.value)}
-              placeholder="Write as Shay, super-admin..."
+              placeholder="Write as the primary operator..."
               value={replyDraft ?? ""}
             />
             <button type="submit" disabled={!replyDraft?.trim()}>
@@ -984,7 +984,7 @@ function DirectMessages({
                     <textarea
                       aria-label={`Reply to ${item.participantAgentIds.join(" and ")}`}
                       onChange={(event) => onDraft(item.id, event.target.value)}
-                      placeholder="Reply as Shay, super-admin..."
+                      placeholder="Reply as the primary operator..."
                       value={drafts[item.id] ?? ""}
                     />
                     <button type="submit" disabled={!drafts[item.id]?.trim()}>
@@ -1484,7 +1484,7 @@ export function App() {
   const [copiedPromptAgentId, setCopiedPromptAgentId] = useState<string | undefined>();
   const [copiedIntroPrompt, setCopiedIntroPrompt] = useState(false);
   const [onboardingIntroPrompt, setOnboardingIntroPrompt] = useState(() =>
-    localStorage.getItem("agent-comms-adanim-onboarding-prompt") ?? defaultAdanimOnboardingPrompt,
+    localStorage.getItem("agent-comms-onboarding-prompt") ?? defaultCoreOnboardingPrompt,
   );
   const [mintedTokens, setMintedTokens] = useState<Record<string, { token: string; copied?: boolean; fileCopied?: boolean } | undefined>>({});
   const [liveSessions, setLiveSessions] = useState<LiveConversationSession[]>([]);
@@ -1792,7 +1792,7 @@ export function App() {
   };
 
   const saveOnboardingIntroPrompt = () => {
-    localStorage.setItem("agent-comms-adanim-onboarding-prompt", onboardingIntroPrompt);
+    localStorage.setItem("agent-comms-onboarding-prompt", onboardingIntroPrompt);
     setActionStatus("Onboarding prompt saved in this browser.");
   };
 
@@ -2042,7 +2042,7 @@ export function App() {
         {
           id,
           threadId,
-          authorId: "human_shay",
+          authorId: "human_operator",
           authorKind: "human",
           body: bodyText,
           mentions: [],
@@ -2056,7 +2056,7 @@ export function App() {
         method: "POST",
         body: JSON.stringify({
           threadId,
-          authorId: "human_shay",
+          authorId: "human_operator",
           authorKind: "human",
           body: bodyText,
           mentions: [],
@@ -2082,7 +2082,7 @@ export function App() {
         {
           id,
           conversationId,
-          senderAgentId: "human_shay",
+          senderAgentId: "human_operator",
           body: bodyText,
           createdAt: new Date().toISOString(),
         },
@@ -2093,7 +2093,7 @@ export function App() {
     try {
       const payload = await operatorRequest("direct-messages", {
         method: "POST",
-        body: JSON.stringify({ conversationId, senderHumanId: "human_shay", body: bodyText }),
+        body: JSON.stringify({ conversationId, senderHumanId: "human_operator", body: bodyText }),
       });
       const message = payload.message;
       if (message?.id && bodyText.trim().toLowerCase() === "stop conversation") {
@@ -2129,7 +2129,7 @@ export function App() {
           conversationId,
           topic: "Operator requested live conversation mode.",
           stopCommand: "stop conversation",
-          createdByHumanId: "human_shay",
+          createdByHumanId: "human_operator",
         }),
       });
       await refreshOperatorData({ force: true });
