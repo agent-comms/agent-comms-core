@@ -184,6 +184,17 @@ class MockReadCursorStatement {
 }
 
 describe("API auth", () => {
+  it("permits the explicitly enabled local operator runtime without a token", async () => {
+    const response = await onRequest({
+      request: new Request("https://example.test/api/operator/schemas"),
+      env: { LOCAL_OPERATOR_AUTH_BYPASS: "1" } as never,
+    });
+
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    expect(response.status).toBe(200);
+  });
+
   it("allows unauthenticated signup requests as pending-only onboarding", async () => {
     const request = new Request("https://example.test/api/agent/signup-requests", {
       method: "POST",
@@ -585,7 +596,7 @@ describe("API auth", () => {
           status: "active",
           topic: "Needs an operator handoff.",
           stop_command: "stop conversation",
-          created_by_human_id: "human_shay",
+          created_by_human_id: "human_operator",
           created_at: "2026-05-31T08:00:00.000Z",
         },
       ],
@@ -645,7 +656,7 @@ describe("API auth", () => {
           status: "active",
           topic: "Needs adjudication.",
           stop_command: "stop conversation",
-          created_by_human_id: "human_shay",
+          created_by_human_id: "human_operator",
           created_at: "2026-05-31T08:00:00.000Z",
         },
       ],
@@ -695,7 +706,7 @@ describe("API auth", () => {
         status: "active",
         topic: "Existing operator request.",
         stop_command: "stop conversation",
-        created_by_human_id: "human_shay",
+        created_by_human_id: "human_operator",
         created_at: "2026-05-31T08:00:00.000Z",
       },
     ]);
@@ -740,7 +751,7 @@ describe("API auth", () => {
         status: "stopped",
         topic: "Previous operator request.",
         stop_command: "stop conversation",
-        created_by_human_id: "human_shay",
+        created_by_human_id: "human_operator",
         created_at: "2026-05-31T08:00:00.000Z",
       },
     ]);
@@ -785,7 +796,7 @@ describe("API auth", () => {
       status: "active",
       topic: "Concurrent operator request.",
       stop_command: "stop conversation",
-      created_by_human_id: "human_shay",
+      created_by_human_id: "human_operator",
       created_at: "2026-05-31T08:01:00.000Z",
     };
     const request = new Request("https://example.test/api/operator/live-conversations", {

@@ -1,6 +1,8 @@
 import { Client } from "pg";
 
 interface Env {
+  /** Local runtime only. The launcher binds it only after enforcing a loopback host. */
+  LOCAL_OPERATOR_AUTH_BYPASS?: string;
   OPERATOR_API_TOKEN?: string;
   OPERATOR_EMAILS?: string;
   ONBOARDING_AUTH_HASHES?: string;
@@ -777,6 +779,7 @@ const memory = {
 
 async function requireAuth(request: Request, env: Env, scope: "agent" | "operator"): Promise<AuthContext> {
   if (scope === "operator") {
+    if (env.LOCAL_OPERATOR_AUTH_BYPASS === "1") return { ok: true };
     const accessEmail = request.headers.get("cf-access-authenticated-user-email");
     const allowedEmails = new Set(
       (env.OPERATOR_EMAILS ?? "")
@@ -1569,7 +1572,7 @@ async function createOperatorDirectMessage(request: Request, env: Env) {
         (id, conversation_id, sender_human_id, body, created_at)
        VALUES (?, ?, ?, ?, ?)`,
     )
-    .bind(id, input.conversationId, input.senderHumanId ?? "human_shay", bodyText, createdAt)
+    .bind(id, input.conversationId, input.senderHumanId ?? "human_operator", bodyText, createdAt)
     .run();
   if (bodyText.trim().toLowerCase() === "stop conversation") {
     await db.db
@@ -2283,7 +2286,7 @@ async function createLiveConversation(request: Request, env: Env) {
           (id, conversation_id, status, topic, stop_command, created_by_human_id, created_at)
          VALUES (?, ?, 'active', ?, ?, ?, ?)`,
       )
-      .bind(id, conversationId, input.topic ?? "", input.stopCommand ?? "stop conversation", input.createdByHumanId ?? "human_shay", createdAt)
+      .bind(id, conversationId, input.topic ?? "", input.stopCommand ?? "stop conversation", input.createdByHumanId ?? "human_operator", createdAt)
       .run();
   } catch (error) {
     const racedSession = await findOpenLiveConversationSession(db.db, conversationId);

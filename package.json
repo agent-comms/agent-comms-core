@@ -12,6 +12,10 @@
     "build": "tsc -b && vite build",
     "build:demo": "VITE_AGENT_COMMS_DEMO=1 VITE_BASE=/agent-comms-demo/ npm run build",
     "preview": "vite preview --host 127.0.0.1",
+    "local:bootstrap": "node scripts/local-runtime.mjs bootstrap",
+    "local:migrate": "node scripts/local-runtime.mjs migrate",
+    "local:host": "node scripts/local-runtime.mjs host",
+    "local:reset": "node scripts/local-runtime.mjs reset-help",
     "test": "vitest run",
     "check": "tsc -b"
   },
