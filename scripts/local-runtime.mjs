@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { copyFile, mkdir, readFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 
@@ -18,7 +20,24 @@ export function getLocalRuntimeConfig(env = process.env, cwd = process.cwd()) {
   }
 
   const dataDir = resolve(cwd, env.AGENT_COMMS_DATA_DIR || ".wrangler/state/agent-comms-core-local");
-  return { host, port, dataDir };
+  const brandingFile = env.AGENT_COMMS_BRANDING_FILE?.trim()
+    ? resolve(cwd, env.AGENT_COMMS_BRANDING_FILE)
+    : undefined;
+  return { host, port, dataDir, brandingFile };
+}
+
+export async function installLocalBranding(brandingFile, distDir = resolve(process.cwd(), "dist")) {
+  if (!brandingFile) return;
+  let source;
+  try {
+    source = await readFile(brandingFile, "utf8");
+    JSON.parse(source);
+  } catch (error) {
+    throw new Error(`AGENT_COMMS_BRANDING_FILE must be readable JSON: ${brandingFile} (${error instanceof Error ? error.message : String(error)})`);
+  }
+  const destination = resolve(distDir, "branding.json");
+  await mkdir(dirname(destination), { recursive: true });
+  await copyFile(brandingFile, destination);
 }
 
 function run(command, args, env = process.env) {
@@ -46,6 +65,7 @@ async function migrate(config) {
 
 async function bootstrap(config) {
   await run(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build"]);
+  await installLocalBranding(config.brandingFile);
   await migrate(config);
 }
 

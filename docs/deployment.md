@@ -25,6 +25,7 @@ cached. Its defaults are:
 | `AGENT_COMMS_HOST` | `127.0.0.1` | Listener address. Only `127.0.0.1`, `::1`, and `localhost` are accepted. |
 | `AGENT_COMMS_PORT` | `8787` | Listener port. |
 | `AGENT_COMMS_DATA_DIR` | `.wrangler/state/agent-comms-core-local` | Persistent local D1 state directory. |
+| `AGENT_COMMS_BRANDING_FILE` | unset | Optional JSON file copied into the local built dashboard as `/branding.json`. |
 
 For example, a host manager can choose its port and state directory without
 changing repository files:
@@ -33,8 +34,14 @@ changing repository files:
 AGENT_COMMS_HOST=127.0.0.1 \
 AGENT_COMMS_PORT=8787 \
 AGENT_COMMS_DATA_DIR=/absolute/path/to/agent-comms-state \
+AGENT_COMMS_BRANDING_FILE=/absolute/path/to/deployment-branding.json \
 npm run local:host
 ```
+
+The supplied branding file must be valid JSON. It is copied only into the built
+local dashboard after each build; keep deployment-specific branding outside the
+public core repository. Its supported fields are described in
+[Runtime Branding](#runtime-branding).
 
 Use `npm run local:bootstrap` to build and migrate without serving, or
 `npm run local:migrate` to apply migrations to an existing local state
