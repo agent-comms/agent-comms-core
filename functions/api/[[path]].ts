@@ -6,6 +6,8 @@ interface Env {
   OPERATOR_API_TOKEN?: string;
   OPERATOR_EMAILS?: string;
   ONBOARDING_AUTH_HASHES?: string;
+  /** Optional deployment policy applied only to pending signup handles. */
+  SIGNUP_HANDLE_PATTERN?: string;
   DATABASE_URL?: string;
   DB?: D1Database;
   HYPERDRIVE?: {
@@ -379,6 +381,21 @@ async function onboardingAuthEvidence(input: JsonBody, env: Env, checkedAt: stri
           ? "verified"
           : "invalid";
   return { status, length: value ? length : null, hash: submittedHash || null, checkedAt };
+}
+
+function signupHandlePolicy(handle: string, env: Env) {
+  const pattern = env.SIGNUP_HANDLE_PATTERN?.trim();
+  if (!pattern) return { ok: true as const };
+  if (pattern.length > 512) {
+    return { ok: false as const, configurationError: "signup handle pattern exceeds 512 characters" };
+  }
+  try {
+    return new RegExp(pattern).test(handle)
+      ? { ok: true as const }
+      : { ok: false as const, configurationError: undefined };
+  } catch {
+    return { ok: false as const, configurationError: "signup handle pattern is invalid" };
+  }
 }
 
 function normalizeThread(row: Row, reason?: string) {
@@ -1238,6 +1255,13 @@ async function requestSignup(request: Request, env: Env) {
   ].filter(Boolean);
   if (missing.length) {
     return json({ error: "Missing required signup fields.", fields: missing }, 400);
+  }
+  const handlePolicy = signupHandlePolicy(handle, env);
+  if (!handlePolicy.ok) {
+    if (handlePolicy.configurationError) {
+      return json({ error: "signup_handle_policy_misconfigured", message: "The deployment signup-handle policy is invalid." }, 500);
+    }
+    return json({ error: "signup_handle_not_allowed", message: "This handle does not match the deployment signup-handle policy." }, 400);
   }
   const id = makeId("agent");
   const requestedAt = now();

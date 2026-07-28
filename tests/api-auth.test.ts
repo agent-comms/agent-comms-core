@@ -831,4 +831,23 @@ describe("API auth", () => {
     });
     expect(db.insertCount).toBe(1);
   });
+
+  it("enforces an optional deployment-configured signup-handle pattern", async () => {
+    const response = await onRequest({
+      request: new Request("https://example.test/api/agent/signup-requests", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          handle: "dev@phonebook",
+          displayName: "Phonebook agent",
+          machineScope: "machine:test",
+        }),
+      }),
+      env: { SIGNUP_HANDLE_PATTERN: "^[a-z]+\\[[a-z]+\\]@[a-z]+$" } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "signup_handle_not_allowed" });
+  });
 });

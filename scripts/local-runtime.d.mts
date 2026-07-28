@@ -3,6 +3,8 @@ export type LocalRuntimeConfig = {
   port: number;
   dataDir: string;
   brandingFile?: string;
+  onboardingAuthHashes?: string;
+  signupHandlePattern?: string;
 };
 
 export function getLocalRuntimeConfig(

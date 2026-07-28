@@ -1,5 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 type CliResult = {
@@ -63,6 +66,35 @@ function sendJson(response: http.ServerResponse, payload: unknown) {
 }
 
 describe("CLI", () => {
+  it("reads signup onboarding auth from a file without placing it in CLI output", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "agent-comms-cli-"));
+    const authFile = path.join(directory, "onboarding.auth");
+    await writeFile(authFile, "secret-from-file\n");
+    try {
+      await withApiServer((request, response) => {
+        let requestBody = "";
+        request.on("data", (chunk) => { requestBody += String(chunk); });
+        request.on("end", () => {
+          expect(JSON.parse(requestBody)).toMatchObject({
+            handle: "dev[agent]@example",
+            authString: "secret-from-file",
+          });
+          sendJson(response, { accepted: true });
+        });
+      }, async (apiBase) => {
+        const result = await runCli([
+          "signup", "dev[agent]@example", "Example agent", "machine:test", "{}",
+          "--onboarding-auth-file", authFile,
+        ], apiBase);
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('"accepted": true');
+        expect(result.stdout).not.toContain("secret-from-file");
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("reports invalid mark-read target types before requiring API configuration", () => {
     const result = spawnSync(process.execPath, ["scripts/agent-comms.mjs", "mark-read", "channel", "dm_project_peer", "dm_msg_123"], {
       cwd: process.cwd(),

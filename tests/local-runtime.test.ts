@@ -17,6 +17,8 @@ describe("local runtime launcher", () => {
       port: 8787,
       dataDir: "/tmp/agent-comms-core/.wrangler/state/agent-comms-core-local",
       brandingFile: undefined,
+      onboardingAuthHashes: undefined,
+      signupHandlePattern: undefined,
     });
   });
 
@@ -30,6 +32,18 @@ describe("local runtime launcher", () => {
       port: 9898,
       dataDir: "/tmp/agent-comms-state",
       brandingFile: undefined,
+      onboardingAuthHashes: undefined,
+      signupHandlePattern: undefined,
+    });
+  });
+
+  it("passes optional deployment-only signup policy bindings through the local runtime contract", () => {
+    expect(getLocalRuntimeConfig({
+      AGENT_COMMS_ONBOARDING_AUTH_HASHES: "abc123",
+      AGENT_COMMS_SIGNUP_HANDLE_PATTERN: "^[a-z]+$",
+    }, "/tmp/agent-comms-core")).toMatchObject({
+      onboardingAuthHashes: "abc123",
+      signupHandlePattern: "^[a-z]+$",
     });
   });
 
