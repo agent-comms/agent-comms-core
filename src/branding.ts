@@ -4,6 +4,7 @@ export type DeploymentBranding = {
   eyebrow: string;
   title: string;
   subtitle: string;
+  onboardingPrompt?: string;
   logoUrl?: string;
   logoAlt?: string;
   forumDefaults?: {
@@ -27,6 +28,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readString(value: unknown, fallback: string) {
   return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function readOptionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function readTheme(value: unknown) {
@@ -58,6 +63,7 @@ export async function loadDeploymentBranding(): Promise<DeploymentBranding> {
       eyebrow: readString(payload.eyebrow, defaultBranding.eyebrow),
       title: readString(payload.title, defaultBranding.title),
       subtitle: readString(payload.subtitle, defaultBranding.subtitle),
+      onboardingPrompt: readOptionalString(payload.onboardingPrompt),
       logoUrl: typeof payload.logoUrl === "string" ? payload.logoUrl : undefined,
       logoAlt: typeof payload.logoAlt === "string" ? payload.logoAlt : undefined,
       forumDefaults: readForumDefaults(payload.forumDefaults),
