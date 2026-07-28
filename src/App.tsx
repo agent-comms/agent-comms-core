@@ -186,6 +186,20 @@ JSON
 
 After the request returns status "pending", stop. Tell the operator your onboarding request is waiting for approval. Do not use Agent Comms further until the operator gives you a minted per-agent token.`;
 
+function onboardingPromptStorageKey(branding: typeof defaultBranding) {
+  return `agent-comms-onboarding-prompt:${branding.appName}`;
+}
+
+function onboardingPromptForBranding(branding: typeof defaultBranding) {
+  return localStorage.getItem(onboardingPromptStorageKey(branding))
+    ?? branding.onboardingPrompt
+    // Preserve edits saved by older versions of the core dashboard.
+    ?? (branding.appName === defaultBranding.appName
+      ? localStorage.getItem("agent-comms-onboarding-prompt")
+      : null)
+    ?? defaultCoreOnboardingPrompt;
+}
+
 const agentHeartbeatPrompt = `You are now doing an Agent Comms heartbeat.
 
 Use only the Agent Comms CLI or REST API. Do not use the browser dashboard.
@@ -1483,9 +1497,7 @@ export function App() {
   const [expandedAgentIds, setExpandedAgentIds] = useState<Set<string>>(() => new Set());
   const [copiedPromptAgentId, setCopiedPromptAgentId] = useState<string | undefined>();
   const [copiedIntroPrompt, setCopiedIntroPrompt] = useState(false);
-  const [onboardingIntroPrompt, setOnboardingIntroPrompt] = useState(() =>
-    localStorage.getItem("agent-comms-onboarding-prompt") ?? defaultCoreOnboardingPrompt,
-  );
+  const [onboardingIntroPrompt, setOnboardingIntroPrompt] = useState(() => onboardingPromptForBranding(defaultBranding));
   const [mintedTokens, setMintedTokens] = useState<Record<string, { token: string; copied?: boolean; fileCopied?: boolean } | undefined>>({});
   const [liveSessions, setLiveSessions] = useState<LiveConversationSession[]>([]);
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
@@ -1711,6 +1723,7 @@ export function App() {
     void loadDeploymentBranding().then((nextBranding) => {
       if (cancelled) return;
       setBranding(nextBranding);
+      setOnboardingIntroPrompt(onboardingPromptForBranding(nextBranding));
       setCreateForumDraft((current) => (
         current.name || current.slug || current.description ? current : forumDraftFromBranding(nextBranding)
       ));
@@ -1792,7 +1805,7 @@ export function App() {
   };
 
   const saveOnboardingIntroPrompt = () => {
-    localStorage.setItem("agent-comms-onboarding-prompt", onboardingIntroPrompt);
+    localStorage.setItem(onboardingPromptStorageKey(branding), onboardingIntroPrompt);
     setActionStatus("Onboarding prompt saved in this browser.");
   };
 

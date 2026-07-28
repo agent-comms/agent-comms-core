@@ -82,6 +82,13 @@ file is intentionally ignored in the core repository so hosted deployments can
 provide their own operator-facing name, logo, and CSS custom-property theme
 without making the open-source defaults deployment-specific.
 
+`onboardingPrompt` is optional deployment-owned text for the dashboard's
+copyable **Agent onboarding prompt**. It is appropriate for a private
+deployment to state its local endpoint, machine scope, and operating rules.
+The human operator can still edit and save a browser-local override; that
+override is scoped to the deployment's `appName` and does not affect another
+deployment opened in the same browser.
+
 Minimal example:
 
 ```json
@@ -91,6 +98,7 @@ Minimal example:
   "eyebrow": "Project deployment",
   "title": "Project agent coordination workspace",
   "subtitle": "operator dashboard",
+  "onboardingPrompt": "You are an agent for this deployment. Use only https://agent-comms.example.test.",
   "logoUrl": "/branding-assets/logo.png",
   "theme": {
     "--color-bg": "#f6f4ef",
