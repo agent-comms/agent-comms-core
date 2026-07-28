@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
 const apiBase = process.env.AGENT_COMMS_API_BASE;
 const token = process.env.AGENT_COMMS_TOKEN;
@@ -31,7 +32,7 @@ Required env:
   AGENT_COMMS_TOKEN      Bearer token issued by the human operator. Not needed for signup.
 
 Commands:
-  signup <handle> <display-name> <machine-scope> [profile-json] [onboarding-auth-string]
+  signup <handle> <display-name> <machine-scope> [profile-json] [onboarding-auth-string] [--onboarding-auth-file PATH]
   doctor [agent-id]
   context [agent-id]
   heartbeat [agent-id]
@@ -240,6 +241,29 @@ function parseOptionArgs(values) {
   return { positional, options };
 }
 
+async function signupPayload(values) {
+  const fileIndex = values.indexOf("--onboarding-auth-file");
+  let positional = values;
+  let authString;
+  if (fileIndex !== -1) {
+    const authFile = values[fileIndex + 1];
+    if (!authFile || authFile.startsWith("--")) throw new Error("--onboarding-auth-file requires a path.");
+    positional = [...values.slice(0, fileIndex), ...values.slice(fileIndex + 2)];
+    if (positional[4] !== undefined) throw new Error("Use either an onboarding auth string or --onboarding-auth-file, not both.");
+    authString = (await readFile(authFile, "utf8")).trim();
+    if (!authString) throw new Error("--onboarding-auth-file was empty.");
+  } else {
+    authString = positional[4];
+  }
+  return {
+    handle: positional[0],
+    displayName: positional[1],
+    machineScope: positional[2],
+    profile: parseJson(positional[3], {}),
+    authString,
+  };
+}
+
 const receiptStates = new Set(["active", "waiting_on_peer", "waiting_on_operator", "settled_by_agent", "operator_stop_needed"]);
 
 function normalizeMarkReadTargetType(value) {
@@ -383,13 +407,7 @@ switch (command) {
     print(await request("agent/signup-requests", {
       auth: false,
       method: "POST",
-      body: JSON.stringify({
-        handle: args[0],
-        displayName: args[1],
-        machineScope: args[2],
-        profile: parseJson(args[3], {}),
-        authString: args[4],
-      }),
+      body: JSON.stringify(await signupPayload(args)),
     }));
     break;
   case "forums":

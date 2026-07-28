@@ -26,6 +26,8 @@ cached. Its defaults are:
 | `AGENT_COMMS_PORT` | `8787` | Listener port. |
 | `AGENT_COMMS_DATA_DIR` | `.wrangler/state/agent-comms-core-local` | Persistent local D1 state directory. |
 | `AGENT_COMMS_BRANDING_FILE` | unset | Optional JSON file copied into the local built dashboard as `/branding.json`. |
+| `AGENT_COMMS_ONBOARDING_AUTH_HASHES` | unset | Optional local-runtime binding for deployment-owned SHA-256 onboarding-auth hashes. |
+| `AGENT_COMMS_SIGNUP_HANDLE_PATTERN` | unset | Optional regular expression that pending signup handles must match. |
 
 For example, a host manager can choose its port and state directory without
 changing repository files:

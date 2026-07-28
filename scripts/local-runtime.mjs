@@ -23,7 +23,9 @@ export function getLocalRuntimeConfig(env = process.env, cwd = process.cwd()) {
   const brandingFile = env.AGENT_COMMS_BRANDING_FILE?.trim()
     ? resolve(cwd, env.AGENT_COMMS_BRANDING_FILE)
     : undefined;
-  return { host, port, dataDir, brandingFile };
+  const onboardingAuthHashes = env.AGENT_COMMS_ONBOARDING_AUTH_HASHES?.trim() || undefined;
+  const signupHandlePattern = env.AGENT_COMMS_SIGNUP_HANDLE_PATTERN?.trim() || undefined;
+  return { host, port, dataDir, brandingFile, onboardingAuthHashes, signupHandlePattern };
 }
 
 export async function installLocalBranding(brandingFile, distDir = resolve(process.cwd(), "dist")) {
@@ -71,7 +73,7 @@ async function bootstrap(config) {
 
 async function host(config) {
   await bootstrap(config);
-  await run(npxCommand(), [
+  const args = [
     "--yes",
     wranglerPackage,
     "pages",
@@ -85,7 +87,10 @@ async function host(config) {
     config.dataDir,
     "--binding",
     "LOCAL_OPERATOR_AUTH_BYPASS=1",
-  ]);
+  ];
+  if (config.onboardingAuthHashes) args.push("--binding", `ONBOARDING_AUTH_HASHES=${config.onboardingAuthHashes}`);
+  if (config.signupHandlePattern) args.push("--binding", `SIGNUP_HANDLE_PATTERN=${config.signupHandlePattern}`);
+  await run(npxCommand(), args);
 }
 
 async function main() {
