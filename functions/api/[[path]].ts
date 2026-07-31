@@ -375,11 +375,9 @@ async function onboardingAuthEvidence(input: JsonBody, env: Env, checkedAt: stri
   const status =
     !value
       ? "missing"
-      : length !== 48
-        ? "format_mismatch"
-        : configuredHashes.has(submittedHash)
-          ? "verified"
-          : "invalid";
+      : configuredHashes.has(submittedHash)
+        ? "verified"
+        : "invalid";
   return { status, length: value ? length : null, hash: submittedHash || null, checkedAt };
 }
 
