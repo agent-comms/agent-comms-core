@@ -57,6 +57,28 @@ const useDemoData =
   (import.meta.env.DEV && new URLSearchParams(window.location.search).get("demo") === "1");
 const themePreferenceKey = "agent-comms-theme-mode";
 
+const dayModeTheme: Record<string, string> = {
+  "--color-bg": "#f6f4ef",
+  "--color-surface": "#fffdf8",
+  "--color-surface-hover": "#f5f1e7",
+  "--color-sidebar": "#193428",
+  "--color-sidebar-hover": "#294a3c",
+  "--color-text": "#17211b",
+  "--color-text-secondary": "#536159",
+  "--color-muted": "#627065",
+  "--color-line": "#ded9cc",
+  "--color-line-strong": "#d6d2c7",
+  "--color-accent": "#2f6f55",
+  "--color-accent-soft": "#dcebbb",
+  "--color-warning": "#f3dfb3",
+  "--color-danger": "#cc4729",
+  "--color-ink": "#193428",
+  "--color-inverse": "#f8f4ea",
+  "--color-inverse-muted": "#aec1b6",
+  "--color-inverse-accent": "#e1ecb8",
+  "--shadow-card": "0 1px 2px rgba(23, 33, 27, 0.05), 0 14px 28px -20px rgba(23, 33, 27, 0.22)",
+};
+
 const nightModeTheme: Record<string, string> = {
   "--color-bg": "#101714",
   "--color-surface": "#18231f",
@@ -1158,6 +1180,8 @@ function Onboarding({
   copiedPromptAgentId,
   copiedIntroPrompt,
   mintedTokens,
+  approvingAgentId,
+  recentlyApprovedAgentId,
   onIntroPromptChange,
   onCopyIntroPrompt,
   onSaveIntroPrompt,
@@ -1176,6 +1200,8 @@ function Onboarding({
   copiedPromptAgentId?: string;
   copiedIntroPrompt: boolean;
   mintedTokens: Record<string, { token: string; copied?: boolean; fileCopied?: boolean } | undefined>;
+  approvingAgentId: string | null;
+  recentlyApprovedAgentId: string | null;
   onIntroPromptChange: (value: string) => void;
   onCopyIntroPrompt: () => void;
   onSaveIntroPrompt: () => void;
@@ -1240,7 +1266,11 @@ function Onboarding({
         <p className="empty-state">No pending onboarding approvals. Approved and suspended identities remain listed below.</p>
       ) : null}
       <div className="agent-table">
-        {agents.map((agent) => (
+        {agents.map((agent) => {
+          const approvalBlocked = agent.onboardingAuth?.status !== "verified";
+          const isApproving = approvingAgentId === agent.id;
+          const wasJustApproved = recentlyApprovedAgentId === agent.id;
+          return (
           <article className={agent.status === "pending" ? "agent-card needs-action" : "agent-card"} key={agent.id}>
             <button className="agent-summary" type="button" onClick={() => onToggle(agent.id)}>
               <div>
@@ -1314,27 +1344,43 @@ function Onboarding({
                     </button>
                   </div>
                 ) : null}
+                {wasJustApproved ? (
+                  <p className="approval-result" role="status">
+                    <UserCheck aria-hidden="true" />
+                    Access approved. Mint a token when you are ready to grant this agent API access.
+                  </p>
+                ) : null}
                 <footer>
                   <button type="button" onClick={() => onOpenProfile(agent.id)}>
                     Open profile
                   </button>
-                  {agent.status !== "approved" ? (
-                    <button
-                      type="button"
-                      onClick={() => onStatus(agent.id, "approved")}
-                      disabled={agent.onboardingAuth?.status !== "verified"}
-                      title={agent.onboardingAuth?.status === "verified" ? "Approve access" : "Onboarding auth is not verified"}
-                    >
-                      <UserCheck aria-hidden="true" />
-                      Approve access
-                    </button>
+                  {agent.status !== "approved" || isApproving ? (
+                    <div className="approval-action">
+                      <button
+                        className="approval-button"
+                        type="button"
+                        onClick={() => onStatus(agent.id, "approved")}
+                        disabled={approvalBlocked || isApproving}
+                        aria-describedby={`approval-help-${agent.id}`}
+                      >
+                        <UserCheck aria-hidden="true" />
+                        {isApproving ? "Approving access…" : approvalBlocked ? "Approval blocked" : "Approve access"}
+                      </button>
+                      <span className="approval-help" id={`approval-help-${agent.id}`}>
+                        {isApproving
+                          ? "Saving this approval…"
+                          : approvalBlocked
+                            ? "Onboarding authentication must be verified before access can be approved."
+                            : "Ready to approve: grants this identity dashboard access. Token access remains a separate step."}
+                      </span>
+                    </div>
                   ) : null}
-                  {agent.status === "approved" ? (
+                  {agent.status === "approved" && !isApproving ? (
                     <button type="button" onClick={() => onMintToken(agent)}>
                       Mint token
                     </button>
                   ) : null}
-                  {agent.status === "approved" ? (
+                  {agent.status === "approved" && !isApproving ? (
                     <button type="button" onClick={() => onStatus(agent.id, "suspended")}>
                       Suspend access
                     </button>
@@ -1348,7 +1394,8 @@ function Onboarding({
               </div>
             ) : null}
           </article>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -1516,12 +1563,16 @@ export function App() {
   const [liveSessions, setLiveSessions] = useState<LiveConversationSession[]>([]);
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [themeMode, setThemeMode] = useState<ThemeMode>(getInitialThemeMode);
+  const [approvingAgentId, setApprovingAgentId] = useState<string | null>(null);
+  const [recentlyApprovedAgentId, setRecentlyApprovedAgentId] = useState<string | null>(null);
   const [apiStatus, setApiStatus] = useState(useDemoData ? "demo data" : "loading durable storage");
   const [actionStatus, setActionStatus] = useState("");
   const refreshSequenceRef = useRef(0);
   const mutationEpochRef = useRef(0);
   const activeOperatorMutationsRef = useRef(0);
-  const appTheme = themeMode === "night" ? { ...branding.theme, ...nightModeTheme } : branding.theme;
+  const appTheme = themeMode === "night"
+    ? { ...nightModeTheme, ...branding.theme, ...branding.nightTheme }
+    : { ...dayModeTheme, ...branding.theme, ...branding.dayTheme };
 
   const beginOperatorMutation = useCallback(() => {
     mutationEpochRef.current += 1;
@@ -1891,6 +1942,13 @@ export function App() {
 
   const updateAgentStatus = async (agentId: string, status: AgentStatus) => {
     const finishMutation = beginOperatorMutation();
+    const isApproval = status === "approved";
+    if (isApproval) {
+      setApprovingAgentId(agentId);
+      setRecentlyApprovedAgentId(null);
+    } else {
+      setRecentlyApprovedAgentId((current) => (current === agentId ? null : current));
+    }
     setState((current) => ({
       ...current,
       agents: current.agents.map((agent) =>
@@ -1921,11 +1979,13 @@ export function App() {
         });
       }
       await refreshOperatorData({ force: true });
+      if (isApproval) setRecentlyApprovedAgentId(agentId);
       setActionStatus(`Agent ${status}.`);
     } catch (error) {
       await refreshOperatorData({ force: true });
       setActionStatus(error instanceof Error ? error.message : "Agent status update failed.");
     } finally {
+      if (isApproval) setApprovingAgentId(null);
       finishMutation();
     }
   };
@@ -2319,6 +2379,7 @@ export function App() {
         {view === "onboarding" ? (
           <Onboarding
             branding={branding}
+            approvingAgentId={approvingAgentId}
             copiedPromptAgentId={copiedPromptAgentId}
             copiedIntroPrompt={copiedIntroPrompt}
             expandedIds={expandedAgentIds}
@@ -2334,6 +2395,7 @@ export function App() {
             onSaveIntroPrompt={saveOnboardingIntroPrompt}
             onStatus={updateAgentStatus}
             onToggle={(agentId) => toggleSetValue(setExpandedAgentIds, agentId)}
+            recentlyApprovedAgentId={recentlyApprovedAgentId}
             state={state}
           />
         ) : null}

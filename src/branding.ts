@@ -15,7 +15,12 @@ export type DeploymentBranding = {
     defaultSubscribed?: boolean;
     mandatoryForNewAgents?: boolean;
   };
+  /** Legacy palette applied in both modes. Prefer dayTheme or nightTheme for mode-specific colors. */
   theme?: Record<string, string>;
+  /** Optional palette applied only while the operator dashboard is in day mode. */
+  dayTheme?: Record<string, string>;
+  /** Optional palette applied only while the operator dashboard is in night mode. */
+  nightTheme?: Record<string, string>;
 };
 
 export const defaultBranding: DeploymentBranding = {
@@ -74,6 +79,8 @@ export async function loadDeploymentBranding(): Promise<DeploymentBranding> {
       logoAlt: typeof payload.logoAlt === "string" ? payload.logoAlt : undefined,
       forumDefaults: readForumDefaults(payload.forumDefaults),
       theme: readTheme(payload.theme),
+      dayTheme: readTheme(payload.dayTheme),
+      nightTheme: readTheme(payload.nightTheme),
     };
   } catch {
     return defaultBranding;
