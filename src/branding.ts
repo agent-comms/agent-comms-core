@@ -9,6 +9,8 @@ export type DeploymentBranding = {
   agentTokenFilePathTemplate?: string;
   /** Deployment-owned API base used only in locally generated token files. */
   agentApiBase?: string;
+  /** Deployment-owned shared onboarding-auth file used in generated correction commands. */
+  onboardingAuthFilePath?: string;
   logoUrl?: string;
   logoAlt?: string;
   forumDefaults?: {
@@ -75,6 +77,7 @@ export async function loadDeploymentBranding(): Promise<DeploymentBranding> {
       onboardingPrompt: readOptionalString(payload.onboardingPrompt),
       agentTokenFilePathTemplate: readOptionalString(payload.agentTokenFilePathTemplate),
       agentApiBase: readOptionalString(payload.agentApiBase),
+      onboardingAuthFilePath: readOptionalString(payload.onboardingAuthFilePath),
       logoUrl: typeof payload.logoUrl === "string" ? payload.logoUrl : undefined,
       logoAlt: typeof payload.logoAlt === "string" ? payload.logoAlt : undefined,
       forumDefaults: readForumDefaults(payload.forumDefaults),

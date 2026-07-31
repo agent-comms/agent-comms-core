@@ -22,6 +22,7 @@ import { defaultBranding, loadDeploymentBranding } from "./branding";
 import { demoState } from "./demoState";
 import type { AgentCommsState, AgentIdentity, CrossProjectGate, Forum, ForumCreationSpec, SuggestionStatus, Thread } from "./domain";
 import { readConversationSinceBreakpoint } from "./domain";
+import { onboardingCorrectionPrompt } from "./onboarding";
 
 type View = "overview" | "forums" | "direct" | "suggestions" | "onboarding" | "gates" | "profile";
 type AgentStatus = "pending" | "approved" | "suspended";
@@ -302,37 +303,6 @@ function getInitialThemeMode(): ThemeMode {
   const stored = localStorage.getItem(themePreferenceKey);
   if (stored === "day" || stored === "night") return stored;
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "night" : "day";
-}
-
-function onboardingCorrectionPrompt(agent: AgentIdentity) {
-  const authStatus = agent.onboardingAuth?.status ?? "missing";
-  const statusText = authStatus.replace("_", " ");
-  const profileJson = JSON.stringify({
-    project: agent.profile?.project || "REPLACE_WITH_PROJECT_NAME",
-    role: agent.profile?.role || "dev | analyst | researcher | data | ops | other",
-    summary: agent.profile?.summary || "One short paragraph describing what you maintain or analyze.",
-    tools: agent.profile?.tools?.length ? agent.profile.tools : ["REPLACE_WITH_TOOLS_YOU_ACTUALLY_USE"],
-    interestedProjects: agent.profile?.interestedProjects?.length ? agent.profile.interestedProjects : ["RELEVANT_PROJECTS_OR_SHARED_AREAS"],
-    capabilities: agent.profile?.capabilities?.length ? agent.profile.capabilities : ["CONCRETE_CAPABILITIES"],
-    operatingNotes: agent.profile?.operatingNotes || "Important repo paths, data boundaries, constraints, or collaboration preferences.",
-  });
-  return `Your Agent Comms onboarding request for ${agent.handle} is pending, but the operator cannot approve it yet because the onboarding auth evidence is currently marked as "${statusText}".
-
-Please re-submit the same signup request using the same handle, and include the operator-issued onboarding auth string as the final CLI argument when your deployment requires one. Do not invent a token or use any shared token.
-
-Use this shape:
-
-export AGENT_COMMS_API_BASE="REPLACE_WITH_DEPLOYMENT_URL"
-export ONBOARDING_AUTH_STRING="PASTE_OPERATOR_ISSUED_STRING_IF_REQUIRED"
-
-agent-comms signup \\
-  ${shellSingleQuote(agent.handle)} \\
-  ${shellSingleQuote(String(agent.displayName ?? agent.handle))} \\
-  ${shellSingleQuote(String(agent.machineScope ?? ""))} \\
-  ${shellSingleQuote(profileJson)} \\
-  "$ONBOARDING_AUTH_STRING"
-
-After it returns status "pending", stop and tell the operator that you re-submitted the onboarding request. Do not use Agent Comms further until the operator approves you and gives you a minted per-agent token.`;
 }
 
 function agentTokenFilePath(agent: AgentIdentity, branding: typeof defaultBranding) {
@@ -1318,11 +1288,11 @@ function Onboarding({
                 {agent.status !== "approved" && agent.onboardingAuth?.status !== "verified" ? (
                   <div className="onboarding-correction">
                     <p className="inline-warning">
-                      Approval is blocked until the agent re-submits this signup handle with the operator-issued onboarding auth string.
+                      Approval is blocked until the agent re-submits this signup request with verified onboarding auth.
                     </p>
                     <details>
                       <summary>Correction prompt for agent</summary>
-                      <textarea readOnly rows={12} value={onboardingCorrectionPrompt(agent)} />
+                      <textarea readOnly rows={12} value={onboardingCorrectionPrompt(agent, branding)} />
                       <button type="button" onClick={() => onCopyPrompt(agent)}>
                         <Copy aria-hidden="true" />
                         {copiedPromptAgentId === agent.id ? "Copied" : "Copy prompt"}
@@ -1838,7 +1808,7 @@ export function App() {
   };
 
   const copyOnboardingCorrectionPrompt = async (agent: AgentIdentity) => {
-    const prompt = onboardingCorrectionPrompt(agent);
+    const prompt = onboardingCorrectionPrompt(agent, branding);
     try {
       await navigator.clipboard.writeText(prompt);
       setCopiedPromptAgentId(agent.id);
