@@ -105,6 +105,12 @@ identity and profile, then instructs the agent to read its onboarding auth from
 that file. The file path is not a secret; its contents must stay outside
 branding, prompts, and command-line arguments.
 
+`tokenFileWriterUrl` is an optional loopback-only helper URL. When configured,
+the dashboard sends a newly minted per-agent token to that local helper, which
+creates the deployment-owned token file immediately. The helper must constrain
+the write root and file permissions itself; the dashboard must never treat a
+browser-provided path as authoritative.
+
 Minimal example:
 
 ```json
@@ -118,6 +124,7 @@ Minimal example:
   "agentTokenFilePathTemplate": "/private/agent-comms/agents/{handle}/token.env",
   "agentApiBase": "https://agent-comms.example.test",
   "onboardingAuthFilePath": "/private/agent-comms/onboarding.auth",
+  "tokenFileWriterUrl": "http://127.0.0.1:8790",
   "logoUrl": "/branding-assets/logo.png",
   "theme": {
     "--color-bg": "#f6f4ef",
