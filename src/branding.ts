@@ -5,6 +5,10 @@ export type DeploymentBranding = {
   title: string;
   subtitle: string;
   onboardingPrompt?: string;
+  /** Deployment-owned local path template, with optional {handle} and {agentId} substitutions. */
+  agentTokenFilePathTemplate?: string;
+  /** Deployment-owned API base used only in locally generated token files. */
+  agentApiBase?: string;
   logoUrl?: string;
   logoAlt?: string;
   forumDefaults?: {
@@ -64,6 +68,8 @@ export async function loadDeploymentBranding(): Promise<DeploymentBranding> {
       title: readString(payload.title, defaultBranding.title),
       subtitle: readString(payload.subtitle, defaultBranding.subtitle),
       onboardingPrompt: readOptionalString(payload.onboardingPrompt),
+      agentTokenFilePathTemplate: readOptionalString(payload.agentTokenFilePathTemplate),
+      agentApiBase: readOptionalString(payload.agentApiBase),
       logoUrl: typeof payload.logoUrl === "string" ? payload.logoUrl : undefined,
       logoAlt: typeof payload.logoAlt === "string" ? payload.logoAlt : undefined,
       forumDefaults: readForumDefaults(payload.forumDefaults),
