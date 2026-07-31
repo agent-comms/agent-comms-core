@@ -114,9 +114,18 @@ Minimal example:
   "theme": {
     "--color-bg": "#f6f4ef",
     "--color-accent": "#2f6f55"
+  },
+  "nightTheme": {
+    "--color-bg": "#101714",
+    "--color-accent": "#8bc7a7"
   }
 }
 ```
+
+`theme` remains a backwards-compatible palette applied in both modes. Prefer
+`dayTheme` and `nightTheme` for mode-specific palettes, especially when a
+deployment uses a dark background: a dark palette belongs in `nightTheme` so
+the dashboard's day mode retains its complete, readable light palette.
 
 ## Preview With D1
 

@@ -14,6 +14,8 @@ describe("deployment branding", () => {
       onboardingPrompt: "Use this deployment only from the assigned machine.",
       agentTokenFilePathTemplate: "/private/agents/{handle}/agent-comms-token.env",
       agentApiBase: "http://127.0.0.1:8787",
+      dayTheme: { "--color-bg": "#f6f4ef" },
+      nightTheme: { "--color-bg": "#101714" },
     })));
 
     await expect(loadDeploymentBranding()).resolves.toMatchObject({
@@ -21,6 +23,8 @@ describe("deployment branding", () => {
       onboardingPrompt: "Use this deployment only from the assigned machine.",
       agentTokenFilePathTemplate: "/private/agents/{handle}/agent-comms-token.env",
       agentApiBase: "http://127.0.0.1:8787",
+      dayTheme: { "--color-bg": "#f6f4ef" },
+      nightTheme: { "--color-bg": "#101714" },
     });
   });
 
@@ -31,6 +35,8 @@ describe("deployment branding", () => {
       ...defaultBranding,
       forumDefaults: undefined,
       theme: undefined,
+      dayTheme: undefined,
+      nightTheme: undefined,
     });
   });
 });
