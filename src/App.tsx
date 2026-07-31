@@ -313,12 +313,21 @@ agent-comms signup \\
 After it returns status "pending", stop and tell the operator that you re-submitted the onboarding request. Do not use Agent Comms further until the operator approves you and gives you a minted per-agent token.`;
 }
 
-function agentTokenPrompt(agent: AgentIdentity, token: string) {
-  return `Your Agent Comms onboarding request for ${agent.handle} has been approved. This is your per-agent token. Keep it local and do not paste it into Agent Comms, issues, PRs, docs, or chat transcripts.
+function agentTokenFilePath(agent: AgentIdentity, branding: typeof defaultBranding) {
+  const template = branding.agentTokenFilePathTemplate?.trim();
+  if (!template) return "<path-to-agent-comms-token.env>";
+  return template
+    .replaceAll("{handle}", agent.handle)
+    .replaceAll("{agentId}", agent.id);
+}
 
-Configure your session by loading <path-to-agent-comms-token.env>:
+function agentTokenPrompt(agent: AgentIdentity, branding: typeof defaultBranding) {
+  const tokenFile = agentTokenFilePath(agent, branding);
+  return `Your Agent Comms onboarding request for ${agent.handle} has been approved. Your per-agent token is local-only. Do not ask for, paste, or copy its value into Agent Comms, issues, PRs, docs, or chat transcripts.
 
-source <path-to-agent-comms-token.env>
+On this trusted local deployment, load only your assigned token file:
+
+source ${shellSingleQuote(tokenFile)}
 
 Then start with:
 
@@ -333,8 +342,8 @@ agent-comms changelog
 Use the CLI or REST API only. Do not use the browser dashboard.`;
 }
 
-function agentTokenEnvFile(agent: AgentIdentity, token: string) {
-  return `export AGENT_COMMS_API_BASE="REPLACE_WITH_DEPLOYMENT_URL"
+function agentTokenEnvFile(agent: AgentIdentity, token: string, branding: typeof defaultBranding) {
+  return `export AGENT_COMMS_API_BASE="${branding.agentApiBase ?? "REPLACE_WITH_DEPLOYMENT_URL"}"
 export AGENT_COMMS_AGENT_ID="${agent.id}"
 export AGENT_COMMS_TOKEN="${token}"
 `;
@@ -350,8 +359,11 @@ function readableRequestError(value: unknown) {
   return message.length > 240 ? `${message.slice(0, 237)}...` : message;
 }
 
-function agentTokenFileCommand(agent: AgentIdentity, token: string) {
-  return `umask 077; cat > agent-comms-token.env <<'EOF'\n${agentTokenEnvFile(agent, token)}EOF\n`;
+function agentTokenFileCommand(agent: AgentIdentity, token: string, branding: typeof defaultBranding) {
+  const tokenFile = agentTokenFilePath(agent, branding);
+  if (tokenFile.startsWith("<")) return `umask 077; cat > agent-comms-token.env <<'EOF'\n${agentTokenEnvFile(agent, token, branding)}EOF\n`;
+  const parent = tokenFile.slice(0, Math.max(tokenFile.lastIndexOf("/"), 0)) || ".";
+  return `umask 077; mkdir -p ${shellSingleQuote(parent)}; chmod 700 ${shellSingleQuote(parent)}; cat > ${shellSingleQuote(tokenFile)} <<'EOF'\n${agentTokenEnvFile(agent, token, branding)}EOF\nchmod 600 ${shellSingleQuote(tokenFile)}\n`;
 }
 
 function readJsonRecord(key: string): Record<string, string | undefined> {
@@ -1140,6 +1152,7 @@ function Suggestions({
 
 function Onboarding({
   state,
+  branding,
   introPrompt,
   expandedIds,
   copiedPromptAgentId,
@@ -1157,6 +1170,7 @@ function Onboarding({
   onMintToken,
 }: {
   state: AgentCommsState;
+  branding: typeof defaultBranding;
   introPrompt: string;
   expandedIds: Set<string>;
   copiedPromptAgentId?: string;
@@ -1289,7 +1303,7 @@ function Onboarding({
                 {mintedTokens[agent.id]?.token ? (
                   <div className="token-result">
                     <strong>Minted token for {agent.handle}</strong>
-                    <textarea readOnly rows={9} value={agentTokenPrompt(agent, mintedTokens[agent.id]?.token ?? "")} />
+                    <textarea readOnly rows={9} value={agentTokenPrompt(agent, branding)} />
                     <button type="button" onClick={() => onCopyTokenPrompt(agent)}>
                       <Copy aria-hidden="true" />
                       {mintedTokens[agent.id]?.copied ? "Copied" : "Copy token prompt"}
@@ -1813,7 +1827,7 @@ export function App() {
     const token = mintedTokens[agent.id]?.token;
     if (!token) return;
     try {
-      await navigator.clipboard.writeText(agentTokenPrompt(agent, token));
+      await navigator.clipboard.writeText(agentTokenPrompt(agent, branding));
       setMintedTokens((current) => ({ ...current, [agent.id]: { token, copied: true } }));
       setActionStatus("Token prompt copied.");
       window.setTimeout(() => {
@@ -1830,7 +1844,7 @@ export function App() {
     const token = mintedTokens[agent.id]?.token;
     if (!token) return;
     try {
-      await navigator.clipboard.writeText(agentTokenFileCommand(agent, token));
+      await navigator.clipboard.writeText(agentTokenFileCommand(agent, token, branding));
       setMintedTokens((current) => ({ ...current, [agent.id]: { token, fileCopied: true } }));
       setActionStatus("Token-file command copied.");
       window.setTimeout(() => {
@@ -2304,6 +2318,7 @@ export function App() {
         ) : null}
         {view === "onboarding" ? (
           <Onboarding
+            branding={branding}
             copiedPromptAgentId={copiedPromptAgentId}
             copiedIntroPrompt={copiedIntroPrompt}
             expandedIds={expandedAgentIds}

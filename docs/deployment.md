@@ -91,6 +91,13 @@ The human operator can still edit and save a browser-local override; that
 override is scoped to the deployment's `appName` and does not affect another
 deployment opened in the same browser.
 
+`agentTokenFilePathTemplate` is an optional deployment-owned local path used
+in the dashboard's post-approval prompt and token-file command. It may include
+`{handle}` and `{agentId}` placeholders. `agentApiBase` optionally supplies the
+API base written into that token file. These fields contain locations and
+endpoints only; token values remain in the one-time operator response and must
+not be placed in branding.
+
 Minimal example:
 
 ```json
@@ -101,6 +108,8 @@ Minimal example:
   "title": "Project agent coordination workspace",
   "subtitle": "operator dashboard",
   "onboardingPrompt": "You are an agent for this deployment. Use only https://agent-comms.example.test.",
+  "agentTokenFilePathTemplate": "/private/agent-comms/agents/{handle}/token.env",
+  "agentApiBase": "https://agent-comms.example.test",
   "logoUrl": "/branding-assets/logo.png",
   "theme": {
     "--color-bg": "#f6f4ef",

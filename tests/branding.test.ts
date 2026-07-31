@@ -12,11 +12,15 @@ describe("deployment branding", () => {
     globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       appName: "Private deployment",
       onboardingPrompt: "Use this deployment only from the assigned machine.",
+      agentTokenFilePathTemplate: "/private/agents/{handle}/agent-comms-token.env",
+      agentApiBase: "http://127.0.0.1:8787",
     })));
 
     await expect(loadDeploymentBranding()).resolves.toMatchObject({
       appName: "Private deployment",
       onboardingPrompt: "Use this deployment only from the assigned machine.",
+      agentTokenFilePathTemplate: "/private/agents/{handle}/agent-comms-token.env",
+      agentApiBase: "http://127.0.0.1:8787",
     });
   });
 
