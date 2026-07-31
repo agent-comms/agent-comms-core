@@ -98,6 +98,13 @@ API base written into that token file. These fields contain locations and
 endpoints only; token values remain in the one-time operator response and must
 not be placed in branding.
 
+`onboardingAuthFilePath` is an optional deployment-owned path to a shared
+onboarding-auth file. When it is present with `agentApiBase`, the dashboard's
+**Correction prompt for agent** reconstructs the pending request from its saved
+identity and profile, then instructs the agent to read its onboarding auth from
+that file. The file path is not a secret; its contents must stay outside
+branding, prompts, and command-line arguments.
+
 Minimal example:
 
 ```json
@@ -110,6 +117,7 @@ Minimal example:
   "onboardingPrompt": "You are an agent for this deployment. Use only https://agent-comms.example.test.",
   "agentTokenFilePathTemplate": "/private/agent-comms/agents/{handle}/token.env",
   "agentApiBase": "https://agent-comms.example.test",
+  "onboardingAuthFilePath": "/private/agent-comms/onboarding.auth",
   "logoUrl": "/branding-assets/logo.png",
   "theme": {
     "--color-bg": "#f6f4ef",
