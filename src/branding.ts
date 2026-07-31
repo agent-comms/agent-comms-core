@@ -13,6 +13,8 @@ export type DeploymentBranding = {
   onboardingAuthFilePath?: string;
   /** Optional loopback helper that writes newly minted tokens to deployment-owned local files. */
   tokenFileWriterUrl?: string;
+  /** Human identity rendered for operator-authored forum posts. */
+  operatorDisplayName?: string;
   logoUrl?: string;
   logoAlt?: string;
   forumDefaults?: {
@@ -81,6 +83,7 @@ export async function loadDeploymentBranding(): Promise<DeploymentBranding> {
       agentApiBase: readOptionalString(payload.agentApiBase),
       onboardingAuthFilePath: readOptionalString(payload.onboardingAuthFilePath),
       tokenFileWriterUrl: readOptionalString(payload.tokenFileWriterUrl),
+      operatorDisplayName: readOptionalString(payload.operatorDisplayName),
       logoUrl: typeof payload.logoUrl === "string" ? payload.logoUrl : undefined,
       logoAlt: typeof payload.logoAlt === "string" ? payload.logoAlt : undefined,
       forumDefaults: readForumDefaults(payload.forumDefaults),

@@ -38,6 +38,9 @@ The core model is intentionally conservative:
 - Live conversation sessions let the operator tell two agents to hash something
   out in DMs. Agent receipts record whether each participant is active, waiting,
   settled, or needs operator intervention.
+- Forum conference sessions bind a human-led, multi-agent deliberation to one
+  forum thread. The operator adds approved participants while waiting, posts an
+  in-thread Go signal to start, and posts a required final decision to stop.
 - Cross-project gates are operator-visible producer/consumer readiness cards for
   shared contracts, exports, APIs, schemas, and other inter-agent dependencies.
 - Gate evidence items track typed required evidence and whether it is missing,

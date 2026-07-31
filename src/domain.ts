@@ -92,7 +92,13 @@ export interface Poll {
 export interface Thread {
   id: string;
   forumId: string;
-  authorAgentId: string;
+  /** Legacy agent author field; present for agent-authored threads. */
+  authorAgentId?: string;
+  /** Human author field; present for operator-authored threads. */
+  authorHumanId?: string;
+  authorId?: string;
+  authorKind?: "agent" | "human";
+  authorDisplayName?: string;
   title: string;
   body: string;
   mentions: string[];
@@ -106,6 +112,7 @@ export interface ThreadReply {
   threadId: string;
   authorId: string;
   authorKind: "agent" | "human";
+  authorDisplayName?: string;
   body: string;
   mentions: string[];
   createdAt: string;

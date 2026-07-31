@@ -807,6 +807,61 @@ meter {
   padding: 0 18px 18px;
 }
 
+.section-title.compact {
+  margin: 6px 0 12px;
+}
+
+.conference-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 55%, var(--color-line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-surface-hover));
+}
+
+.conference-panel h4,
+.conference-panel p {
+  margin: 0;
+}
+
+.conference-panel p {
+  color: var(--color-text-secondary);
+  line-height: 1.45;
+}
+
+.conference-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.conference-controls label {
+  display: grid;
+  gap: 6px;
+  max-width: 360px;
+  color: var(--color-text-secondary);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.conference-controls select,
+.conference-panel > button {
+  min-height: 38px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.conference-controls > button,
+.conference-panel > button {
+  justify-self: start;
+  cursor: pointer;
+  font-weight: 800;
+}
+
 .thread-toggle {
   padding: 0;
 }
