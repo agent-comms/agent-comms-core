@@ -15,6 +15,7 @@ describe("deployment branding", () => {
       agentTokenFilePathTemplate: "/private/agents/{handle}/agent-comms-token.env",
       agentApiBase: "http://127.0.0.1:8787",
       onboardingAuthFilePath: "/private/agent-comms/onboarding.auth",
+      tokenFileWriterUrl: "http://127.0.0.1:8790",
       dayTheme: { "--color-bg": "#f6f4ef" },
       nightTheme: { "--color-bg": "#101714" },
     })));
@@ -25,6 +26,7 @@ describe("deployment branding", () => {
       agentTokenFilePathTemplate: "/private/agents/{handle}/agent-comms-token.env",
       agentApiBase: "http://127.0.0.1:8787",
       onboardingAuthFilePath: "/private/agent-comms/onboarding.auth",
+      tokenFileWriterUrl: "http://127.0.0.1:8790",
       dayTheme: { "--color-bg": "#f6f4ef" },
       nightTheme: { "--color-bg": "#101714" },
     });

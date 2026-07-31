@@ -1169,7 +1169,7 @@ function Onboarding({
   expandedIds: Set<string>;
   copiedPromptAgentId?: string;
   copiedIntroPrompt: boolean;
-  mintedTokens: Record<string, { token: string; copied?: boolean; fileCopied?: boolean } | undefined>;
+  mintedTokens: Record<string, { token: string; copied?: boolean; fileCopied?: boolean; fileWritten?: boolean; fileWriteError?: string } | undefined>;
   approvingAgentId: string | null;
   recentlyApprovedAgentId: string | null;
   onIntroPromptChange: (value: string) => void;
@@ -1304,14 +1304,22 @@ function Onboarding({
                   <div className="token-result">
                     <strong>Minted token for {agent.handle}</strong>
                     <textarea readOnly rows={9} value={agentTokenPrompt(agent, branding)} />
+                    {mintedTokens[agent.id]?.fileWritten ? (
+                      <p className="token-file-success" role="status">Local token file created. The agent can now read it from the assigned path.</p>
+                    ) : null}
+                    {mintedTokens[agent.id]?.fileWriteError ? (
+                      <p className="inline-warning">The token was minted, but its local file could not be created: {mintedTokens[agent.id]?.fileWriteError}</p>
+                    ) : null}
                     <button type="button" onClick={() => onCopyTokenPrompt(agent)}>
                       <Copy aria-hidden="true" />
                       {mintedTokens[agent.id]?.copied ? "Copied" : "Copy token prompt"}
                     </button>
-                    <button type="button" onClick={() => onCopyTokenFileCommand(agent)}>
-                      <Copy aria-hidden="true" />
-                      {mintedTokens[agent.id]?.fileCopied ? "Copied file command" : "Copy token-file command"}
-                    </button>
+                    {!mintedTokens[agent.id]?.fileWritten ? (
+                      <button type="button" onClick={() => onCopyTokenFileCommand(agent)}>
+                        <Copy aria-hidden="true" />
+                        {mintedTokens[agent.id]?.fileCopied ? "Copied file command" : "Copy token-file command"}
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
                 {wasJustApproved ? (
@@ -1529,7 +1537,7 @@ export function App() {
   const [copiedPromptAgentId, setCopiedPromptAgentId] = useState<string | undefined>();
   const [copiedIntroPrompt, setCopiedIntroPrompt] = useState(false);
   const [onboardingIntroPrompt, setOnboardingIntroPrompt] = useState(() => onboardingPromptForBranding(defaultBranding));
-  const [mintedTokens, setMintedTokens] = useState<Record<string, { token: string; copied?: boolean; fileCopied?: boolean } | undefined>>({});
+  const [mintedTokens, setMintedTokens] = useState<Record<string, { token: string; copied?: boolean; fileCopied?: boolean; fileWritten?: boolean; fileWriteError?: string } | undefined>>({});
   const [liveSessions, setLiveSessions] = useState<LiveConversationSession[]>([]);
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [themeMode, setThemeMode] = useState<ThemeMode>(getInitialThemeMode);
@@ -1849,12 +1857,16 @@ export function App() {
     if (!token) return;
     try {
       await navigator.clipboard.writeText(agentTokenPrompt(agent, branding));
-      setMintedTokens((current) => ({ ...current, [agent.id]: { token, copied: true } }));
+      setMintedTokens((current) => {
+        const existing = current[agent.id];
+        return existing?.token === token ? { ...current, [agent.id]: { ...existing, copied: true } } : current;
+      });
       setActionStatus("Token prompt copied.");
       window.setTimeout(() => {
-        setMintedTokens((current) => (
-          current[agent.id]?.token === token ? { ...current, [agent.id]: { token } } : current
-        ));
+        setMintedTokens((current) => {
+          const existing = current[agent.id];
+          return existing?.token === token ? { ...current, [agent.id]: { ...existing, copied: false } } : current;
+        });
       }, 1800);
     } catch {
       setActionStatus("Copy failed. Select and copy the token prompt manually.");
@@ -1866,16 +1878,42 @@ export function App() {
     if (!token) return;
     try {
       await navigator.clipboard.writeText(agentTokenFileCommand(agent, token, branding));
-      setMintedTokens((current) => ({ ...current, [agent.id]: { token, fileCopied: true } }));
+      setMintedTokens((current) => {
+        const existing = current[agent.id];
+        return existing?.token === token ? { ...current, [agent.id]: { ...existing, fileCopied: true } } : current;
+      });
       setActionStatus("Token-file command copied.");
       window.setTimeout(() => {
-        setMintedTokens((current) => (
-          current[agent.id]?.token === token ? { ...current, [agent.id]: { token } } : current
-        ));
+        setMintedTokens((current) => {
+          const existing = current[agent.id];
+          return existing?.token === token ? { ...current, [agent.id]: { ...existing, fileCopied: false } } : current;
+        });
       }, 1800);
     } catch {
       setActionStatus("Copy failed. Select and copy the token-file command manually.");
     }
+  };
+
+  const writeMintedTokenFile = async (agent: AgentIdentity, token: string) => {
+    const writerUrl = branding.tokenFileWriterUrl?.trim();
+    if (!writerUrl) return { written: false, error: "This deployment has not configured an automatic local token-file writer." };
+    let response: Response;
+    try {
+      response = await fetch(`${writerUrl.replace(/\/$/, "")}/token-files`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          agentId: agent.id,
+          handle: agent.handle,
+          token,
+          apiBase: branding.agentApiBase,
+        }),
+      });
+    } catch {
+      return { written: false, error: "The local token-file writer is not reachable." };
+    }
+    if (!response.ok) return { written: false, error: "The local token-file writer rejected the request." };
+    return { written: true };
   };
 
   const mintAgentToken = async (agent: AgentIdentity) => {
@@ -1885,8 +1923,18 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ label: `${agent.handle} dashboard token` }),
       });
-      setMintedTokens((current) => ({ ...current, [agent.id]: { token: payload.token } }));
-      setActionStatus("Token minted. Copy it now; it will not be shown after refresh.");
+      const fileResult = await writeMintedTokenFile(agent, payload.token);
+      setMintedTokens((current) => ({
+        ...current,
+        [agent.id]: {
+          token: payload.token,
+          fileWritten: fileResult.written,
+          fileWriteError: fileResult.written ? undefined : fileResult.error,
+        },
+      }));
+      setActionStatus(fileResult.written
+        ? "Token minted and written to the assigned local file."
+        : "Token minted, but the local file was not created. Use the recovery command shown below.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Token minting failed.");
     } finally {

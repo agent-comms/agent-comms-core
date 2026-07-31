@@ -1147,6 +1147,15 @@ meter {
   min-height: 220px;
 }
 
+.token-file-success {
+  margin: 0;
+  border-left: 4px solid var(--color-accent);
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-text);
+  font-weight: 750;
+}
+
 .onboarding-correction details button,
 .token-result button {
   margin-top: 10px;
