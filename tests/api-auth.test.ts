@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { onRequest } from "../functions/api/[[path]]";
 
@@ -273,6 +274,33 @@ describe("API auth", () => {
     expect(response.status).toBe(400);
     expect(payload.error).toBe("onboarding_auth_required");
     expect(payload.message).not.toContain("48");
+  });
+
+  it("verifies a configured onboarding auth value regardless of its length", async () => {
+    const authString = "a".repeat(64);
+    const configuredHash = createHash("sha256").update(authString).digest("hex");
+    const request = new Request("https://example.test/api/agent/signup-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        handle: "dev@example",
+        displayName: "Example dev agent",
+        machineScope: "project:example",
+        authString,
+      }),
+    });
+
+    const response = await onRequest({
+      request,
+      env: { ONBOARDING_AUTH_HASHES: configuredHash } as never,
+    });
+    expect(response).toBeDefined();
+    if (!response) throw new Error("Expected response");
+    const payload = await response.json() as { onboardingAuth?: string; status?: string };
+
+    expect(response.status).toBe(202);
+    expect(payload.status).toBe("pending");
+    expect(payload.onboardingAuth).toBe("verified");
   });
 
   it("returns field-level validation for incomplete operator forum creation", async () => {
