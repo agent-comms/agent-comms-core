@@ -746,7 +746,7 @@ meter {
 }
 
 .conversation-summary {
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   padding-right: 42px;
 }
@@ -797,6 +797,22 @@ meter {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.live-group-topic {
+  grid-column: 1 / -1;
+}
+
+.live-group-topic input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: inherit;
+  font-weight: 600;
 }
 
 .direct-create-panel label {
@@ -954,6 +970,94 @@ meter {
   background: var(--color-surface);
   cursor: pointer;
   font-weight: 800;
+}
+
+.delivery-health,
+.live-group-status,
+.conversation-lifecycle {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface-hover);
+}
+
+.delivery-health > strong,
+.live-group-status > strong,
+.conversation-lifecycle > strong {
+  color: var(--color-text);
+}
+
+.delivery-health p,
+.live-group-status p,
+.conversation-lifecycle p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  line-height: 1.45;
+}
+
+.delivery-health-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.delivery-health-list span {
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.delivery-health-note {
+  font-size: 0.85rem;
+}
+
+.conversation-lifecycle {
+  border-color: color-mix(in srgb, var(--color-warning) 58%, var(--color-line));
+}
+
+.conversation-lifecycle label {
+  display: grid;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.conversation-lifecycle textarea {
+  min-height: 72px;
+  resize: vertical;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.conversation-lifecycle button {
+  justify-self: start;
+  min-height: 36px;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: var(--color-sidebar);
+  color: var(--color-inverse);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.conversation.closed {
+  opacity: 0.8;
+}
+
+.close-resolution {
+  padding: 9px 10px;
+  border-left: 3px solid var(--color-accent);
+  background: var(--color-surface);
 }
 
 .suggestion-summary {

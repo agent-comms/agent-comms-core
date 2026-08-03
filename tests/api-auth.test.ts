@@ -463,6 +463,87 @@ describe("API auth", () => {
     expect(response.status).toBe(200);
   });
 
+  it("enforces a disabled human direct-group capability before accessing storage", async () => {
+    const response = await onRequest({
+      request: new Request("https://example.test/api/operator/direct-conversation-groups", {
+        method: "POST",
+        headers: { authorization: "Bearer operator-token", "content-type": "application/json" },
+        body: JSON.stringify({ participantAgentIds: ["agent_a", "agent_b"] }),
+      }),
+      env: {
+        OPERATOR_API_TOKEN: "operator-token",
+        OPERATOR_DIRECT_GROUPS_ENABLED: "false",
+      } as never,
+    });
+
+    expect(response?.status).toBe(403);
+    await expect(response?.json()).resolves.toMatchObject({
+      error: "Human-created direct groups are disabled by this deployment.",
+    });
+  });
+
+  it("keeps relay targets and diagnostics out of operator bootstrap delivery telemetry", async () => {
+    const bootstrapDb = {
+      prepare(query: string) {
+        const statement = {
+          bind: (..._values: unknown[]) => statement,
+          all: async () => ({
+            results: query.includes("FROM agent_delivery_bindings")
+              ? [{
+                  id: "binding_1",
+                  agent_id: "agent_a",
+                  adapter_key: "generic_adapter",
+                  target_ref: "relay-only-target",
+                  display_label: "Bound thread",
+                  status: "active",
+                  revision: 1,
+                  created_at: "2026-01-01T00:00:00.000Z",
+                  updated_at: "2026-01-01T00:00:00.000Z",
+                }]
+              : query.includes("FROM direct_delivery_jobs")
+                ? [{
+                    id: "job_1",
+                    event_id: "event_1",
+                    conversation_id: "dm_1",
+                    recipient_agent_id: "agent_a",
+                    sequence_number: 1,
+                    status: "delivered",
+                    attempts: 1,
+                    detail: "relay-only diagnostic",
+                  }]
+                : [],
+          }),
+          run: async () => ({}),
+        };
+        return statement;
+      },
+    };
+    const response = await onRequest({
+      request: new Request("https://example.test/api/operator/bootstrap", {
+        headers: { authorization: "Bearer operator-token" },
+      }),
+      env: {
+        DB: bootstrapDb,
+        OPERATOR_API_TOKEN: "operator-token",
+        OPERATOR_DIRECT_GROUPS_ENABLED: "false",
+      } as never,
+    });
+
+    expect(response?.status).toBe(200);
+    const payload = await response?.json() as {
+      operator?: { capabilities?: { directGroups?: { create?: boolean } } };
+      deliveryBindings?: Array<Record<string, unknown>>;
+      deliveryJobs?: Array<Record<string, unknown>>;
+    };
+    expect(payload.operator?.capabilities?.directGroups?.create).toBe(false);
+    expect(payload.deliveryBindings?.[0]).toMatchObject({ id: "binding_1", agentId: "agent_a", status: "active" });
+    expect(payload.deliveryBindings?.[0]).not.toHaveProperty("targetRef");
+    expect(payload.deliveryJobs?.[0]).toMatchObject({ id: "job_1", recipientAgentId: "agent_a", status: "delivered" });
+    expect(payload.deliveryJobs?.[0]).not.toHaveProperty("detail");
+    expect(JSON.stringify(payload)).not.toContain("relay-only-target");
+    expect(JSON.stringify(payload)).not.toContain("relay-only diagnostic");
+  });
+
   it("allows unauthenticated signup requests as pending-only onboarding", async () => {
     const request = new Request("https://example.test/api/agent/signup-requests", {
       method: "POST",

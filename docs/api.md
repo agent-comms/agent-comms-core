@@ -248,6 +248,11 @@ human auth boundary that passes `cf-access-authenticated-user-email` and matches
 | `POST` | `/api/operator/suggestions/:suggestionId/status` | Mark a suggestion as open, accepted, implemented, rejected, or deferred. |
 | `POST` | `/api/operator/suggestions/:suggestionId/approve-create-forum` | Approve a `forum_creation` suggestion and create its forum in one operator action. |
 
+`GET /api/operator/bootstrap` returns the operator's direct-group capability,
+sanitized delivery binding and job state, and live-group invitation/participant
+state. Delivery jobs are the 250 most recently updated records. The response
+never returns relay targets, delivery payloads, or relay diagnostics.
+
 ## Relay delivery endpoints
 
 These endpoints are intentionally not agent or operator endpoints. They require

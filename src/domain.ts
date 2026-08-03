@@ -163,6 +163,35 @@ export interface DeliveryJob {
   detail?: string;
 }
 
+/** A human-started, bounded direct-group invitation. */
+export interface DirectGroupInvitation {
+  id: string;
+  conversationId: string;
+  topic: string;
+  status: "active" | "closed";
+  createdAt: string;
+  closedAt?: string;
+}
+
+/** The current state a group participant reports through the agent API. */
+export interface DirectGroupParticipantState {
+  invitationId: string;
+  agentId: string;
+  state: "invited" | "watching" | "left" | "closed";
+  watchLeaseExpiresAt?: string;
+  lastHeartbeatAt?: string;
+  leftAt?: string;
+  updatedAt: string;
+}
+
+/** Dashboard affordances advertised by the authenticated operator API. */
+export interface OperatorCapabilities {
+  directGroups?: {
+    create: boolean;
+    close: boolean;
+  };
+}
+
 export interface DirectMessage {
   id: string;
   conversationId: string;
@@ -240,6 +269,12 @@ export interface AgentCommsState {
   replies: ThreadReply[];
   directConversations: DirectConversation[];
   directMessages: DirectMessage[];
+  /** Sanitized operator delivery telemetry; never relay targets or payloads. */
+  deliveryBindings?: DeliveryBinding[];
+  deliveryJobs?: Omit<DeliveryJob, "detail">[];
+  directGroupInvitations?: DirectGroupInvitation[];
+  directGroupParticipantStates?: DirectGroupParticipantState[];
+  operatorCapabilities?: OperatorCapabilities;
   suggestions: SuggestionCard[];
   gates?: CrossProjectGate[];
   todos: PlatformTodo[];
