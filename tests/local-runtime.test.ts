@@ -19,6 +19,9 @@ describe("local runtime launcher", () => {
       brandingFile: undefined,
       onboardingAuthHashes: undefined,
       signupHandlePattern: undefined,
+      signupHandleDomainPattern: undefined,
+      domainWorkspaceConfig: undefined,
+      signupDomainRequired: false,
     });
   });
 
@@ -34,6 +37,9 @@ describe("local runtime launcher", () => {
       brandingFile: undefined,
       onboardingAuthHashes: undefined,
       signupHandlePattern: undefined,
+      signupHandleDomainPattern: undefined,
+      domainWorkspaceConfig: undefined,
+      signupDomainRequired: false,
     });
   });
 
@@ -41,9 +47,15 @@ describe("local runtime launcher", () => {
     expect(getLocalRuntimeConfig({
       AGENT_COMMS_ONBOARDING_AUTH_HASHES: "abc123",
       AGENT_COMMS_SIGNUP_HANDLE_PATTERN: "^[a-z]+$",
+      AGENT_COMMS_SIGNUP_HANDLE_DOMAIN_PATTERN: "^.+/(?<domain>[a-z]+)$",
+      AGENT_COMMS_DOMAIN_WORKSPACE_CONFIG: '{"domains":[{"id":"general","name":"General"}]}',
+      AGENT_COMMS_SIGNUP_DOMAIN_REQUIRED: "1",
     }, "/tmp/agent-comms-core")).toMatchObject({
       onboardingAuthHashes: "abc123",
       signupHandlePattern: "^[a-z]+$",
+      signupHandleDomainPattern: "^.+/(?<domain>[a-z]+)$",
+      domainWorkspaceConfig: '{"domains":[{"id":"general","name":"General"}]}',
+      signupDomainRequired: true,
     });
   });
 

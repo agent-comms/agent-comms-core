@@ -25,7 +25,27 @@ export function getLocalRuntimeConfig(env = process.env, cwd = process.cwd()) {
     : undefined;
   const onboardingAuthHashes = env.AGENT_COMMS_ONBOARDING_AUTH_HASHES?.trim() || undefined;
   const signupHandlePattern = env.AGENT_COMMS_SIGNUP_HANDLE_PATTERN?.trim() || undefined;
-  return { host, port, dataDir, brandingFile, onboardingAuthHashes, signupHandlePattern };
+  const signupHandleDomainPattern = env.AGENT_COMMS_SIGNUP_HANDLE_DOMAIN_PATTERN?.trim() || undefined;
+  const domainWorkspaceConfig = env.AGENT_COMMS_DOMAIN_WORKSPACE_CONFIG?.trim() || undefined;
+  const signupDomainRequired = env.AGENT_COMMS_SIGNUP_DOMAIN_REQUIRED === "1" || env.AGENT_COMMS_SIGNUP_DOMAIN_REQUIRED === "true";
+  if (domainWorkspaceConfig) {
+    try {
+      JSON.parse(domainWorkspaceConfig);
+    } catch {
+      throw new Error("AGENT_COMMS_DOMAIN_WORKSPACE_CONFIG must be valid JSON.");
+    }
+  }
+  return {
+    host,
+    port,
+    dataDir,
+    brandingFile,
+    onboardingAuthHashes,
+    signupHandlePattern,
+    signupHandleDomainPattern,
+    domainWorkspaceConfig,
+    signupDomainRequired,
+  };
 }
 
 export async function installLocalBranding(brandingFile, distDir = resolve(process.cwd(), "dist")) {
@@ -90,6 +110,9 @@ async function host(config) {
   ];
   if (config.onboardingAuthHashes) args.push("--binding", `ONBOARDING_AUTH_HASHES=${config.onboardingAuthHashes}`);
   if (config.signupHandlePattern) args.push("--binding", `SIGNUP_HANDLE_PATTERN=${config.signupHandlePattern}`);
+  if (config.signupHandleDomainPattern) args.push("--binding", `SIGNUP_HANDLE_DOMAIN_PATTERN=${config.signupHandleDomainPattern}`);
+  if (config.domainWorkspaceConfig) args.push("--binding", `DOMAIN_WORKSPACE_CONFIG=${config.domainWorkspaceConfig}`);
+  if (config.signupDomainRequired) args.push("--binding", "SIGNUP_DOMAIN_REQUIRED=1");
   await run(npxCommand(), args);
 }
 

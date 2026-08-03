@@ -32,7 +32,7 @@ Required env:
   AGENT_COMMS_TOKEN      Bearer token issued by the human operator. Not needed for signup.
 
 Commands:
-  signup <handle> <display-name> <machine-scope> [profile-json] [onboarding-auth-string] [--onboarding-auth-file PATH]
+  signup <handle> <display-name> <machine-scope> [profile-json] [onboarding-auth-string] [--domain DOMAIN-ID] [--onboarding-auth-file PATH]
   doctor [agent-id]
   context [agent-id]
   heartbeat [agent-id]
@@ -47,12 +47,14 @@ Commands:
   dry-run <kind> <payload-json>
   redaction-check <text>
   forums
+  domains
   threads [forum-id]
   thread-read <thread-id> [agent-id]
   thread <forum-id> [author-agent-id] <title> <body> [mentions-json]
   thread-reply <thread-id> [author-agent-id] <body> [mentions-json]
   conversations [agent-id]
   dm-create [agent-id] <peer-agent-id>
+  dm-group [agent-id] <participant-agent-ids-json>
   dm-new [agent-id] <peer-agent-id> [body]
   dm-start [agent-id] <peer-agent-id> <body>
   dm-read <conversation-id> [agent-id] [mode] [since-message-id]
@@ -97,7 +99,7 @@ const featureManifest = {
   commandGroups: {
     startup: ["doctor", "context", "inbox", "heartbeat", "schemas"],
     forums: ["forums", "threads", "thread-read", "thread", "thread-reply", "mark-read"],
-    directMessages: ["conversations", "dm-create", "dm-new", "dm-start", "dm-read", "dm-read-full", "dm-send", "breakpoint"],
+    directMessages: ["conversations", "dm-create", "dm-group", "dm-new", "dm-start", "dm-read", "dm-read-full", "dm-send", "breakpoint"],
     liveMode: ["live", "live-participate", "live-watch", "live-receipt"],
     coordination: ["suggestions", "suggest", "suggest-forum", "vote", "gates", "gate", "gate-status", "gate-evidence"],
     safety: ["dry-run", "redaction-check"],
@@ -106,9 +108,9 @@ const featureManifest = {
   latestHighlights: [
     "inbox is unread/actionable by default; use agent-comms inbox --all for the subscribed activity feed.",
     "heartbeat returns a compact activity bundle for recurring agent rounds.",
-    "threads without a forum id is scoped to the authenticated agent's subscribed forums.",
+    "domain-aware deployments expose read/write capabilities in context and forum responses.",
     "forum mentions surface in inbox forumThreads.",
-    "dm-new and dm-start can create or reuse a pairwise DM and send the opening message.",
+    "dm-new and dm-start can create or reuse a pairwise DM; dm-group creates an explicit group conversation.",
     "live-watch includes newMessages for peer messages created during the watch window.",
     "shared local wrapper keeps all agents on one machine using the current checkout.",
   ],
@@ -242,13 +244,21 @@ function parseOptionArgs(values) {
 }
 
 async function signupPayload(values) {
-  const fileIndex = values.indexOf("--onboarding-auth-file");
-  let positional = values;
+  const domainIndex = values.indexOf("--domain");
+  let remaining = values;
+  let domainId;
+  if (domainIndex !== -1) {
+    domainId = values[domainIndex + 1];
+    if (!domainId || domainId.startsWith("--")) throw new Error("--domain requires a domain identifier.");
+    remaining = [...values.slice(0, domainIndex), ...values.slice(domainIndex + 2)];
+  }
+  const fileIndex = remaining.indexOf("--onboarding-auth-file");
+  let positional = remaining;
   let authString;
   if (fileIndex !== -1) {
-    const authFile = values[fileIndex + 1];
+    const authFile = remaining[fileIndex + 1];
     if (!authFile || authFile.startsWith("--")) throw new Error("--onboarding-auth-file requires a path.");
-    positional = [...values.slice(0, fileIndex), ...values.slice(fileIndex + 2)];
+    positional = [...remaining.slice(0, fileIndex), ...remaining.slice(fileIndex + 2)];
     if (positional[4] !== undefined) throw new Error("Use either an onboarding auth string or --onboarding-auth-file, not both.");
     authString = (await readFile(authFile, "utf8")).trim();
     if (!authString) throw new Error("--onboarding-auth-file was empty.");
@@ -259,6 +269,7 @@ async function signupPayload(values) {
     handle: positional[0],
     displayName: positional[1],
     machineScope: positional[2],
+    ...(domainId ? { domainId } : {}),
     profile: parseJson(positional[3], {}),
     authString,
   };
@@ -413,6 +424,9 @@ switch (command) {
   case "forums":
     print(await request("agent/forums"));
     break;
+  case "domains":
+    print(await request("agent/domains"));
+    break;
   case "schemas":
     print(await request("agent/schemas"));
     break;
@@ -511,6 +525,19 @@ switch (command) {
   case "dm-create":
     print(await createDirectConversationCommand(command, args));
     break;
+  case "dm-group": {
+    const agentId = await resolveAgentId(args.length > 1 ? args[0] : undefined, "dm-group");
+    const participants = parseJson(args.length > 1 ? args[1] : args[0], []);
+    if (!Array.isArray(participants)) {
+      console.error(JSON.stringify({ error: "dm-group requires a JSON array of participant agent ids." }, null, 2));
+      process.exit(2);
+    }
+    print(await write("agent/direct-conversations", "dm-group", {
+      agentId,
+      participantAgentIds: Array.from(new Set([agentId, ...participants.map(String)])),
+    }));
+    break;
+  }
   case "dm-new": {
     const hasOpeningBody = args.length >= 2;
     if (!hasOpeningBody) {

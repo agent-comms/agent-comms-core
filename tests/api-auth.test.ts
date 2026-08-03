@@ -27,10 +27,16 @@ type MockDirectConversation = {
   agent_b_id: string;
 };
 
+type MockConversationParticipant = {
+  conversation_id: string;
+  agent_id: string;
+};
+
 class MockLiveSessionDb {
   sessions: MockLiveSession[];
   receipts: MockLiveReceipt[];
   conversations: MockDirectConversation[];
+  participants: MockConversationParticipant[];
 
   insertCount = 0;
   insertConflictSession?: MockLiveSession;
@@ -39,10 +45,12 @@ class MockLiveSessionDb {
     sessions: MockLiveSession[] = [],
     conversations: MockDirectConversation[] = [],
     receipts: MockLiveReceipt[] = [],
+    participants: MockConversationParticipant[] = [],
   ) {
     this.sessions = sessions;
     this.conversations = conversations;
     this.receipts = receipts;
+    this.participants = participants;
   }
 
   prepare(query: string) {
@@ -91,6 +99,10 @@ class MockLiveSessionStatement {
   }
 
   async all<T = unknown>(): Promise<{ results: T[] }> {
+    if (this.query.includes("FROM direct_conversation_participants")) {
+      const conversationId = String(this.values[0]);
+      return { results: this.db.participants.filter((participant) => participant.conversation_id === conversationId) as T[] };
+    }
     if (this.query.includes("FROM live_conversation_receipts WHERE session_id = ?")) {
       const sessionId = String(this.values[0]);
       return { results: this.db.receipts.filter((receipt) => receipt.session_id === sessionId) as T[] };
@@ -184,6 +196,80 @@ class MockReadCursorStatement {
   }
 }
 
+class MockGroupConversationDb {
+  conversations: Array<{ id: string; agent_a_id: string; agent_b_id: string }> = [];
+  participants: Array<{ conversation_id: string; agent_id: string }> = [];
+
+  prepare(query: string) {
+    return new MockGroupConversationStatement(this, query);
+  }
+}
+
+class MockGroupConversationStatement {
+  private values: unknown[] = [];
+
+  constructor(
+    private readonly db: MockGroupConversationDb,
+    private readonly query: string,
+  ) {}
+
+  bind(...values: unknown[]) {
+    this.values = values;
+    return this;
+  }
+
+  async first<T = unknown>(): Promise<T | null> {
+    if (this.query.includes("FROM agent_api_tokens")) {
+      return { agent_id: "agent_author", status: "approved" } as T;
+    }
+    if (this.query.includes("SELECT status FROM agent_identities")) return { status: "approved" } as T;
+    if (this.query.includes("FROM direct_conversations c") && this.query.includes("NOT EXISTS")) {
+      const expectedCount = Number(this.values[0]);
+      const requested = this.values.slice(1).map(String).sort();
+      const conversation = this.db.conversations.find((candidate) => {
+        const actual = this.db.participants
+          .filter((participant) => participant.conversation_id === candidate.id)
+          .map((participant) => participant.agent_id)
+          .sort();
+        return actual.length === expectedCount && actual.join(",") === requested.join(",");
+      });
+      return (conversation ?? null) as T | null;
+    }
+    if (this.query.includes("FROM direct_conversations WHERE id = ?")) {
+      return (this.db.conversations.find((conversation) => conversation.id === String(this.values[0])) ?? null) as T | null;
+    }
+    return null;
+  }
+
+  async all<T = unknown>(): Promise<{ results: T[] }> {
+    if (this.query.includes("SELECT id, status FROM agent_identities")) {
+      return {
+        results: ["agent_author", "agent_peer", "agent_reviewer"]
+          .filter((id) => this.values.map(String).includes(id))
+          .map((id) => ({ id, status: "approved" })) as T[],
+      };
+    }
+    if (this.query.includes("SELECT agent_id FROM direct_conversation_participants")) {
+      return { results: this.db.participants.filter((participant) => participant.conversation_id === String(this.values[0])) as T[] };
+    }
+    return { results: [] };
+  }
+
+  async run() {
+    if (this.query.includes("INSERT INTO direct_conversations")) {
+      const [id, agentA, agentB] = this.values.map(String);
+      this.db.conversations.push({ id, agent_a_id: agentA, agent_b_id: agentB });
+    }
+    if (this.query.includes("INSERT INTO direct_conversation_participants")) {
+      const [conversationId, agentId] = this.values.map(String);
+      if (!this.db.participants.some((participant) => participant.conversation_id === conversationId && participant.agent_id === agentId)) {
+        this.db.participants.push({ conversation_id: conversationId, agent_id: agentId });
+      }
+    }
+    return {};
+  }
+}
+
 describe("API auth", () => {
   it("permits the explicitly enabled local operator runtime without a token", async () => {
     const response = await onRequest({
@@ -250,6 +336,99 @@ describe("API auth", () => {
     expect(response.status).toBe(400);
     expect(payload.error).toBe("Missing required signup fields.");
     expect(payload.fields).toEqual(["displayName", "machineScope"]);
+  });
+
+  it("validates a deployment-owned handle domain capture against signup domainId", async () => {
+    const config = JSON.stringify({
+      domains: [
+        { id: "general", name: "General" },
+        { id: "research", name: "Research" },
+      ],
+      defaultDomainId: "general",
+      writePolicy: "home_and_default",
+    });
+    const mismatch = new Request("https://example.test/api/agent/signup-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        handle: "dev[codex]@example/research",
+        displayName: "Example agent",
+        machineScope: "machine:example",
+        domainId: "general",
+      }),
+    });
+    const mismatchResponse = await onRequest({
+      request: mismatch,
+      env: {
+        DOMAIN_WORKSPACE_CONFIG: config,
+        SIGNUP_DOMAIN_REQUIRED: "1",
+        SIGNUP_HANDLE_PATTERN: "^[a-z]+\\[[a-z]+\\]@[a-z0-9-]+/[a-z0-9-]+$",
+        SIGNUP_HANDLE_DOMAIN_PATTERN: "^[a-z]+\\[[a-z]+\\]@[a-z0-9-]+/(?<domain>[a-z0-9-]+)$",
+      } as never,
+    });
+    expect(mismatchResponse?.status).toBe(400);
+    expect((await mismatchResponse?.json() as { error?: string }).error).toBe("signup_handle_domain_mismatch");
+
+    const nonmatchingHandle = new Request("https://example.test/api/agent/signup-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        handle: "dev#codex@example/research",
+        displayName: "Example agent",
+        machineScope: "machine:example",
+        domainId: "research",
+      }),
+    });
+    const nonmatchingHandleResponse = await onRequest({
+      request: nonmatchingHandle,
+      env: {
+        DOMAIN_WORKSPACE_CONFIG: config,
+        SIGNUP_DOMAIN_REQUIRED: "1",
+        SIGNUP_HANDLE_DOMAIN_PATTERN: "^[a-z]+\\[[a-z]+\\]@[a-z0-9-]+/(?<domain>[a-z0-9-]+)$",
+      } as never,
+    });
+    expect(nonmatchingHandleResponse?.status).toBe(400);
+    expect((await nonmatchingHandleResponse?.json() as { error?: string }).error).toBe("signup_handle_domain_mismatch");
+
+    const matched = new Request("https://example.test/api/agent/signup-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        handle: "dev[codex]@example/research",
+        displayName: "Example agent",
+        machineScope: "machine:example",
+        domainId: "research",
+      }),
+    });
+    const matchedResponse = await onRequest({
+      request: matched,
+      env: {
+        DOMAIN_WORKSPACE_CONFIG: config,
+        SIGNUP_DOMAIN_REQUIRED: "1",
+        SIGNUP_HANDLE_PATTERN: "^[a-z]+\\[[a-z]+\\]@[a-z0-9-]+/[a-z0-9-]+$",
+        SIGNUP_HANDLE_DOMAIN_PATTERN: "^[a-z]+\\[[a-z]+\\]@[a-z0-9-]+/(?<domain>[a-z0-9-]+)$",
+      } as never,
+    });
+    expect(matchedResponse?.status).toBe(202);
+    expect((await matchedResponse?.json() as { domainId?: string }).domainId).toBe("research");
+  });
+
+  it("rejects an invalid explicitly configured default workspace instead of silently falling back", async () => {
+    const request = new Request("https://example.test/api/operator/bootstrap", {
+      headers: { authorization: "Bearer operator-token" },
+    });
+    const response = await onRequest({
+      request,
+      env: {
+        OPERATOR_API_TOKEN: "operator-token",
+        DOMAIN_WORKSPACE_CONFIG: JSON.stringify({
+          domains: [{ id: "general", name: "General" }],
+          defaultDomainId: "not a domain slug",
+        }),
+      } as never,
+    });
+    expect(response?.status).toBe(500);
+    expect((await response?.json() as { error?: string }).error).toBe("domain_workspace_config_misconfigured");
   });
 
   it("rejects signup without onboarding auth when deployment requires it", async () => {
@@ -397,6 +576,82 @@ describe("API auth", () => {
     expect(payload.error).toBe("Direct conversations require two different agents.");
   });
 
+  it("creates a deployment-wide group conversation with explicit membership", async () => {
+    const db = new MockGroupConversationDb();
+    const request = new Request("https://example.test/api/agent/direct-conversations", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer minted-agent-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        agentId: "agent_author",
+        participantAgentIds: ["agent_author", "agent_peer", "agent_reviewer"],
+      }),
+    });
+    const response = await onRequest({ request, env: { DB: db } as never });
+    expect(response?.status).toBe(201);
+    const payload = await response?.json() as { conversation?: { participantAgentIds?: string[] } };
+    expect(payload.conversation?.participantAgentIds).toEqual(["agent_author", "agent_peer", "agent_reviewer"]);
+    expect(db.participants.map((participant) => participant.agent_id).sort()).toEqual([
+      "agent_author",
+      "agent_peer",
+      "agent_reviewer",
+    ]);
+
+    const pairRequest = new Request("https://example.test/api/agent/direct-conversations", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer minted-agent-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ agentId: "agent_author", peerAgentId: "agent_peer" }),
+    });
+    const pairResponse = await onRequest({ request: pairRequest, env: { DB: db } as never });
+    expect(pairResponse?.status).toBe(201);
+    expect(db.conversations).toHaveLength(2);
+
+    const duplicateGroupRequest = new Request("https://example.test/api/agent/direct-conversations", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer minted-agent-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        agentId: "agent_author",
+        participantAgentIds: ["agent_author", "agent_peer", "agent_reviewer"],
+      }),
+    });
+    const duplicateGroupResponse = await onRequest({ request: duplicateGroupRequest, env: { DB: db } as never });
+    expect(duplicateGroupResponse?.status).toBe(200);
+    expect(db.conversations).toHaveLength(2);
+  });
+
+  it("does not let an approved agent write a breakpoint for a conversation it has not joined", async () => {
+    const db = new MockGroupConversationDb();
+    db.conversations.push({ id: "dm_private", agent_a_id: "agent_peer", agent_b_id: "agent_reviewer" });
+    db.participants.push(
+      { conversation_id: "dm_private", agent_id: "agent_peer" },
+      { conversation_id: "dm_private", agent_id: "agent_reviewer" },
+    );
+    const request = new Request("https://example.test/api/agent/direct-breakpoints", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer minted-agent-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        conversationId: "dm_private",
+        agentId: "agent_author",
+        messageId: "dm_msg_1",
+      }),
+    });
+
+    const response = await onRequest({ request, env: { DB: db } as never });
+    expect(response?.status).toBe(403);
+    expect((await response?.json() as { error?: string }).error).toBe("Agent is not a participant in this direct conversation.");
+  });
+
   it("documents forum creation suggestions in the agent schema", async () => {
     const request = new Request("https://example.test/api/operator/schemas", {
       headers: { authorization: "Bearer operator-token" },
@@ -414,7 +669,7 @@ describe("API auth", () => {
     expect(payload.schemas?.agent?.createSuggestion?.kind).toContain("forum_creation");
   });
 
-  it("documents agent direct conversation creation in the agent schema", async () => {
+  it("documents pairwise-compatible and group direct conversation creation in the agent schema", async () => {
     const request = new Request("https://example.test/api/operator/schemas", {
       headers: { authorization: "Bearer operator-token" },
     });
@@ -425,10 +680,14 @@ describe("API auth", () => {
     });
     expect(response).toBeDefined();
     if (!response) throw new Error("Expected response");
-    const payload = await response.json() as { schemas?: { agent?: { createDirectConversation?: { agentId?: string; peerAgentId?: string } } } };
+    const payload = await response.json() as { schemas?: { agent?: { createDirectConversation?: { agentId?: string; peerAgentId?: string; participantAgentIds?: string } } } };
 
     expect(response.status).toBe(200);
-    expect(payload.schemas?.agent?.createDirectConversation).toEqual({ agentId: "string", peerAgentId: "string" });
+    expect(payload.schemas?.agent?.createDirectConversation).toMatchObject({
+      agentId: "string",
+      peerAgentId: expect.stringContaining("pairwise"),
+      participantAgentIds: expect.stringContaining("approved agents"),
+    });
   });
 
   it("documents the heartbeat helper in the agent schema", async () => {
@@ -673,6 +932,59 @@ describe("API auth", () => {
     });
     expect(payload.session?.status).toBe("waiting_on_operator");
     expect(db.sessions[0].status).toBe("waiting_on_operator");
+  });
+
+  it("waits for every explicit group member before marking a live conversation settled", async () => {
+    const db = new MockLiveSessionDb(
+      [
+        {
+          id: "live_group",
+          conversation_id: "dm_group",
+          status: "active",
+          topic: "Group review.",
+          stop_command: "stop conversation",
+          created_by_human_id: "human_operator",
+          created_at: "2026-05-31T08:00:00.000Z",
+        },
+      ],
+      [{ id: "dm_group", agent_a_id: "agent_a", agent_b_id: "agent_b" }],
+      [
+        {
+          session_id: "live_group",
+          agent_id: "agent_b",
+          state: "settled_by_agent",
+          note: "Done.",
+          last_seen_message_id: "dm_msg_1",
+          updated_at: "2026-05-31T08:00:00.000Z",
+        },
+        {
+          session_id: "live_group",
+          agent_id: "agent_c",
+          state: "waiting_on_peer",
+          note: "Still evaluating.",
+          last_seen_message_id: "dm_msg_2",
+          updated_at: "2026-05-31T08:00:00.000Z",
+        },
+      ],
+      [
+        { conversation_id: "dm_group", agent_id: "agent_a" },
+        { conversation_id: "dm_group", agent_id: "agent_b" },
+        { conversation_id: "dm_group", agent_id: "agent_c" },
+      ],
+    );
+    const request = new Request("https://example.test/api/agent/live-conversations/live_group/receipt", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer minted-agent-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ agentId: "agent_a", state: "settled_by_agent" }),
+    });
+
+    const response = await onRequest({ request, env: { DB: db } as never });
+    expect(response?.status).toBe(200);
+    expect((await response?.json() as { session?: { status?: string } }).session?.status).toBe("waiting_on_peer");
+    expect(db.sessions[0].status).toBe("waiting_on_peer");
   });
 
   it("keeps operator_stop_needed ahead of waiting_on_operator when deriving live status", async () => {

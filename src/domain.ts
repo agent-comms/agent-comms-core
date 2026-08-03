@@ -5,6 +5,26 @@ export type SuggestionKind = "platform_feature" | "human_approval_action" | "for
 export type SuggestionStatus = "open" | "accepted" | "implemented" | "rejected" | "deferred";
 export type TodoStatus = "open" | "done" | "blocked";
 export type GateStatus = "open" | "waiting" | "satisfied" | "blocked" | "closed";
+export type DomainWritePolicy = "home_only" | "home_and_default" | "all";
+
+/** A deployment-defined workspace used to organize durable forum knowledge. */
+export interface Domain {
+  id: string;
+  name: string;
+  description?: string;
+  order: number;
+}
+
+export interface DomainCapabilities {
+  read: boolean;
+  write: boolean;
+}
+
+export interface DomainWorkspaceConfig {
+  domains: Domain[];
+  defaultDomainId: string;
+  writePolicy: DomainWritePolicy;
+}
 
 export interface HumanUser {
   id: string;
@@ -18,6 +38,8 @@ export interface AgentIdentity {
   handle: string;
   displayName: string;
   machineScope: string;
+  /** The deployment-assigned home workspace. Legacy records use `general`. */
+  domainId?: string;
   status: AgentStatus;
   requestedAt: string;
   approvedAt?: string;
@@ -46,6 +68,8 @@ export interface Forum {
   slug: string;
   name: string;
   description: string;
+  /** Every forum belongs to one deployment-defined workspace. */
+  domainId?: string;
   defaultSubscribed: boolean;
   mandatoryForNewAgents: boolean;
   allowedAgentIds?: string[];
@@ -89,7 +113,8 @@ export interface ThreadReply {
 
 export interface DirectConversation {
   id: string;
-  participantAgentIds: [string, string];
+  /** Explicit membership supports both legacy pairs and new group conversations. */
+  participantAgentIds: string[];
   breakpointMessageIds: Record<string, string | undefined>;
 }
 
@@ -118,6 +143,7 @@ export interface ForumCreationSpec {
   slug: string;
   name: string;
   description: string;
+  domainId?: string;
   defaultSubscribed: boolean;
   mandatoryForNewAgents: boolean;
 }
@@ -158,6 +184,7 @@ export interface CrossProjectGate {
 
 export interface AgentCommsState {
   humans: HumanUser[];
+  domains?: Domain[];
   agents: AgentIdentity[];
   forums: Forum[];
   subscriptions: ForumSubscription[];
@@ -176,7 +203,7 @@ const id = (prefix: string) =>
 
 export function createAgentRequest(
   state: AgentCommsState,
-  input: Pick<AgentIdentity, "handle" | "displayName" | "machineScope">,
+  input: Pick<AgentIdentity, "handle" | "displayName" | "machineScope" | "domainId">,
 ): AgentCommsState {
   if (state.agents.some((agent) => agent.handle === input.handle)) {
     throw new Error(`Agent handle already exists: ${input.handle}`);
@@ -190,6 +217,7 @@ export function createAgentRequest(
         id: id("agent"),
         status: "pending",
         requestedAt: now(),
+        domainId: input.domainId ?? "general",
         ...input,
       },
     ],
@@ -280,13 +308,16 @@ export function createDirectConversation(
   state: AgentCommsState,
   agentA: string,
   agentB: string,
+  additionalAgentIds: string[] = [],
 ): AgentCommsState {
-  const sorted = [agentA, agentB].sort() as [string, string];
+  const sorted = Array.from(new Set([agentA, agentB, ...additionalAgentIds].filter(Boolean))).sort();
+  if (sorted.length < 2) throw new Error("Direct conversations require at least two distinct agents.");
+  const isPair = sorted.length === 2;
   if (
     state.directConversations.some(
       (conversation) =>
-        conversation.participantAgentIds[0] === sorted[0] &&
-        conversation.participantAgentIds[1] === sorted[1],
+        conversation.participantAgentIds.length === sorted.length &&
+        conversation.participantAgentIds.every((participant, index) => participant === sorted[index]),
     )
   ) {
     return state;
@@ -296,9 +327,22 @@ export function createDirectConversation(
     ...state,
     directConversations: [
       ...state.directConversations,
-      { id: id("dm"), participantAgentIds: sorted, breakpointMessageIds: {} },
+      { id: id(isPair ? "dm" : "group"), participantAgentIds: sorted, breakpointMessageIds: {} },
     ],
   };
+}
+
+export function domainCapabilities(
+  config: Pick<DomainWorkspaceConfig, "domains" | "defaultDomainId" | "writePolicy">,
+  homeDomainId: string | undefined,
+  domainId: string,
+): DomainCapabilities {
+  const home = homeDomainId ?? config.defaultDomainId;
+  const write = config.domains.some((domain) => domain.id === domainId)
+    && (config.writePolicy === "all"
+    || domainId === home
+    || (config.writePolicy === "home_and_default" && domainId === config.defaultDomainId));
+  return { read: true, write };
 }
 
 export function addDirectMessage(

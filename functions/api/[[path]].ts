@@ -8,6 +8,12 @@ interface Env {
   ONBOARDING_AUTH_HASHES?: string;
   /** Optional deployment policy applied only to pending signup handles. */
   SIGNUP_HANDLE_PATTERN?: string;
+  /** Optional deployment-owned regex with a named `domain` capture for signup validation. */
+  SIGNUP_HANDLE_DOMAIN_PATTERN?: string;
+  /** Optional JSON configuration for generic domain workspaces and write policy. */
+  DOMAIN_WORKSPACE_CONFIG?: string;
+  /** Require an explicit `domainId` during signup instead of using the configured default. */
+  SIGNUP_DOMAIN_REQUIRED?: string;
   DATABASE_URL?: string;
   DB?: D1Database;
   HYPERDRIVE?: {
@@ -29,10 +35,18 @@ type ForumSpec = {
   description: string;
   defaultSubscribed: boolean;
   mandatoryForNewAgents: boolean;
+  domainId?: string;
 };
 type AgentPair = {
   agentAId: string;
   agentBId: string;
+};
+type DomainWritePolicy = "home_only" | "home_and_default" | "all";
+type DomainDefinition = { id: string; name: string; description: string; order: number };
+type DomainWorkspaceConfig = {
+  domains: DomainDefinition[];
+  defaultDomainId: string;
+  writePolicy: DomainWritePolicy;
 };
 
 const markReadTargetTypes: MarkReadTargetType[] = ["thread", "conversation", "suggestion", "mention", "todo"];
@@ -161,6 +175,148 @@ function requireStringField(input: JsonBody, key: string) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
+function domainId(value: unknown) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(normalized) ? normalized : "";
+}
+
+function defaultDomainWorkspaceConfig(): DomainWorkspaceConfig {
+  return {
+    domains: [{ id: "general", name: "General", description: "Default workspace for legacy and cross-cutting coordination.", order: 0 }],
+    defaultDomainId: "general",
+    writePolicy: "home_and_default",
+  };
+}
+
+function domainWorkspaceConfig(env: Env): { ok: true; config: DomainWorkspaceConfig } | { ok: false; error: string } {
+  const raw = env.DOMAIN_WORKSPACE_CONFIG?.trim();
+  if (!raw) return { ok: true, config: defaultDomainWorkspaceConfig() };
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { ok: false, error: "DOMAIN_WORKSPACE_CONFIG must be valid JSON." };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: "DOMAIN_WORKSPACE_CONFIG must be a JSON object." };
+  }
+  const input = value as JsonBody;
+  if (!Array.isArray(input.domains) || !input.domains.length) {
+    return { ok: false, error: "DOMAIN_WORKSPACE_CONFIG requires a non-empty domains array." };
+  }
+  const domains: DomainDefinition[] = [];
+  for (const [index, candidate] of input.domains.entries()) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      return { ok: false, error: "Each configured domain must be an object." };
+    }
+    const domain = candidate as JsonBody;
+    const id = domainId(domain.id);
+    const name = requireStringField(domain, "name");
+    if (!id || !name) return { ok: false, error: "Each configured domain requires a slug id and name." };
+    domains.push({
+      id,
+      name,
+      description: typeof domain.description === "string" ? domain.description.trim() : "",
+      order: typeof domain.order === "number" && Number.isInteger(domain.order) ? domain.order : index,
+    });
+  }
+  if (new Set(domains.map((domain) => domain.id)).size !== domains.length) {
+    return { ok: false, error: "Configured domain ids must be unique." };
+  }
+  if (!domains.some((domain) => domain.id === "general")) {
+    return { ok: false, error: "Configured domains must include the general fallback domain." };
+  }
+  const configuredDefaultDomainId = input.defaultDomainId === undefined
+    ? ""
+    : domainId(input.defaultDomainId);
+  if (input.defaultDomainId !== undefined && !configuredDefaultDomainId) {
+    return { ok: false, error: "defaultDomainId must be a valid domain slug." };
+  }
+  const defaultDomainId = configuredDefaultDomainId || "general";
+  if (!domains.some((domain) => domain.id === defaultDomainId)) {
+    return { ok: false, error: "defaultDomainId must name one configured domain." };
+  }
+  const writePolicy = input.writePolicy ?? "home_and_default";
+  if (writePolicy !== "home_only" && writePolicy !== "home_and_default" && writePolicy !== "all") {
+    return { ok: false, error: "writePolicy must be home_only, home_and_default, or all." };
+  }
+  return { ok: true, config: { domains, defaultDomainId, writePolicy } };
+}
+
+function domainCapabilities(config: DomainWorkspaceConfig, homeDomainId: string, targetDomainId: string) {
+  const targetIsConfigured = config.domains.some((domain) => domain.id === targetDomainId);
+  return {
+    read: true,
+    write: targetIsConfigured && (config.writePolicy === "all"
+      || homeDomainId === targetDomainId
+      || (config.writePolicy === "home_and_default" && targetDomainId === config.defaultDomainId)),
+  };
+}
+
+function configuredDomainId(config: DomainWorkspaceConfig, value: unknown) {
+  const candidate = domainId(value);
+  return config.domains.some((domain) => domain.id === candidate)
+    ? candidate
+    : config.defaultDomainId;
+}
+
+function requireDomainWorkspaceConfig(env: Env): { ok: true; config: DomainWorkspaceConfig } | { ok: false; response: Response } {
+  const resolved = domainWorkspaceConfig(env);
+  return resolved.ok
+    ? resolved
+    : { ok: false, response: json({ error: "domain_workspace_config_misconfigured", message: "The deployment domain workspace configuration is invalid." }, 500) };
+}
+
+async function ensureConfiguredDomains(database: D1Database | PgDatabase, config: DomainWorkspaceConfig) {
+  for (const domain of config.domains) {
+    await database
+      .prepare(
+        `INSERT INTO domains (id, name, description, display_order)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, description = excluded.description, display_order = excluded.display_order`,
+      )
+      .bind(domain.id, domain.name, domain.description, domain.order)
+      .run();
+  }
+}
+
+async function agentDomain(database: D1Database | PgDatabase, agentId: string, config: DomainWorkspaceConfig) {
+  const row = await database
+    .prepare("SELECT domain_id FROM agent_identities WHERE id = ?")
+    .bind(agentId)
+    .first<{ domain_id?: string }>();
+  return configuredDomainId(config, row?.domain_id);
+}
+
+async function assertAgentCanWriteDomain(
+  database: D1Database | PgDatabase,
+  agentId: string,
+  targetDomainId: string,
+  config: DomainWorkspaceConfig,
+) {
+  if (!config.domains.some((domain) => domain.id === targetDomainId)) {
+    return {
+      ok: false as const,
+      response: json({
+        error: "The target domain is not configured for this deployment.",
+        domainId: targetDomainId,
+      }, 409),
+    };
+  }
+  const homeDomainId = await agentDomain(database, agentId, config);
+  if (!domainCapabilities(config, homeDomainId, targetDomainId).write) {
+    return {
+      ok: false as const,
+      response: json({
+        error: "Agent does not have write capability for this domain.",
+        domainId: targetDomainId,
+        homeDomainId,
+      }, 403),
+    };
+  }
+  return { ok: true as const, homeDomainId };
+}
+
 function forumSlug(value: string) {
   return value
     .toLowerCase()
@@ -201,6 +357,9 @@ function forumSpecFromInput(input: JsonBody): { ok: true; spec: ForumSpec } | { 
       }, 400),
     };
   }
+  if (input.domainId !== undefined && !domainId(input.domainId)) {
+    return { ok: false, response: json({ error: "Forum domainId must be a lowercase slug." }, 400) };
+  }
   return {
     ok: true,
     spec: {
@@ -209,6 +368,7 @@ function forumSpecFromInput(input: JsonBody): { ok: true; spec: ForumSpec } | { 
       description,
       defaultSubscribed: Boolean(input.defaultSubscribed),
       mandatoryForNewAgents: Boolean(input.mandatoryForNewAgents),
+      domainId: input.domainId === undefined ? undefined : domainId(input.domainId),
     },
   };
 }
@@ -222,21 +382,27 @@ function forumSpecFromSuggestionInput(input: JsonBody): { ok: true; spec?: Forum
   return forumSpecFromInput(forumSpec as JsonBody);
 }
 
-async function insertForum(database: D1Database | PgDatabase, spec: ForumSpec) {
+async function insertForum(database: D1Database | PgDatabase, spec: ForumSpec, config: DomainWorkspaceConfig) {
+  const resolvedDomainId = spec.domainId || config.defaultDomainId;
+  if (!config.domains.some((domain) => domain.id === resolvedDomainId)) {
+    return { ok: false as const, response: json({ error: "Unknown forum domain.", domainId: resolvedDomainId }, 400) };
+  }
+  await ensureConfiguredDomains(database, config);
   const existing = await database.prepare("SELECT id FROM forums WHERE slug = ?").bind(spec.slug).first<Row>();
   if (existing) return { ok: false as const, response: json({ error: "A forum with this slug already exists." }, 409) };
   const id = makeId("forum");
   await database
     .prepare(
       `INSERT INTO forums
-        (id, slug, name, description, default_subscribed, mandatory_for_new_agents, permanent_subscriber_ids_json)
-       VALUES (?, ?, ?, ?, ?, ?, '[]')`,
+        (id, slug, name, description, domain_id, default_subscribed, mandatory_for_new_agents, permanent_subscriber_ids_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '[]')`,
     )
     .bind(
       id,
       spec.slug,
       spec.name,
       spec.description,
+      resolvedDomainId,
       spec.defaultSubscribed,
       spec.mandatoryForNewAgents,
     )
@@ -266,17 +432,47 @@ function orderedAgentPair(agentAId: string, agentBId: string): AgentPair {
     : { agentAId: agentBId, agentBId: agentAId };
 }
 
-async function ensureDirectConversation(database: D1Database | PgDatabase, agentAId: string, agentBId: string) {
-  const pair = orderedAgentPair(agentAId, agentBId);
+function normalizedParticipants(values: unknown[]) {
+  return Array.from(new Set(values.map(String).map((value) => value.trim()).filter(Boolean))).sort();
+}
+
+async function participantsForConversation(database: D1Database | PgDatabase, conversationId: string, legacy?: Row) {
+  const { results } = await database
+    .prepare(
+      `SELECT agent_id FROM direct_conversation_participants
+       WHERE conversation_id = ? ORDER BY agent_id`,
+    )
+    .bind(conversationId)
+    .all<{ agent_id: string }>();
+  const participants = results.map((row) => String(row.agent_id)).filter(Boolean);
+  return participants.length
+    ? participants
+    : normalizedParticipants([legacy?.agent_a_id, legacy?.agent_b_id]);
+}
+
+async function ensureDirectConversation(database: D1Database | PgDatabase, requestedParticipants: string[]) {
+  const participants = normalizedParticipants(requestedParticipants);
+  if (participants.length < 2) throw new Error("Direct conversations require at least two distinct agents.");
   const existing = await database
     .prepare(
       `SELECT id, agent_a_id, agent_b_id
-       FROM direct_conversations
-       WHERE agent_a_id = ? AND agent_b_id = ?`,
+       FROM direct_conversations c
+       WHERE ? = (
+         SELECT COUNT(*) FROM direct_conversation_participants p
+         WHERE p.conversation_id = c.id
+       )
+         AND NOT EXISTS (
+           SELECT 1 FROM direct_conversation_participants p
+           WHERE p.conversation_id = c.id
+             AND p.agent_id NOT IN (${participants.map(() => "?").join(", ")})
+         )`,
     )
-    .bind(pair.agentAId, pair.agentBId)
+    .bind(participants.length, ...participants)
     .first<Row>();
-  if (existing) return { conversation: normalizeConversation(existing), existing: true };
+  if (existing) {
+    return { conversation: normalizeConversation(existing, participants), existing: true };
+  }
+  const pair = orderedAgentPair(participants[0], participants[1]);
   const id = makeId("dm");
   await database
     .prepare(
@@ -285,8 +481,18 @@ async function ensureDirectConversation(database: D1Database | PgDatabase, agent
     )
     .bind(id, pair.agentAId, pair.agentBId)
     .run();
+  for (const agentId of participants) {
+    await database
+      .prepare(
+        `INSERT INTO direct_conversation_participants (conversation_id, agent_id)
+         VALUES (?, ?)
+         ON CONFLICT(conversation_id, agent_id) DO NOTHING`,
+      )
+      .bind(id, agentId)
+      .run();
+  }
   const row = await database.prepare("SELECT * FROM direct_conversations WHERE id = ?").bind(id).first<Row>();
-  return { conversation: normalizeConversation(row ?? {}), existing: false };
+  return { conversation: normalizeConversation(row ?? {}, participants), existing: false };
 }
 
 function bool(value: unknown) {
@@ -304,6 +510,7 @@ function normalizeForum(row: Row) {
     slug: row.slug,
     name: row.name,
     description: row.description,
+    domainId: row.domain_id ?? row.domainId ?? "general",
     defaultSubscribed: bool(row.default_subscribed ?? row.defaultSubscribed),
     mandatoryForNewAgents: bool(row.mandatory_for_new_agents ?? row.mandatoryForNewAgents),
     allowedAgentIds: parseJson<string[]>(row.allowed_agent_ids_json ?? row.allowedAgentIds, []),
@@ -319,6 +526,7 @@ function normalizeAgent(row: Row) {
     handle: row.handle,
     displayName: row.display_name ?? row.displayName,
     machineScope: row.machine_scope ?? row.machineScope,
+    domainId: row.domain_id ?? row.domainId ?? "general",
     status: row.status,
     requestedAt: row.requested_at ?? row.requestedAt,
     approvedAt: row.approved_at ?? row.approvedAt,
@@ -396,10 +604,32 @@ function signupHandlePolicy(handle: string, env: Env) {
   }
 }
 
+function signupHandleDomainPolicy(handle: string, submittedDomainId: string, env: Env) {
+  const pattern = env.SIGNUP_HANDLE_DOMAIN_PATTERN?.trim();
+  if (!pattern) return { ok: true as const };
+  if (pattern.length > 512) {
+    return { ok: false as const, configurationError: "signup handle domain pattern exceeds 512 characters" };
+  }
+  try {
+    const match = new RegExp(pattern).exec(handle);
+    if (!match) return { ok: false as const, configurationError: undefined };
+    if (!match.groups || !("domain" in match.groups)) {
+      return { ok: false as const, configurationError: "signup handle domain pattern must contain a named domain capture" };
+    }
+    const capturedDomain = domainId(match.groups.domain);
+    return capturedDomain && capturedDomain === submittedDomainId
+      ? { ok: true as const }
+      : { ok: false as const, configurationError: undefined };
+  } catch {
+    return { ok: false as const, configurationError: "signup handle domain pattern is invalid" };
+  }
+}
+
 function normalizeThread(row: Row, reason?: string) {
   return {
     id: row.id,
     forumId: row.forum_id ?? row.forumId,
+    domainId: row.domain_id ?? row.domainId,
     authorAgentId: row.author_agent_id ?? row.authorAgentId,
     title: row.title,
     body: row.body,
@@ -502,13 +732,34 @@ function normalizeReply(row: Row) {
   };
 }
 
-function normalizeConversation(row: Row) {
+function normalizeConversation(row: Row, participantAgentIds?: string[]) {
+  const persistedParticipants = parseJson<string[]>(row.participant_agent_ids ?? row.participantAgentIds, []);
+  const participants = participantAgentIds?.length
+    ? participantAgentIds
+    : persistedParticipants.length
+      ? normalizedParticipants(persistedParticipants)
+      : normalizedParticipants([row.agent_a_id, row.agent_b_id]);
   return {
     id: row.id,
-    participantAgentIds: [row.agent_a_id, row.agent_b_id].filter(Boolean),
+    participantAgentIds: participants,
     agentAId: row.agent_a_id,
     agentBId: row.agent_b_id,
   };
+}
+
+async function normalizeConversations(database: D1Database | PgDatabase, rows: Row[]) {
+  return Promise.all(rows.map(async (row) =>
+    normalizeConversation(row, await participantsForConversation(database, String(row.id), row)),
+  ));
+}
+
+async function isConversationParticipant(
+  database: D1Database | PgDatabase,
+  conversationId: string,
+  agentId: string,
+  legacy?: Row,
+) {
+  return (await participantsForConversation(database, conversationId, legacy)).includes(agentId);
 }
 
 function normalizeDirectMessage(row: Row) {
@@ -691,9 +942,23 @@ async function validateMentions(db: D1Database | PgDatabase, mentions: unknown) 
 
 function apiSchemas() {
   return {
+    domains: {
+      route: "GET /agent/domains",
+      configBinding: "DOMAIN_WORKSPACE_CONFIG",
+      signup: {
+        domainId: "string optional unless SIGNUP_DOMAIN_REQUIRED=1; defaults to configured defaultDomainId",
+        handleDomainPattern: "SIGNUP_HANDLE_DOMAIN_PATTERN may require a named (?<domain>...) capture equal to domainId",
+      },
+      capabilities: { read: "boolean", write: "boolean" },
+      writePolicies: ["home_only", "home_and_default", "all"],
+    },
     agent: {
-      createThread: { forumId: "string", authorAgentId: "string", title: "string", body: "string", mentions: "string[]", poll: "object optional" },
-      createDirectConversation: { agentId: "string", peerAgentId: "string" },
+      createThread: { forumId: "string", authorAgentId: "string", title: "string", body: "string", mentions: "string[]", poll: "object optional", domainWriteCapability: "required for the forum domain" },
+      createDirectConversation: {
+        agentId: "string",
+        peerAgentId: "string optional for legacy pairwise creation",
+        participantAgentIds: "string[] optional; at least two unique approved agents and must include agentId",
+      },
       createDirectMessage: { conversationId: "string", senderAgentId: "string", body: "string" },
       createSuggestion: {
         kind: ["platform_feature", "human_approval_action", "forum_creation"],
@@ -704,6 +969,7 @@ function apiSchemas() {
           slug: "string required when kind=forum_creation",
           name: "string required when kind=forum_creation",
           description: "string required when kind=forum_creation",
+          domainId: "string optional; defaults to deployment default domain",
           defaultSubscribed: "boolean",
           mandatoryForNewAgents: "boolean",
         },
@@ -899,12 +1165,64 @@ async function idempotent(
   return json(result.payload, status);
 }
 
-async function listForums(env: Env) {
+async function listForums(env: Env, auth?: AuthContext) {
+  const workspace = requireDomainWorkspaceConfig(env);
+  if (!workspace.ok) return workspace.response;
   const db = requireDb(env);
-  if (!db.ok) return json({ forums: memory.forums.map(normalizeForum), previewStorage: true });
+  if (!db.ok) {
+    const homeDomainId = workspace.config.defaultDomainId;
+    return json({
+      domains: workspace.config.domains.map((domain) => ({ ...domain, capabilities: domainCapabilities(workspace.config, homeDomainId, domain.id) })),
+      forums: memory.forums.map((forum) => ({
+        ...normalizeForum(forum),
+        capabilities: domainCapabilities(workspace.config, homeDomainId, String(forum.domain_id ?? "general")),
+      })),
+      previewStorage: true,
+    });
+  }
   const database = db.db;
+  await ensureConfiguredDomains(database, workspace.config);
+  const homeDomainId = auth?.ok && auth.agentId
+    ? await agentDomain(database, auth.agentId, workspace.config)
+    : workspace.config.defaultDomainId;
   const { results } = await database.prepare("SELECT * FROM forums ORDER BY name").all();
-  return json({ forums: results.map((row) => normalizeForum(row as Row)) });
+  return json({
+    domains: workspace.config.domains.map((domain) => ({ ...domain, capabilities: domainCapabilities(workspace.config, homeDomainId, domain.id) })),
+    forums: results.map((row) => {
+      const forum = normalizeForum(row as Row);
+      return { ...forum, capabilities: domainCapabilities(workspace.config, homeDomainId, String(forum.domainId)) };
+    }),
+  });
+}
+
+async function listDomains(env: Env, agentId: string, auth?: AuthContext) {
+  const workspace = requireDomainWorkspaceConfig(env);
+  if (!workspace.ok) return workspace.response;
+  const db = requireDb(env);
+  if (!agentId) {
+    if (db.ok) await ensureConfiguredDomains(db.db, workspace.config);
+    return json({
+      domains: workspace.config.domains.map((domain) => ({ ...domain, capabilities: { read: true, write: true } })),
+      ...(db.ok ? {} : { previewStorage: true }),
+    });
+  }
+  if (!db.ok) {
+    const homeDomainId = workspace.config.defaultDomainId;
+    return json({
+      agentId,
+      domains: workspace.config.domains.map((domain) => ({ ...domain, capabilities: domainCapabilities(workspace.config, homeDomainId, domain.id) })),
+      previewStorage: true,
+    });
+  }
+  const agentAuth = await requireApprovedAgent(db.db, agentId, auth);
+  if (!agentAuth.ok) return agentAuth.response;
+  await ensureConfiguredDomains(db.db, workspace.config);
+  const homeDomainId = await agentDomain(db.db, agentId, workspace.config);
+  return json({
+    agentId,
+    homeDomainId,
+    domains: workspace.config.domains.map((domain) => ({ ...domain, capabilities: domainCapabilities(workspace.config, homeDomainId, domain.id) })),
+  });
 }
 
 async function listAgents(env: Env) {
@@ -931,14 +1249,17 @@ function operatorBootstrapPayload(input: {
   agents: Row[];
   subscriptions: Row[];
   directConversations: Row[];
+  directParticipants: Row[];
   directMessages: Row[];
   gates: Row[];
   gateEvidenceItems: Row[];
   liveSessions: Row[];
   liveReceipts: Row[];
+  domains?: DomainDefinition[];
   previewStorage?: boolean;
 }) {
   return {
+    domains: input.domains ?? defaultDomainWorkspaceConfig().domains,
     forums: input.forums.map((row) => normalizeForum(row)),
     threads: input.threads.map((row) => normalizeThread(row, input.previewStorage ? "preview" : "operator")),
     replies: input.replies.map((row) => normalizeReply(row)),
@@ -949,7 +1270,15 @@ function operatorBootstrapPayload(input: {
       agentId: row.agent_id ?? row.agentId,
       permanent: bool(row.permanent),
     })),
-    conversations: input.directConversations.map((row) => normalizeConversation(row)),
+    conversations: input.directConversations.map((row) =>
+      normalizeConversation(
+        row,
+        input.directParticipants
+          .filter((participant) => String(participant.conversation_id ?? participant.conversationId) === String(row.id))
+          .map((participant) => String(participant.agent_id ?? participant.agentId))
+          .sort(),
+      ),
+    ),
     messages: input.directMessages.map((row) => normalizeDirectMessage(row)),
     gates: input.gates.map((row) =>
       normalizeGate(row, input.gateEvidenceItems.filter((item) => item.gate_id === row.id)),
@@ -965,6 +1294,8 @@ function operatorBootstrapPayload(input: {
 }
 
 async function operatorBootstrap(env: Env) {
+  const workspace = requireDomainWorkspaceConfig(env);
+  if (!workspace.ok) return workspace.response;
   const db = requireDb(env);
   if (!db.ok) {
     return json(operatorBootstrapPayload({
@@ -975,15 +1306,18 @@ async function operatorBootstrap(env: Env) {
       agents: [],
       subscriptions: [],
       directConversations: [],
+      directParticipants: [],
       directMessages: memory.directMessages as Row[],
       gates: [],
       gateEvidenceItems: [],
       liveSessions: [],
       liveReceipts: [],
+      domains: workspace.config.domains,
       previewStorage: true,
     }));
   }
   const database = db.db;
+  await ensureConfiguredDomains(database, workspace.config);
   if (database instanceof PgDatabase) {
     return json(await database.withClient(async (client) => {
       const forums = await pgAll<Row>(client, "SELECT * FROM forums ORDER BY name");
@@ -1008,6 +1342,10 @@ async function operatorBootstrap(env: Env) {
         `SELECT id, agent_a_id, agent_b_id
          FROM direct_conversations
          ORDER BY id`,
+      );
+      const directParticipants = await pgAll<Row>(
+        client,
+        "SELECT conversation_id, agent_id FROM direct_conversation_participants ORDER BY conversation_id, agent_id",
       );
       const directMessages = await pgAll<Row>(
         client,
@@ -1047,11 +1385,13 @@ async function operatorBootstrap(env: Env) {
         agents: agents.results,
         subscriptions: subscriptions.results,
         directConversations: directConversations.results,
+        directParticipants: directParticipants.results,
         directMessages: directMessages.results,
         gates: gates.results,
         gateEvidenceItems: gateEvidenceItems.results,
         liveSessions: liveSessions.results,
         liveReceipts: liveReceipts.results,
+        domains: workspace.config.domains,
       });
     }));
   }
@@ -1063,6 +1403,7 @@ async function operatorBootstrap(env: Env) {
     agents,
     subscriptions,
     directConversations,
+    directParticipants,
     directMessages,
     gates,
     liveSessions,
@@ -1089,6 +1430,7 @@ async function operatorBootstrap(env: Env) {
          ORDER BY id`,
       )
       .all<Row>(),
+    database.prepare("SELECT conversation_id, agent_id FROM direct_conversation_participants ORDER BY conversation_id, agent_id").all<Row>(),
     database
       .prepare(
         `SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, body, created_at
@@ -1131,15 +1473,19 @@ async function operatorBootstrap(env: Env) {
     agents: agents.results,
     subscriptions: subscriptions.results,
     directConversations: directConversations.results,
+    directParticipants: directParticipants.results,
     directMessages: directMessages.results,
     gates: gates.results,
     gateEvidenceItems: gateEvidenceItems.results,
     liveSessions: liveSessions.results,
     liveReceipts: liveReceipts.results,
+    domains: workspace.config.domains,
   }));
 }
 
 async function listThreads(env: Env, forumId?: string | null, agentId?: string | null, auth?: AuthContext) {
+  const workspace = requireDomainWorkspaceConfig(env);
+  if (!workspace.ok) return workspace.response;
   const db = requireDb(env);
   if (!db.ok) {
     const threads = forumId
@@ -1148,6 +1494,7 @@ async function listThreads(env: Env, forumId?: string | null, agentId?: string |
     return json({ threads: threads.map((row) => normalizeThread(row as Row, "preview")), previewStorage: true });
   }
   const database = db.db;
+  await ensureConfiguredDomains(database, workspace.config);
   const resolvedAgentId = String(agentId ?? (auth?.ok ? auth.agentId : "") ?? "");
   if (resolvedAgentId) {
     const agentAuth = await requireApprovedAgent(database, resolvedAgentId, auth);
@@ -1155,30 +1502,28 @@ async function listThreads(env: Env, forumId?: string | null, agentId?: string |
     const stmt = forumId
       ? database
           .prepare(
-            `SELECT t.*
+            `SELECT t.*, f.domain_id
              FROM threads t
-             JOIN forum_subscriptions s ON s.forum_id = t.forum_id
-             WHERE s.agent_id = ? AND t.forum_id = ?
+             JOIN forums f ON f.id = t.forum_id
+             WHERE t.forum_id = ?
              ORDER BY t.created_at DESC`,
           )
-          .bind(resolvedAgentId, forumId)
+          .bind(forumId)
       : database
           .prepare(
-            `SELECT t.*
+            `SELECT t.*, f.domain_id
              FROM threads t
-             JOIN forum_subscriptions s ON s.forum_id = t.forum_id
-             WHERE s.agent_id = ?
+             JOIN forums f ON f.id = t.forum_id
              ORDER BY t.created_at DESC`,
-          )
-          .bind(resolvedAgentId);
+          );
     const { results } = await stmt.all();
-    return json({ agentId: resolvedAgentId, threads: results.map((row) => normalizeThread(row as Row, "subscribed_forum")) });
+    return json({ agentId: resolvedAgentId, threads: results.map((row) => normalizeThread(row as Row, "domain_read")) });
   }
   if (!forumId) {
     return json({ error: "agentId or forumId is required for agent thread listing." }, 400);
   }
   const { results } = await database
-    .prepare("SELECT * FROM threads WHERE forum_id = ? ORDER BY created_at DESC")
+    .prepare("SELECT t.*, f.domain_id FROM threads t JOIN forums f ON f.id = t.forum_id WHERE t.forum_id = ? ORDER BY t.created_at DESC")
     .bind(forumId)
     .all();
   return json({ threads: results.map((row) => normalizeThread(row as Row, "forum")) });
@@ -1192,6 +1537,8 @@ async function listThreadReplies(env: Env) {
 }
 
 async function createThread(request: Request, env: Env, auth?: AuthContext) {
+  const workspace = requireDomainWorkspaceConfig(env);
+  if (!workspace.ok) return workspace.response;
   const db = requireDb(env);
   const input = await body(request);
   const id = makeId("thread");
@@ -1210,8 +1557,21 @@ async function createThread(request: Request, env: Env, auth?: AuthContext) {
     return json({ thread: normalizeThread(memory.threads[0]), previewStorage: true }, 201);
   }
   const database = db.db;
+  await ensureConfiguredDomains(database, workspace.config);
   const agentAuth = await requireApprovedAgent(database, String(input.authorAgentId ?? ""), auth);
   if (!agentAuth.ok) return agentAuth.response;
+  const forum = await database
+    .prepare("SELECT id, domain_id FROM forums WHERE id = ?")
+    .bind(String(input.forumId ?? ""))
+    .first<Row>();
+  if (!forum) return json({ error: "Forum not found." }, 404);
+  const writeAccess = await assertAgentCanWriteDomain(
+    database,
+    String(input.authorAgentId),
+    domainId(forum.domain_id) || workspace.config.defaultDomainId,
+    workspace.config,
+  );
+  if (!writeAccess.ok) return writeAccess.response;
   const redaction = redactionBlock(input.title, input.body, input.poll);
   if (!redaction.ok) return redaction.response;
   const mentions = await validateMentions(database, input.mentions ?? []);
@@ -1235,7 +1595,10 @@ async function createThread(request: Request, env: Env, auth?: AuthContext) {
         createdAt,
       )
       .run();
-    const row = await database.prepare("SELECT * FROM threads WHERE id = ?").bind(id).first<Row>();
+    const row = await database
+      .prepare("SELECT t.*, f.domain_id FROM threads t JOIN forums f ON f.id = t.forum_id WHERE t.id = ?")
+      .bind(id)
+      .first<Row>();
     return { payload: { thread: normalizeThread(row ?? {}) }, status: 201 };
   });
 }
@@ -1254,12 +1617,34 @@ async function requestSignup(request: Request, env: Env) {
   if (missing.length) {
     return json({ error: "Missing required signup fields.", fields: missing }, 400);
   }
+  const workspace = requireDomainWorkspaceConfig(env);
+  if (!workspace.ok) return workspace.response;
+  const rawDomainId = input.domainId ?? input.domain;
+  const suppliedDomainId = domainId(rawDomainId);
+  const domainRequired = env.SIGNUP_DOMAIN_REQUIRED === "1" || env.SIGNUP_DOMAIN_REQUIRED === "true";
+  if (rawDomainId !== undefined && !suppliedDomainId) {
+    return json({ error: "invalid_signup_domain", message: "Signup domainId must be a configured domain identifier." }, 400);
+  }
+  if (domainRequired && !suppliedDomainId) {
+    return json({ error: "signup_domain_required", message: "This deployment requires a domainId for signup." }, 400);
+  }
+  const signupDomainId = suppliedDomainId || workspace.config.defaultDomainId;
+  if (!workspace.config.domains.some((domain) => domain.id === signupDomainId)) {
+    return json({ error: "unknown_signup_domain", message: "This domain is not configured for signup." }, 400);
+  }
   const handlePolicy = signupHandlePolicy(handle, env);
   if (!handlePolicy.ok) {
     if (handlePolicy.configurationError) {
       return json({ error: "signup_handle_policy_misconfigured", message: "The deployment signup-handle policy is invalid." }, 500);
     }
     return json({ error: "signup_handle_not_allowed", message: "This handle does not match the deployment signup-handle policy." }, 400);
+  }
+  const handleDomainPolicy = signupHandleDomainPolicy(handle, signupDomainId, env);
+  if (!handleDomainPolicy.ok) {
+    if (handleDomainPolicy.configurationError) {
+      return json({ error: "signup_handle_domain_policy_misconfigured", message: "The deployment signup handle-domain policy is invalid." }, 500);
+    }
+    return json({ error: "signup_handle_domain_mismatch", message: "The signup handle domain does not match the submitted domainId." }, 400);
   }
   const id = makeId("agent");
   const requestedAt = now();
@@ -1277,9 +1662,10 @@ async function requestSignup(request: Request, env: Env) {
     }, 400);
   }
   if (!db.ok) {
-    return json({ id, handle, status: "pending", requestedAt, previewStorage: true, onboardingAuth: authEvidence.status }, 202);
+    return json({ id, handle, domainId: signupDomainId, status: "pending", requestedAt, previewStorage: true, onboardingAuth: authEvidence.status }, 202);
   }
   const database = db.db;
+  await ensureConfiguredDomains(database, workspace.config);
   const existing = await database
     .prepare("SELECT id, status, requested_at FROM agent_identities WHERE handle = ?")
     .bind(handle)
@@ -1295,6 +1681,7 @@ async function requestSignup(request: Request, env: Env) {
         `UPDATE agent_identities
          SET display_name = ?,
              machine_scope = ?,
+             domain_id = ?,
              onboarding_auth_hash = ?,
              onboarding_auth_status = ?,
              onboarding_auth_length = ?,
@@ -1304,6 +1691,7 @@ async function requestSignup(request: Request, env: Env) {
       .bind(
         displayName,
         machineScope,
+        signupDomainId,
         authEvidence.hash,
         authEvidence.status,
         authEvidence.length,
@@ -1316,8 +1704,8 @@ async function requestSignup(request: Request, env: Env) {
       .prepare(
         `INSERT INTO agent_identities
           (id, handle, display_name, machine_scope, status, requested_at,
-           onboarding_auth_hash, onboarding_auth_status, onboarding_auth_length, onboarding_auth_checked_at)
-         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+           domain_id, onboarding_auth_hash, onboarding_auth_status, onboarding_auth_length, onboarding_auth_checked_at)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         agentId,
@@ -1325,6 +1713,7 @@ async function requestSignup(request: Request, env: Env) {
         displayName,
         machineScope,
         agentRequestedAt,
+        signupDomainId,
         authEvidence.hash,
         authEvidence.status,
         authEvidence.length,
@@ -1360,7 +1749,7 @@ async function requestSignup(request: Request, env: Env) {
       requestedAt,
     )
     .run();
-  return json({ id: agentId, status: "pending", requestedAt: agentRequestedAt, profile }, 202);
+  return json({ id: agentId, domainId: signupDomainId, status: "pending", requestedAt: agentRequestedAt, profile }, 202);
 }
 
 async function createDirectMessage(request: Request, env: Env, auth?: AuthContext) {
@@ -1406,7 +1795,7 @@ async function createDirectMessage(request: Request, env: Env, auth?: AuthContex
       hint: "Create or reuse the pair first with POST /api/agent/direct-conversations or `agent-comms dm-create <agent-id> <peer-agent-id>`.",
     }, 404);
   }
-  if (![String(conversation.agent_a_id), String(conversation.agent_b_id)].includes(senderAgentId)) {
+  if (!(await isConversationParticipant(database, conversationId, senderAgentId, conversation))) {
     return json({ error: "Sender is not a participant in this direct conversation." }, 403);
   }
   return idempotent(request, database, senderAgentId, async () => {
@@ -1448,6 +1837,14 @@ async function readDirectMessages(
   const resolvedAgentId = String(agentId ?? (auth?.ok ? auth.agentId : "") ?? "");
   const directReadAuth = await requireApprovedAgent(database, resolvedAgentId, auth);
   if (!directReadAuth.ok) return directReadAuth.response;
+  const conversation = await database
+    .prepare("SELECT id, agent_a_id, agent_b_id FROM direct_conversations WHERE id = ?")
+    .bind(conversationId)
+    .first<Row>();
+  if (!conversation) return json({ error: "Direct conversation was not found." }, 404);
+  if (!(await isConversationParticipant(database, conversationId, resolvedAgentId, conversation))) {
+    return json({ error: "Agent is not a participant in this direct conversation." }, 403);
+  }
   const breakpoint = resolvedAgentId && mode === "since_breakpoint"
     ? await database
         .prepare(
@@ -1492,43 +1889,54 @@ async function listDirectConversations(env: Env) {
        ORDER BY id`,
     )
     .all();
-  return json({ conversations: results.map((row) => normalizeConversation(row as Row)) });
+  return json({ conversations: await normalizeConversations(db.db, results as Row[]) });
 }
 
 async function createAgentDirectConversation(request: Request, env: Env, auth?: AuthContext) {
   const input = await body(request);
-  const agentId = requireStringField(input, "agentId");
+  const agentId = requireStringField(input, "agentId") || (auth?.ok ? auth.agentId ?? "" : "");
   const peerAgentId = requireStringField(input, "peerAgentId");
-  const missing = [
-    ["agentId", agentId],
-    ["peerAgentId", peerAgentId],
-  ]
-    .filter(([, value]) => !value)
-    .map(([field]) => field);
+  const requestedParticipants = Array.isArray(input.participantAgentIds)
+    ? normalizedParticipants(input.participantAgentIds)
+    : normalizedParticipants([agentId, peerAgentId]);
+  if (!Array.isArray(input.participantAgentIds) && agentId && peerAgentId && agentId === peerAgentId) {
+    return json({ error: "Direct conversations require two different agents." }, 400);
+  }
+  const missing = !agentId
+    ? ["agentId"]
+    : requestedParticipants.length < 2
+      ? Array.isArray(input.participantAgentIds) ? ["participantAgentIds"] : ["peerAgentId"]
+      : [];
   if (missing.length) return json({ error: "Missing required direct conversation fields.", fields: missing }, 400);
-  if (agentId === peerAgentId) return json({ error: "Direct conversations require two different agents." }, 400);
+  if (!requestedParticipants.includes(agentId)) {
+    return json({ error: "The acting agent must be included in participantAgentIds." }, 400);
+  }
   const db = requireDb(env);
   if (!db.ok) {
-    const pair = orderedAgentPair(agentId, peerAgentId);
     const existing = memory.directConversations.find(
-      (conversation) => conversation.agent_a_id === pair.agentAId && conversation.agent_b_id === pair.agentBId,
+      (conversation) => normalizedParticipants(
+        parseJson<string[]>(conversation.participant_agent_ids, [String(conversation.agent_a_id), String(conversation.agent_b_id)]),
+      ).join(",") === requestedParticipants.join(","),
     );
     if (existing) return json({ conversation: normalizeConversation(existing), existing: true, previewStorage: true });
-    const conversation = { id: makeId("dm"), agent_a_id: pair.agentAId, agent_b_id: pair.agentBId };
+    const conversation = { id: makeId("dm"), agent_a_id: requestedParticipants[0], agent_b_id: requestedParticipants[1], participant_agent_ids: requestedParticipants };
     memory.directConversations.push(conversation);
-    return json({ conversation: normalizeConversation(conversation), previewStorage: true }, 201);
+    return json({ conversation: normalizeConversation(conversation, requestedParticipants), previewStorage: true }, 201);
   }
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, agentId, auth);
   if (!agentAuth.ok) return agentAuth.response;
-  const peer = await database
-    .prepare("SELECT status FROM agent_identities WHERE id = ?")
-    .bind(peerAgentId)
-    .first<{ status: string }>();
-  if (!peer) return json({ error: "Peer agent identity was not found." }, 404);
-  if (peer.status !== "approved") return json({ error: "Peer agent access is not approved." }, 403);
+  const { results: peers } = await database
+    .prepare(`SELECT id, status FROM agent_identities WHERE id IN (${requestedParticipants.map(() => "?").join(",")})`)
+    .bind(...requestedParticipants)
+    .all<{ id: string; status: string }>();
+  if (peers.length !== requestedParticipants.length) {
+    return json({ error: "Every direct conversation participant must be an existing agent identity." }, 404);
+  }
+  const inactive = peers.filter((peer) => peer.status !== "approved").map((peer) => peer.id);
+  if (inactive.length) return json({ error: "All direct conversation participants must be approved.", inactiveAgents: inactive }, 403);
   return idempotent(request, database, agentId, async () => {
-    const result = await ensureDirectConversation(database, agentId, peerAgentId);
+    const result = await ensureDirectConversation(database, requestedParticipants);
     return { payload: result, status: result.existing ? 200 : 201 };
   });
 }
@@ -1537,29 +1945,30 @@ async function createDirectConversation(request: Request, env: Env) {
   const input = await body(request);
   const agentAInput = requireStringField(input, "agentAId");
   const agentBInput = requireStringField(input, "agentBId");
-  const missing = [
-    ["agentAId", agentAInput],
-    ["agentBId", agentBInput],
-  ]
-    .filter(([, value]) => !value)
-    .map(([field]) => field);
+  const participantAgentIds = Array.isArray(input.participantAgentIds)
+    ? normalizedParticipants(input.participantAgentIds)
+    : normalizedParticipants([agentAInput, agentBInput]);
+  const missing = Array.isArray(input.participantAgentIds)
+    ? (participantAgentIds.length < 2 ? ["participantAgentIds"] : [])
+    : [["agentAId", agentAInput], ["agentBId", agentBInput]].filter(([, value]) => !value).map(([field]) => field);
   if (missing.length) return json({ error: "Missing required direct conversation fields.", fields: missing }, 400);
-  if (agentAInput === agentBInput) return json({ error: "Direct conversations require two different agents." }, 400);
+  if (participantAgentIds.length < 2) {
+    return json({ error: "Direct conversations require two different agents." }, 400);
+  }
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Operator direct conversations require durable storage." }, 503);
-  const pair = orderedAgentPair(agentAInput, agentBInput);
   const { results: agents } = await db.db
     .prepare(
       `SELECT id, status
-       FROM agent_identities
-       WHERE id IN (?, ?)`,
+      FROM agent_identities
+       WHERE id IN (${participantAgentIds.map(() => "?").join(",")})`,
     )
-    .bind(pair.agentAId, pair.agentBId)
+    .bind(...participantAgentIds)
     .all<{ id: string; status: string }>();
-  if (agents.length !== 2) return json({ error: "Both agents must exist before a direct conversation can be created." }, 400);
+  if (agents.length !== participantAgentIds.length) return json({ error: "All agents must exist before a direct conversation can be created." }, 400);
   const inactive = agents.filter((agent) => agent.status !== "approved").map((agent) => agent.id);
-  if (inactive.length) return json({ error: "Both agents must be approved before a direct conversation can be created.", inactiveAgents: inactive }, 400);
-  const result = await ensureDirectConversation(db.db, pair.agentAId, pair.agentBId);
+  if (inactive.length) return json({ error: "All agents must be approved before a direct conversation can be created.", inactiveAgents: inactive }, 400);
+  const result = await ensureDirectConversation(db.db, participantAgentIds);
   return json(result, result.existing ? 200 : 201);
 }
 
@@ -1629,6 +2038,14 @@ async function markBreakpoint(request: Request, env: Env, auth?: AuthContext) {
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, String(input.agentId ?? ""), auth);
   if (!agentAuth.ok) return agentAuth.response;
+  const conversation = await database
+    .prepare("SELECT id, agent_a_id, agent_b_id FROM direct_conversations WHERE id = ?")
+    .bind(String(input.conversationId ?? ""))
+    .first<Row>();
+  if (!conversation) return json({ error: "Direct conversation not found." }, 404);
+  if (!(await isConversationParticipant(database, String(input.conversationId), String(input.agentId), conversation))) {
+    return json({ error: "Agent is not a participant in this direct conversation." }, 403);
+  }
   await database
     .prepare(
       `INSERT INTO direct_breakpoints (conversation_id, agent_id, message_id, marked_at)
@@ -1701,13 +2118,33 @@ async function createSuggestion(request: Request, env: Env, auth?: AuthContext) 
 }
 
 async function createAgentThreadReply(request: Request, env: Env, auth?: AuthContext) {
+  const workspace = requireDomainWorkspaceConfig(env);
+  if (!workspace.ok) return workspace.response;
   const db = requireDb(env);
   const input = await body(request);
   if (!db.ok) return json({ error: "Thread replies require durable storage." }, 503);
   const database = db.db;
+  await ensureConfiguredDomains(database, workspace.config);
   const authorId = String(input.authorId ?? "");
   const agentAuth = await requireApprovedAgent(database, authorId, auth);
   if (!agentAuth.ok) return agentAuth.response;
+  const thread = await database
+    .prepare(
+      `SELECT f.domain_id
+       FROM threads t
+       JOIN forums f ON f.id = t.forum_id
+       WHERE t.id = ?`,
+    )
+    .bind(String(input.threadId ?? ""))
+    .first<Row>();
+  if (!thread) return json({ error: "Thread not found." }, 404);
+  const writeAccess = await assertAgentCanWriteDomain(
+    database,
+    authorId,
+    domainId(thread.domain_id) || workspace.config.defaultDomainId,
+    workspace.config,
+  );
+  if (!writeAccess.ok) return writeAccess.response;
   const redaction = redactionBlock(input.body);
   if (!redaction.ok) return redaction.response;
   const mentions = await validateMentions(database, input.mentions ?? []);
@@ -2016,10 +2453,11 @@ async function readInbox(env: Env, agentId: string, auth?: AuthContext, mode: In
       `SELECT dm.*
        FROM direct_messages dm
        JOIN direct_conversations dc ON dc.id = dm.conversation_id
+       JOIN direct_conversation_participants participant
+         ON participant.conversation_id = dc.id AND participant.agent_id = ?
        LEFT JOIN direct_breakpoints bp
          ON bp.conversation_id = dm.conversation_id AND bp.agent_id = ?
-       WHERE (dc.agent_a_id = ? OR dc.agent_b_id = ?)
-         AND dm.sender_agent_id <> ?
+       WHERE dm.sender_agent_id <> ?
          AND (
            bp.message_id IS NULL OR dm.created_at > (
              SELECT created_at FROM direct_messages WHERE id = bp.message_id
@@ -2028,7 +2466,7 @@ async function readInbox(env: Env, agentId: string, auth?: AuthContext, mode: In
        ORDER BY dm.created_at DESC
        LIMIT 20`,
     )
-    .bind(agentId, agentId, agentId, agentId)
+    .bind(agentId, agentId, agentId)
     .all();
   const { results: suggestions } = await database
     .prepare("SELECT * FROM suggestion_cards WHERE status = 'open' ORDER BY created_at DESC LIMIT 20")
@@ -2136,11 +2574,14 @@ async function readHeartbeat(env: Env, agentId: string, auth?: AuthContext) {
 }
 
 async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
+  const workspace = requireDomainWorkspaceConfig(env);
+  if (!workspace.ok) return workspace.response;
   const db = requireDb(env);
   if (!db.ok) return json({ agentId, previewStorage: true });
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, agentId, auth);
   if (!agentAuth.ok) return agentAuth.response;
+  await ensureConfiguredDomains(database, workspace.config);
   const agent = await database
     .prepare(
       `SELECT a.*, p.agent_id, p.project, p.role, p.summary, p.tools_json,
@@ -2162,22 +2603,23 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
     .all();
   const { results: forums } = await database
     .prepare(
-      `SELECT f.*, s.permanent
+      `SELECT f.*, s.permanent,
+              CASE WHEN s.agent_id IS NULL THEN 0 ELSE 1 END AS subscribed
        FROM forums f
-       JOIN forum_subscriptions s ON s.forum_id = f.id
-       WHERE s.agent_id = ?
+       LEFT JOIN forum_subscriptions s ON s.forum_id = f.id AND s.agent_id = ?
        ORDER BY f.name`,
     )
     .bind(agentId)
     .all();
   const { results: conversations } = await database
     .prepare(
-      `SELECT id, agent_a_id, agent_b_id
-       FROM direct_conversations
-       WHERE agent_a_id = ? OR agent_b_id = ?
-       ORDER BY id`,
+      `SELECT c.id, c.agent_a_id, c.agent_b_id
+       FROM direct_conversations c
+       JOIN direct_conversation_participants p ON p.conversation_id = c.id
+       WHERE p.agent_id = ?
+       ORDER BY c.id`,
     )
-    .bind(agentId, agentId)
+    .bind(agentId)
     .all();
   const { results: cursors } = await database
     .prepare("SELECT * FROM read_cursors WHERE agent_id = ? ORDER BY target_type, target_id")
@@ -2187,11 +2629,11 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
     .prepare(
       `SELECT s.*
        FROM live_conversation_sessions s
-       JOIN direct_conversations c ON c.id = s.conversation_id
-       WHERE s.status <> 'stopped' AND (c.agent_a_id = ? OR c.agent_b_id = ?)
+       JOIN direct_conversation_participants p ON p.conversation_id = s.conversation_id
+       WHERE s.status <> 'stopped' AND p.agent_id = ?
        ORDER BY s.created_at DESC`,
     )
-    .bind(agentId, agentId)
+    .bind(agentId)
     .all();
   const sessionIds = sessions.map((session) => String((session as Row).id));
   const receipts: Row[] = sessionIds.length
@@ -2206,11 +2648,32 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
           .all()
       ).results as Row[]
     : [];
+  const homeDomainId = configuredDomainId(workspace.config, (agent ?? {}).domain_id);
   return json({
-    agent: normalizeAgent(agent ?? {}),
+    agent: normalizeAgent({ ...(agent ?? {}), domain_id: homeDomainId }),
+    domains: workspace.config.domains.map((domain) => ({
+      ...domain,
+      capabilities: domainCapabilities(
+        workspace.config,
+        homeDomainId,
+        domain.id,
+      ),
+    })),
     peers: agents.map((row) => normalizeAgent(row as Row)),
-    forums: forums.map((row) => ({ ...normalizeForum(row as Row), subscribed: true, permanent: bool((row as Row).permanent) })),
-    conversations: conversations.map((row) => normalizeConversation(row as Row)),
+    forums: forums.map((row) => {
+      const forum = normalizeForum(row as Row);
+      return {
+        ...forum,
+        subscribed: bool((row as Row).subscribed),
+        permanent: bool((row as Row).permanent),
+        capabilities: domainCapabilities(
+          workspace.config,
+          homeDomainId,
+          String(forum.domainId),
+        ),
+      };
+    }),
+    conversations: await normalizeConversations(database, conversations as Row[]),
     readCursors: cursors,
     liveConversationSessions: sessions.map((session) =>
       normalizeLiveSession(
@@ -2236,14 +2699,15 @@ async function listAgentConversations(env: Env, agentId: string, auth?: AuthCont
   if (!agentAuth.ok) return agentAuth.response;
   const { results } = await database
     .prepare(
-      `SELECT id, agent_a_id, agent_b_id
-       FROM direct_conversations
-       WHERE agent_a_id = ? OR agent_b_id = ?
-       ORDER BY id`,
+      `SELECT c.id, c.agent_a_id, c.agent_b_id
+       FROM direct_conversations c
+       JOIN direct_conversation_participants p ON p.conversation_id = c.id
+       WHERE p.agent_id = ?
+       ORDER BY c.id`,
     )
-    .bind(agentId, agentId)
+    .bind(agentId)
     .all();
-  return json({ agentId, conversations: results.map((row) => normalizeConversation(row as Row)) });
+  return json({ agentId, conversations: await normalizeConversations(database, results as Row[]) });
 }
 
 async function readThread(env: Env, threadId: string, agentId?: string | null, auth?: AuthContext) {
@@ -2254,7 +2718,10 @@ async function readThread(env: Env, threadId: string, agentId?: string | null, a
     const agentAuth = await requireApprovedAgent(database, agentId, auth);
     if (!agentAuth.ok) return agentAuth.response;
   }
-  const thread = await database.prepare("SELECT * FROM threads WHERE id = ?").bind(threadId).first<Row>();
+  const thread = await database
+    .prepare("SELECT t.*, f.domain_id FROM threads t JOIN forums f ON f.id = t.forum_id WHERE t.id = ?")
+    .bind(threadId)
+    .first<Row>();
   if (!thread) return json({ error: "Thread not found." }, 404);
   const { results: replies } = await database
     .prepare("SELECT * FROM thread_replies WHERE thread_id = ? ORDER BY created_at ASC")
@@ -2404,7 +2871,7 @@ async function upsertLiveReceipt(request: Request, env: Env, sessionId: string, 
     .bind(sessionId)
     .first<Row>();
   if (!session) return json({ error: "Live conversation session not found." }, 404);
-  const participants = [String(session.agent_a_id), String(session.agent_b_id)];
+  const participants = await participantsForConversation(database, String(session.conversation_id), session);
   if (!participants.includes(agentId)) return json({ error: "Agent is not a participant in this live conversation." }, 403);
   const timestamp = now();
   await database
@@ -2586,9 +3053,11 @@ async function createForum(request: Request, env: Env) {
   const input = await body(request);
   const parsed = forumSpecFromInput(input);
   if (!parsed.ok) return parsed.response;
+  const workspace = requireDomainWorkspaceConfig(env);
+  if (!workspace.ok) return workspace.response;
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
-  const inserted = await insertForum(db.db, parsed.spec);
+  const inserted = await insertForum(db.db, parsed.spec, workspace.config);
   if (!inserted.ok) return inserted.response;
   return json({ forum: inserted.forum }, 201);
 }
@@ -2645,7 +3114,9 @@ async function approveAndCreateForumSuggestion(env: Env, suggestionId: string) {
   if (suggestion.kind !== "forum_creation") return json({ error: "Suggestion is not a forum creation suggestion." }, 400);
   const forumSpec = parseJson<ForumSpec | undefined>(suggestion.forum_spec_json, undefined);
   if (!forumSpec) return json({ error: "Forum creation suggestion is missing forum spec." }, 400);
-  const inserted = await insertForum(db.db, forumSpec);
+  const workspace = requireDomainWorkspaceConfig(env);
+  if (!workspace.ok) return workspace.response;
+  const inserted = await insertForum(db.db, forumSpec, workspace.config);
   if (!inserted.ok) return inserted.response;
   await db.db
     .prepare("UPDATE suggestion_cards SET status = ? WHERE id = ?")
@@ -2707,7 +3178,8 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "GET" && path === "agent/me") return readAgentMe(auth);
   if (method === "POST" && path === "agent/redaction-check") return redactionCheck(request);
   if (method === "POST" && path === "agent/dry-run") return dryRun(request, env);
-  if (method === "GET" && path === "agent/forums") return listForums(env);
+  if (method === "GET" && path === "agent/domains") return listDomains(env, auth.agentId ?? "", auth);
+  if (method === "GET" && path === "agent/forums") return listForums(env, auth);
   if (method === "GET" && path.startsWith("agent/profiles/")) return readAgentProfile(env, path.split("/").at(-1) ?? "", auth);
   if (method === "POST" && path.startsWith("agent/profiles/")) return updateAgentProfile(request, env, path.split("/").at(-1) ?? "", auth);
   if (method === "GET" && path.startsWith("agent/context/")) return readAgentContext(env, path.split("/").at(-1) ?? "", auth);
@@ -2764,7 +3236,8 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "POST" && path.startsWith("operator/gates/") && path.endsWith("/status")) {
     return updateGate(request, env, path.split("/").at(-2) ?? "");
   }
-  if (method === "GET" && path === "operator/forums") return listForums(env);
+  if (method === "GET" && path === "operator/domains") return listDomains(env, "", auth);
+  if (method === "GET" && path === "operator/forums") return listForums(env, auth);
   if (method === "GET" && path === "operator/agents") return listAgents(env);
   if (method === "GET" && path.startsWith("operator/profiles/")) return readAgentProfile(env, path.split("/").at(-1) ?? "");
   if (method === "GET" && path.startsWith("operator/threads/")) return readThread(env, path.split("/").at(-1) ?? "");
