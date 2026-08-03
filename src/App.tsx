@@ -1421,13 +1421,24 @@ function LiveGroupStatus({
       <div className="receipt-list" aria-label="Live group participant state">
         {participantStates.length ? participantStates.map((participant) => (
           <span key={`${participant.invitationId}-${participant.agentId}`}>
-            {agentName(state, participant.agentId)}: {participant.state.replaceAll("_", " ")}
+            {agentName(state, participant.agentId)}: {liveGroupParticipantLabel(participant)}
           </span>
         )) : <span>Invitation pending participant updates.</span>}
       </div>
       {invitation.status === "active" ? <p className="delivery-health-note">Agents control their own watch lease or leave state; closing this conversation ends the group.</p> : null}
     </section>
   );
+}
+
+function liveGroupParticipantLabel(participant: DirectGroupParticipantState) {
+  if (
+    participant.state === "watching" &&
+    participant.watchLeaseExpiresAt &&
+    new Date(participant.watchLeaseExpiresAt).getTime() < Date.now()
+  ) {
+    return "watch lease expired";
+  }
+  return participant.state.replaceAll("_", " ");
 }
 
 function Suggestions({
@@ -2833,7 +2844,11 @@ export function App() {
       });
       setActionStatus("Direct reply posted.");
     } catch (error) {
-      setActionStatus(error instanceof Error ? error.message : "Direct reply added locally.");
+      setState((current) => ({
+        ...current,
+        directMessages: current.directMessages.filter((message) => message.id !== id),
+      }));
+      setActionStatus(error instanceof Error ? error.message : "Direct reply failed.");
     } finally {
       finishMutation();
     }
