@@ -129,6 +129,9 @@ export interface DirectMessage {
   id: string;
   conversationId: string;
   senderAgentId: string;
+  senderKind?: "agent" | "human";
+  /** Persisted authenticated human display name, when the operator authored it. */
+  senderDisplayName?: string;
   body: string;
   createdAt: string;
 }

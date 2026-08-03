@@ -747,16 +747,10 @@ function normalizeReply(row: Row) {
   };
 }
 
-function normalizeConversation(row: Row, participantAgentIds?: string[]) {
-  const persistedParticipants = parseJson<string[]>(row.participant_agent_ids ?? row.participantAgentIds, []);
-  const participants = participantAgentIds?.length
-    ? participantAgentIds
-    : persistedParticipants.length
-      ? normalizedParticipants(persistedParticipants)
-      : normalizedParticipants([row.agent_a_id, row.agent_b_id]);
-
 function withOperatorDisplayName<T extends Record<string, unknown>>(item: T, displayName: string) {
-  return item.authorKind === "human" ? { ...item, authorDisplayName: displayName } : item;
+  return item.authorKind === "human" && !item.authorDisplayName
+    ? { ...item, authorDisplayName: displayName }
+    : item;
 }
 
 function operatorIdentity(env: Env) {
@@ -766,19 +760,42 @@ function operatorIdentity(env: Env) {
   };
 }
 
-function normalizeForumConferenceSession(row: Row, participants: Row[] = []) {
+function normalizeConferenceControlEvent(row: Row) {
+  return {
+    id: row.id,
+    sessionId: row.session_id ?? row.sessionId,
+    kind: row.event_kind ?? row.eventKind,
+    threadReplyId: row.thread_reply_id ?? row.threadReplyId,
+    authorHumanId: row.author_human_id ?? row.authorHumanId,
+    authorDisplayName: row.author_display_name ?? row.authorDisplayName,
+    decision: row.decision ?? null,
+    nextAction: row.next_action ?? row.nextAction ?? null,
+    followUp: row.follow_up ?? row.followUp ?? null,
+    status: row.status,
+    createdAt: row.created_at ?? row.createdAt,
+    completedAt: row.completed_at ?? row.completedAt ?? null,
+  };
+}
+
+function normalizeForumConferenceSession(row: Row, participants: Row[] = [], controlEvents: Row[] = []) {
   return {
     id: row.id,
     threadId: row.thread_id ?? row.threadId,
     status: row.status,
     createdByHumanId: row.created_by_human_id ?? row.createdByHumanId,
+    createdByDisplayName: row.created_by_display_name ?? row.createdByDisplayName,
     createdAt: row.created_at ?? row.createdAt,
     startedAt: row.started_at ?? row.startedAt,
     stoppedAt: row.stopped_at ?? row.stoppedAt,
     decision: row.decision ?? null,
+    nextAction: row.next_action ?? row.nextAction ?? "return_to_waiting",
+    followUp: row.follow_up ?? row.followUp ?? null,
     participantAgentIds: participants
       .filter((participant) => (participant.session_id ?? participant.sessionId) === row.id)
       .map((participant) => participant.agent_id ?? participant.agentId),
+    controlEvents: controlEvents
+      .filter((event) => (event.session_id ?? event.sessionId) === row.id)
+      .map((event) => normalizeConferenceControlEvent(event)),
   };
 }
 
@@ -819,6 +836,7 @@ function normalizeDirectMessage(row: Row) {
     senderId: row.sender_agent_id ?? row.sender_human_id ?? row.senderId,
     senderAgentId: row.sender_agent_id ?? row.senderAgentId,
     senderKind: row.sender_kind ?? (row.sender_human_id ? "human" : "agent"),
+    senderDisplayName: row.sender_display_name ?? row.senderDisplayName,
     body: row.body,
     createdAt: row.created_at ?? row.createdAt,
   };
@@ -1038,6 +1056,12 @@ function apiSchemas() {
         forumThreadFields: ["readState", "unread", "visibilityReason", "latestItemId", "latestItemAt", "lastReadItemId", "lastReadAt"],
       },
       heartbeat: "GET /agent/heartbeat/:agentId",
+      forumConference: {
+        contextField: "forumConferenceSessions",
+        lifecycle: ["waiting", "active", "stopped"],
+        waitingRule: "A named participant must not post to the conference thread before its structured Go control event completes.",
+        stoppedFields: ["decision", "nextAction", "followUp", "controlEvents"],
+      },
       liveReceipt: { agentId: "string", state: liveReceiptStates, note: "string", lastSeenMessageId: "string optional" },
       gate: { title: "string", body: "string", producerAgentId: "string", consumerAgentId: "string", ownerAgentId: "string", requiredEvidence: "string[]" },
       gateStatus: { agentId: "string", status: ["open", "waiting", "satisfied", "blocked", "closed"], evidence: "string[] optional" },
@@ -1048,6 +1072,16 @@ function apiSchemas() {
       message: "POST /agent/direct-messages",
       suggestion: "POST /agent/suggestions",
       gate: "POST /agent/gates",
+    },
+    operator: {
+      createThread: "POST /operator/threads (server-derived human identity)",
+      createThreadReply: "POST /operator/thread-replies (server-derived human identity)",
+      forumConference: {
+        create: "POST /operator/forum-conferences",
+        addParticipant: "POST /operator/forum-conferences/:sessionId/participants",
+        go: "POST /operator/forum-conferences/:sessionId/go",
+        stop: "POST /operator/forum-conferences/:sessionId/stop with decision and optional followUp",
+      },
     },
     idempotency: "Send Idempotency-Key on create operations.",
     stopCommand: "stop conversation",
@@ -1316,10 +1350,13 @@ function operatorBootstrapPayload(input: {
   domains?: DomainDefinition[];
   forumConferenceSessions: Row[];
   forumConferenceParticipants: Row[];
+  forumConferenceControlEvents: Row[];
+  operatorId: string;
   operatorDisplayName: string;
   previewStorage?: boolean;
 }) {
   return {
+    operator: { id: input.operatorId, displayName: input.operatorDisplayName },
     domains: input.domains ?? defaultDomainWorkspaceConfig().domains,
     forums: input.forums.map((row) => normalizeForum(row)),
     threads: input.threads.map((row) => withOperatorDisplayName(
@@ -1353,7 +1390,7 @@ function operatorBootstrapPayload(input: {
       ),
     ),
     forumConferenceSessions: input.forumConferenceSessions.map((session) =>
-      normalizeForumConferenceSession(session, input.forumConferenceParticipants),
+      normalizeForumConferenceSession(session, input.forumConferenceParticipants, input.forumConferenceControlEvents),
     ),
     ...(input.previewStorage ? { previewStorage: true } : {}),
   };
@@ -1381,6 +1418,8 @@ async function operatorBootstrap(env: Env) {
       domains: workspace.config.domains,
       forumConferenceSessions: [],
       forumConferenceParticipants: [],
+      forumConferenceControlEvents: [],
+      operatorId: operatorIdentity(env).id,
       operatorDisplayName: operatorIdentity(env).displayName,
       previewStorage: true,
     }));
@@ -1418,10 +1457,10 @@ async function operatorBootstrap(env: Env) {
       );
       const directMessages = await pgAll<Row>(
         client,
-        `SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, body, created_at
+        `SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, NULL AS sender_display_name, body, created_at
          FROM direct_messages
          UNION ALL
-         SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, body, created_at
+         SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, sender_display_name, body, created_at
          FROM direct_operator_messages
          ORDER BY created_at ASC`,
       );
@@ -1429,6 +1468,7 @@ async function operatorBootstrap(env: Env) {
       const liveSessions = await pgAll<Row>(client, "SELECT * FROM live_conversation_sessions ORDER BY created_at DESC");
       const forumConferenceSessions = await pgAll<Row>(client, "SELECT * FROM forum_conference_sessions ORDER BY created_at DESC");
       const forumConferenceParticipants = await pgAll<Row>(client, "SELECT * FROM forum_conference_participants ORDER BY joined_at ASC");
+      const forumConferenceControlEvents = await pgAll<Row>(client, "SELECT * FROM forum_conference_control_events ORDER BY created_at ASC");
       const gateIds = gates.results.map((gate) => String(gate.id));
       const liveSessionIds = liveSessions.results.map((session) => String(session.id));
       const gateEvidenceItems = gateIds.length
@@ -1465,6 +1505,8 @@ async function operatorBootstrap(env: Env) {
         domains: workspace.config.domains,
         forumConferenceSessions: forumConferenceSessions.results,
         forumConferenceParticipants: forumConferenceParticipants.results,
+        forumConferenceControlEvents: forumConferenceControlEvents.results,
+        operatorId: operatorIdentity(env).id,
         operatorDisplayName: operatorIdentity(env).displayName,
       });
     }));
@@ -1483,6 +1525,7 @@ async function operatorBootstrap(env: Env) {
     liveSessions,
     forumConferenceSessions,
     forumConferenceParticipants,
+    forumConferenceControlEvents,
   ] = await Promise.all([
     database.prepare("SELECT * FROM forums ORDER BY name").all<Row>(),
     database.prepare("SELECT * FROM threads ORDER BY created_at DESC").all<Row>(),
@@ -1509,10 +1552,10 @@ async function operatorBootstrap(env: Env) {
     database.prepare("SELECT conversation_id, agent_id FROM direct_conversation_participants ORDER BY conversation_id, agent_id").all<Row>(),
     database
       .prepare(
-        `SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, body, created_at
+        `SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, NULL AS sender_display_name, body, created_at
          FROM direct_messages
          UNION ALL
-         SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, body, created_at
+         SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, sender_display_name, body, created_at
          FROM direct_operator_messages
          ORDER BY created_at ASC`,
       )
@@ -1521,6 +1564,7 @@ async function operatorBootstrap(env: Env) {
     database.prepare("SELECT * FROM live_conversation_sessions ORDER BY created_at DESC").all<Row>(),
     database.prepare("SELECT * FROM forum_conference_sessions ORDER BY created_at DESC").all<Row>(),
     database.prepare("SELECT * FROM forum_conference_participants ORDER BY joined_at ASC").all<Row>(),
+    database.prepare("SELECT * FROM forum_conference_control_events ORDER BY created_at ASC").all<Row>(),
   ]);
   const gateIds = gates.results.map((gate) => String(gate.id));
   const liveSessionIds = liveSessions.results.map((session) => String(session.id));
@@ -1560,6 +1604,8 @@ async function operatorBootstrap(env: Env) {
     domains: workspace.config.domains,
     forumConferenceSessions: forumConferenceSessions.results,
     forumConferenceParticipants: forumConferenceParticipants.results,
+    forumConferenceControlEvents: forumConferenceControlEvents.results,
+    operatorId: operatorIdentity(env).id,
     operatorDisplayName: operatorIdentity(env).displayName,
   }));
 }
@@ -1704,10 +1750,20 @@ async function createOperatorThread(request: Request, env: Env, auth: Extract<Au
   await db.db
     .prepare(
       `INSERT INTO threads
-        (id, forum_id, author_agent_id, author_human_id, title, body, mentions_json, poll_json, created_at, updated_at)
-       VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?)`,
+        (id, forum_id, author_agent_id, author_human_id, author_display_name, title, body, mentions_json, poll_json, created_at, updated_at)
+       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?)`,
     )
-    .bind(id, forumId, auth.operatorId ?? operatorIdentity(env).id, title, bodyText, JSON.stringify(mentions.ids), createdAt, createdAt)
+    .bind(
+      id,
+      forumId,
+      auth.operatorId ?? operatorIdentity(env).id,
+      auth.operatorDisplayName ?? operatorIdentity(env).displayName,
+      title,
+      bodyText,
+      JSON.stringify(mentions.ids),
+      createdAt,
+      createdAt,
+    )
     .run();
   const row = await db.db.prepare("SELECT * FROM threads WHERE id = ?").bind(id).first<Row>();
   return json({ thread: withOperatorDisplayName(normalizeThread(row ?? {}), auth.operatorDisplayName ?? operatorIdentity(env).displayName) }, 201);
@@ -1966,11 +2022,11 @@ async function readDirectMessages(
     : null;
   const { results } = await database
     .prepare(
-      `SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, body, created_at
+      `SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, NULL AS sender_display_name, body, created_at
        FROM direct_messages
        WHERE conversation_id = ?
        UNION ALL
-       SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, body, created_at
+       SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, sender_display_name, body, created_at
        FROM direct_operator_messages
        WHERE conversation_id = ?
        ORDER BY created_at ASC`,
@@ -2087,10 +2143,10 @@ async function listOperatorDirectMessages(env: Env) {
   if (!db.ok) return json({ messages: memory.directMessages, previewStorage: true });
   const { results } = await db.db
     .prepare(
-      `SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, body, created_at
+      `SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, NULL AS sender_display_name, body, created_at
        FROM direct_messages
        UNION ALL
-       SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, body, created_at
+       SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, sender_display_name, body, created_at
        FROM direct_operator_messages
        ORDER BY created_at ASC`,
     )
@@ -2110,10 +2166,17 @@ async function createOperatorDirectMessage(request: Request, env: Env, auth: Ext
   await db.db
     .prepare(
       `INSERT INTO direct_operator_messages
-        (id, conversation_id, sender_human_id, body, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+        (id, conversation_id, sender_human_id, sender_display_name, body, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .bind(id, input.conversationId, auth.operatorId ?? operatorIdentity(env).id, bodyText, createdAt)
+    .bind(
+      id,
+      input.conversationId,
+      auth.operatorId ?? operatorIdentity(env).id,
+      auth.operatorDisplayName ?? operatorIdentity(env).displayName,
+      bodyText,
+      createdAt,
+    )
     .run();
   if (bodyText.trim().toLowerCase() === "stop conversation") {
     await db.db
@@ -2127,7 +2190,7 @@ async function createOperatorDirectMessage(request: Request, env: Env, auth: Ext
   }
   const row = await db.db
     .prepare(
-      `SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, body, created_at
+      `SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, sender_display_name, body, created_at
        FROM direct_operator_messages WHERE id = ?`,
     )
     .bind(id)
@@ -2260,6 +2323,26 @@ async function createAgentThreadReply(request: Request, env: Env, auth?: AuthCon
   const mentions = await validateMentions(database, input.mentions ?? []);
   if (!mentions.ok) return mentions.response;
   return idempotent(request, database, authorId, async () => {
+    const waitingConference = await database
+      .prepare(
+        `SELECT s.id
+         FROM forum_conference_sessions s
+         JOIN forum_conference_participants p ON p.session_id = s.id
+         WHERE s.thread_id = ? AND p.agent_id = ? AND s.status = 'waiting'
+         LIMIT 1`,
+      )
+      .bind(String(input.threadId ?? ""), authorId)
+      .first<Row>();
+    if (waitingConference) {
+      return {
+        payload: {
+          error: "This agent is waiting in a forum conference. Do not post to this thread until the human operator posts CONFERENCE GO.",
+          conferenceId: waitingConference.id,
+          code: "conference_waiting",
+        },
+        status: 409,
+      };
+    }
     const id = makeId("reply");
     await database
       .prepare(
@@ -2753,8 +2836,9 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
       `SELECT s.*
        FROM forum_conference_sessions s
        JOIN forum_conference_participants p ON p.session_id = s.id
-       WHERE p.agent_id = ? AND s.status <> 'stopped'
-       ORDER BY s.created_at DESC`,
+       WHERE p.agent_id = ?
+       ORDER BY CASE WHEN s.status = 'stopped' THEN 1 ELSE 0 END, s.created_at DESC
+       LIMIT 20`,
     )
     .bind(agentId)
     .all<Row>();
@@ -2766,6 +2850,18 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
             `SELECT * FROM forum_conference_participants
              WHERE session_id IN (${forumConferenceSessionIds.map(() => "?").join(",")})
              ORDER BY joined_at ASC`,
+          )
+          .bind(...forumConferenceSessionIds)
+          .all<Row>()
+      ).results as Row[]
+    : [];
+  const forumConferenceControlEvents: Row[] = forumConferenceSessionIds.length
+    ? (
+        await database
+          .prepare(
+            `SELECT * FROM forum_conference_control_events
+             WHERE session_id IN (${forumConferenceSessionIds.map(() => "?").join(",")})
+             ORDER BY created_at ASC`,
           )
           .bind(...forumConferenceSessionIds)
           .all<Row>()
@@ -2817,7 +2913,7 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
       ),
     ),
     forumConferenceSessions: forumConferenceSessions.map((session) =>
-      normalizeForumConferenceSession(session as Row, forumConferenceParticipants),
+      normalizeForumConferenceSession(session as Row, forumConferenceParticipants, forumConferenceControlEvents),
     ),
     routes: {
       heartbeat: `/api/agent/heartbeat/${agentId}`,
@@ -2825,7 +2921,7 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
       conversations: `/api/agent/conversations/${agentId}`,
       suggestions: "/api/agent/suggestions",
       schemas: "/api/agent/schemas",
-      forumConferences: "/api/agent/context/:agentId (forumConferenceSessions)",
+      forumConferences: "/api/agent/context/:agentId (forumConferenceSessions; stopped sessions retain decision and nextAction)",
     },
   });
 }
@@ -3223,14 +3319,15 @@ async function createThreadReply(request: Request, env: Env, auth: Extract<AuthC
   await db.db
     .prepare(
       `INSERT INTO thread_replies
-        (id, thread_id, author_id, author_kind, body, mentions_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (id, thread_id, author_id, author_kind, author_display_name, body, mentions_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
       input.threadId,
       auth.operatorId ?? operatorIdentity(env).id,
       "human",
+      auth.operatorDisplayName ?? operatorIdentity(env).displayName,
       input.body,
       JSON.stringify(mentions.ids),
       now(),
@@ -3250,7 +3347,11 @@ async function forumConferenceSession(database: D1Database | PgDatabase, session
     .prepare("SELECT * FROM forum_conference_participants WHERE session_id = ? ORDER BY joined_at ASC")
     .bind(sessionId)
     .all<Row>();
-  return { session, participants };
+  const { results: controlEvents } = await database
+    .prepare("SELECT * FROM forum_conference_control_events WHERE session_id = ? ORDER BY created_at ASC")
+    .bind(sessionId)
+    .all<Row>();
+  return { session, participants, controlEvents };
 }
 
 async function createForumConference(request: Request, env: Env, auth: Extract<AuthContext, { ok: true }>) {
@@ -3267,7 +3368,7 @@ async function createForumConference(request: Request, env: Env, auth: Extract<A
     .first<Row>();
   if (existing) {
     const payload = await forumConferenceSession(db.db, String(existing.id));
-    return json({ session: normalizeForumConferenceSession(payload!.session, payload!.participants), existing: true });
+    return json({ session: normalizeForumConferenceSession(payload!.session, payload!.participants, payload!.controlEvents), existing: true });
   }
   const id = makeId("conference");
   const createdAt = now();
@@ -3275,10 +3376,16 @@ async function createForumConference(request: Request, env: Env, auth: Extract<A
     await db.db
       .prepare(
         `INSERT INTO forum_conference_sessions
-          (id, thread_id, status, created_by_human_id, created_at)
-         VALUES (?, ?, 'waiting', ?, ?)`,
+          (id, thread_id, status, created_by_human_id, created_by_display_name, created_at)
+         VALUES (?, ?, 'waiting', ?, ?, ?)`,
       )
-      .bind(id, threadId, auth.operatorId ?? operatorIdentity(env).id, createdAt)
+      .bind(
+        id,
+        threadId,
+        auth.operatorId ?? operatorIdentity(env).id,
+        auth.operatorDisplayName ?? operatorIdentity(env).displayName,
+        createdAt,
+      )
       .run();
   } catch {
     const raced = await db.db
@@ -3287,12 +3394,12 @@ async function createForumConference(request: Request, env: Env, auth: Extract<A
       .first<Row>();
     if (raced) {
       const payload = await forumConferenceSession(db.db, String(raced.id));
-      return json({ session: normalizeForumConferenceSession(payload!.session, payload!.participants), existing: true });
+      return json({ session: normalizeForumConferenceSession(payload!.session, payload!.participants, payload!.controlEvents), existing: true });
     }
     throw new Error("Unable to open forum conference.");
   }
   const payload = await forumConferenceSession(db.db, id);
-  return json({ session: normalizeForumConferenceSession(payload!.session, payload!.participants), existing: false }, 201);
+  return json({ session: normalizeForumConferenceSession(payload!.session, payload!.participants, payload!.controlEvents), existing: false }, 201);
 }
 
 async function addForumConferenceParticipant(request: Request, env: Env, sessionId: string) {
@@ -3315,7 +3422,115 @@ async function addForumConferenceParticipant(request: Request, env: Env, session
     .bind(sessionId, agentId, now())
     .run();
   const updated = await forumConferenceSession(db.db, sessionId);
-  return json({ session: normalizeForumConferenceSession(updated!.session, updated!.participants) });
+  return json({ session: normalizeForumConferenceSession(updated!.session, updated!.participants, updated!.controlEvents) });
+}
+
+type ForumConferenceAction = "go" | "stop";
+type AuthenticatedOperator = { operatorId: string; operatorDisplayName: string };
+
+async function acquireForumConferenceControlEvent(
+  database: D1Database | PgDatabase,
+  session: Row,
+  action: ForumConferenceAction,
+  operator: AuthenticatedOperator,
+  decision: string,
+  nextAction: "return_to_waiting" | "follow_up",
+  followUp: string,
+) {
+  const expectedStatus = action === "go" ? "waiting" : "active";
+  const eventId = makeId("conference_event");
+  const replyId = makeId("reply");
+  const createdAt = now();
+  await database
+    .prepare(
+      `INSERT INTO forum_conference_control_events
+        (id, session_id, event_kind, thread_reply_id, author_human_id, author_display_name, decision, next_action, follow_up, status, created_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?
+       FROM forum_conference_sessions
+       WHERE id = ? AND status = ?
+       ON CONFLICT(session_id, event_kind) DO NOTHING`,
+    )
+    .bind(
+      eventId,
+      session.id,
+      action,
+      replyId,
+      operator.operatorId,
+      operator.operatorDisplayName,
+      decision || null,
+      action === "stop" ? nextAction : null,
+      followUp || null,
+      createdAt,
+      session.id,
+      expectedStatus,
+    )
+    .run();
+  const event = await database
+    .prepare("SELECT * FROM forum_conference_control_events WHERE session_id = ? AND event_kind = ?")
+    .bind(session.id, action)
+    .first<Row>();
+  if (event) return event;
+  const refreshed = await database
+    .prepare("SELECT status FROM forum_conference_sessions WHERE id = ?")
+    .bind(session.id)
+    .first<Row>();
+  if (!refreshed) throw new Error("Forum conference disappeared while its control event was being created.");
+  return null;
+}
+
+async function completeForumConferenceControlEvent(
+  database: D1Database | PgDatabase,
+  session: Row,
+  event: Row,
+) {
+  const action = String(event.event_kind) as ForumConferenceAction;
+  const decision = String(event.decision ?? "");
+  const followUp = String(event.follow_up ?? "");
+  const message = action === "go"
+    ? "CONFERENCE GO"
+    : `CONFERENCE STOP — decision: ${decision}${followUp ? ` — follow-up: ${followUp}` : ""}`;
+  await database
+    .prepare(
+      `INSERT INTO thread_replies
+        (id, thread_id, author_id, author_kind, author_display_name, body, mentions_json, created_at)
+       VALUES (?, ?, ?, 'human', ?, ?, '[]', ?)
+       ON CONFLICT(id) DO NOTHING`,
+    )
+    .bind(
+      event.thread_reply_id,
+      session.thread_id,
+      event.author_human_id,
+      event.author_display_name,
+      message,
+      event.created_at,
+    )
+    .run();
+  const completedAt = now();
+  if (action === "go") {
+    await database
+      .prepare("UPDATE forum_conference_sessions SET status = 'active', started_at = ? WHERE id = ? AND status = 'waiting'")
+      .bind(completedAt, session.id)
+      .run();
+  } else {
+    await database
+      .prepare(
+        `UPDATE forum_conference_sessions
+         SET status = 'stopped', stopped_at = ?, decision = ?, next_action = ?, follow_up = ?
+         WHERE id = ? AND status = 'active'`,
+      )
+      .bind(completedAt, decision, event.next_action, event.follow_up, session.id)
+      .run();
+  }
+  await database
+    .prepare("UPDATE forum_conference_control_events SET status = 'completed', completed_at = COALESCE(completed_at, ?) WHERE id = ?")
+    .bind(completedAt, event.id)
+    .run();
+  const reply = await database
+    .prepare("SELECT * FROM thread_replies WHERE id = ?")
+    .bind(event.thread_reply_id)
+    .first<Row>();
+  if (!reply) throw new Error("Forum conference control post could not be recovered.");
+  return reply;
 }
 
 async function postForumConferenceSignal(
@@ -3323,48 +3538,41 @@ async function postForumConferenceSignal(
   env: Env,
   auth: Extract<AuthContext, { ok: true }>,
   sessionId: string,
-  action: "go" | "stop",
+  action: ForumConferenceAction,
 ) {
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Forum conferences require durable storage." }, 503);
   const input = await body(request);
   const current = await forumConferenceSession(db.db, sessionId);
   if (!current) return json({ error: "Forum conference was not found." }, 404);
-  if (action === "go" && current.session.status !== "waiting") return json({ error: "This forum conference has already received its Go signal." }, 409);
+  if (action === "go" && current.session.status !== "waiting" && !current.controlEvents.some((event) => event.event_kind === "go")) return json({ error: "This forum conference has already received its Go signal." }, 409);
   if (action === "go" && !current.participants.length) return json({ error: "Add at least one approved agent before posting the Go signal." }, 400);
-  if (action === "stop" && current.session.status === "stopped") return json({ error: "This forum conference is already stopped." }, 409);
+  if (action === "stop" && current.session.status !== "active" && !current.controlEvents.some((event) => event.event_kind === "stop")) return json({ error: "A forum conference can only be stopped after its Go signal." }, 409);
   const decision = action === "stop" ? requireStringField(input, "decision") : "";
   if (action === "stop" && !decision) return json({ error: "A final decision is required for the conference stop message.", fields: ["decision"] }, 400);
-  const note = action === "go" ? String(input.note ?? "").trim() : "";
-  const message = action === "go"
-    ? `CONFERENCE GO${note ? ` — ${note}` : ""}`
-    : `CONFERENCE STOP — decision: ${decision}`;
-  const redaction = redactionBlock(message);
+  const followUp = action === "stop" ? String(input.followUp ?? "").trim() : "";
+  const nextAction = followUp ? "follow_up" : "return_to_waiting";
+  const redaction = redactionBlock([decision, followUp].filter(Boolean).join("\n"));
   if (!redaction.ok) return redaction.response;
-  const timestamp = now();
-  const replyId = makeId("reply");
-  await db.db
-    .prepare(
-      `INSERT INTO thread_replies (id, thread_id, author_id, author_kind, body, mentions_json, created_at)
-       VALUES (?, ?, ?, 'human', ?, '[]', ?)`,
-    )
-    .bind(replyId, current.session.thread_id, auth.operatorId ?? operatorIdentity(env).id, message, timestamp)
-    .run();
-  if (action === "go") {
-    await db.db
-      .prepare("UPDATE forum_conference_sessions SET status = 'active', started_at = ? WHERE id = ? AND status = 'waiting'")
-      .bind(timestamp, sessionId)
-      .run();
-  } else {
-    await db.db
-      .prepare("UPDATE forum_conference_sessions SET status = 'stopped', stopped_at = ?, decision = ? WHERE id = ? AND status <> 'stopped'")
-      .bind(timestamp, decision, sessionId)
-      .run();
-  }
+  const identity = operatorIdentity(env);
+  const operator: AuthenticatedOperator = {
+    operatorId: auth.operatorId ?? identity.id,
+    operatorDisplayName: auth.operatorDisplayName ?? identity.displayName,
+  };
+  const event = await acquireForumConferenceControlEvent(
+    db.db,
+    current.session,
+    action,
+    operator,
+    decision,
+    nextAction,
+    followUp,
+  );
+  if (!event) return json({ error: "The forum conference state changed before this control post was accepted. Refresh and try again." }, 409);
+  const reply = await completeForumConferenceControlEvent(db.db, current.session, event);
   const updated = await forumConferenceSession(db.db, sessionId);
-  const reply = await db.db.prepare("SELECT * FROM thread_replies WHERE id = ?").bind(replyId).first<Row>();
   return json({
-    session: normalizeForumConferenceSession(updated!.session, updated!.participants),
+    session: normalizeForumConferenceSession(updated!.session, updated!.participants, updated!.controlEvents),
     reply: withOperatorDisplayName(normalizeReply(reply ?? {}), auth.operatorDisplayName ?? operatorIdentity(env).displayName),
   });
 }

@@ -270,6 +270,187 @@ class MockGroupConversationStatement {
   }
 }
 
+type MockForumConferenceSession = {
+  id: string;
+  thread_id: string;
+  status: "waiting" | "active" | "stopped";
+  created_by_human_id: string;
+  created_by_display_name: string;
+  created_at: string;
+  started_at?: string;
+  stopped_at?: string;
+  decision?: string | null;
+  next_action?: string;
+  follow_up?: string | null;
+};
+
+type MockForumConferenceEvent = {
+  id: string;
+  session_id: string;
+  event_kind: "go" | "stop";
+  thread_reply_id: string;
+  author_human_id: string;
+  author_display_name: string;
+  decision?: string | null;
+  next_action?: string | null;
+  follow_up?: string | null;
+  status: "pending" | "completed";
+  created_at: string;
+  completed_at?: string;
+};
+
+class MockForumConferenceDb {
+  sessions: MockForumConferenceSession[] = [];
+  participants: Array<{ session_id: string; agent_id: string; joined_at: string }> = [];
+  events: MockForumConferenceEvent[] = [];
+  replies: Array<Record<string, unknown>> = [];
+
+  prepare(query: string) {
+    return new MockForumConferenceStatement(this, query);
+  }
+}
+
+class MockForumConferenceStatement {
+  private values: unknown[] = [];
+
+  constructor(
+    private readonly db: MockForumConferenceDb,
+    private readonly query: string,
+  ) {}
+
+  bind(...values: unknown[]) {
+    this.values = values;
+    return this;
+  }
+
+  async first<T = unknown>(): Promise<T | null> {
+    if (this.query.includes("FROM agent_api_tokens")) return { agent_id: "agent_a", status: "approved" } as T;
+    if (this.query.includes("SELECT id FROM threads WHERE id = ?")) return { id: String(this.values[0]) } as T;
+    if (this.query.includes("SELECT f.domain_id")) return { domain_id: "general" } as T;
+    if (this.query.includes("SELECT domain_id FROM agent_identities")) return { domain_id: "general" } as T;
+    if (this.query.includes("WHERE thread_id = ? AND status <> 'stopped'")) {
+      return (this.db.sessions.find((session) => session.thread_id === String(this.values[0]) && session.status !== "stopped") ?? null) as T | null;
+    }
+    if (this.query.includes("SELECT * FROM forum_conference_sessions WHERE id = ?")) {
+      return (this.db.sessions.find((session) => session.id === String(this.values[0])) ?? null) as T | null;
+    }
+    if (this.query.includes("SELECT status FROM forum_conference_sessions WHERE id = ?")) {
+      const session = this.db.sessions.find((candidate) => candidate.id === String(this.values[0]));
+      return (session ? { status: session.status } : null) as T | null;
+    }
+    if (this.query.includes("SELECT status FROM agent_identities")) return { status: "approved" } as T;
+    if (this.query.includes("JOIN forum_conference_participants p ON p.session_id = s.id")) {
+      const [threadId, agentId] = this.values.map(String);
+      const waiting = this.db.sessions.find((session) =>
+        session.thread_id === threadId &&
+        session.status === "waiting" &&
+        this.db.participants.some((participant) => participant.session_id === session.id && participant.agent_id === agentId),
+      );
+      return (waiting ? { id: waiting.id } : null) as T | null;
+    }
+    if (this.query.includes("FROM forum_conference_control_events WHERE session_id = ? AND event_kind = ?")) {
+      return (this.db.events.find((event) => event.session_id === String(this.values[0]) && event.event_kind === String(this.values[1])) ?? null) as T | null;
+    }
+    if (this.query.includes("SELECT * FROM thread_replies WHERE id = ?")) {
+      return (this.db.replies.find((reply) => reply.id === String(this.values[0])) ?? null) as T | null;
+    }
+    return null;
+  }
+
+  async all<T = unknown>(): Promise<{ results: T[] }> {
+    if (this.query.includes("FROM forum_conference_participants")) {
+      return { results: this.db.participants.filter((participant) => participant.session_id === String(this.values[0])) as T[] };
+    }
+    if (this.query.includes("FROM forum_conference_control_events")) {
+      return { results: this.db.events.filter((event) => event.session_id === String(this.values[0])) as T[] };
+    }
+    return { results: [] };
+  }
+
+  async run() {
+    if (this.query.includes("INSERT INTO forum_conference_sessions")) {
+      const [id, threadId, humanId, displayName, createdAt] = this.values.map(String);
+      this.db.sessions.push({
+        id,
+        thread_id: threadId,
+        status: "waiting",
+        created_by_human_id: humanId,
+        created_by_display_name: displayName,
+        created_at: createdAt,
+        next_action: "return_to_waiting",
+      });
+    }
+    if (this.query.includes("INSERT INTO forum_conference_participants")) {
+      const [sessionId, agentId, joinedAt] = this.values.map(String);
+      if (!this.db.participants.some((participant) => participant.session_id === sessionId && participant.agent_id === agentId)) {
+        this.db.participants.push({ session_id: sessionId, agent_id: agentId, joined_at: joinedAt });
+      }
+    }
+    if (this.query.includes("INSERT INTO forum_conference_control_events")) {
+      const [id, sessionId, eventKind, replyId, authorId, authorDisplayName, decision, nextAction, followUp, createdAt, expectedSessionId, expectedStatus] = this.values;
+      const session = this.db.sessions.find((candidate) => candidate.id === String(expectedSessionId));
+      if (session?.status === String(expectedStatus) && !this.db.events.some((event) => event.session_id === String(sessionId) && event.event_kind === String(eventKind))) {
+        this.db.events.push({
+          id: String(id),
+          session_id: String(sessionId),
+          event_kind: String(eventKind) as "go" | "stop",
+          thread_reply_id: String(replyId),
+          author_human_id: String(authorId),
+          author_display_name: String(authorDisplayName),
+          decision: decision === null ? null : String(decision),
+          next_action: nextAction === null ? null : String(nextAction),
+          follow_up: followUp === null ? null : String(followUp),
+          status: "pending",
+          created_at: String(createdAt),
+        });
+      }
+    }
+    if (this.query.includes("INSERT INTO thread_replies")) {
+      const [id, threadId, authorId, authorDisplayName, body, createdAt] = this.values.map(String);
+      if (!this.db.replies.some((reply) => reply.id === id)) {
+        this.db.replies.push({
+          id,
+          thread_id: threadId,
+          author_id: authorId,
+          author_kind: "human",
+          author_display_name: authorDisplayName,
+          body,
+          mentions_json: "[]",
+          created_at: createdAt,
+        });
+      }
+    }
+    if (this.query.includes("SET status = 'active'")) {
+      const [startedAt, sessionId] = this.values.map(String);
+      const session = this.db.sessions.find((candidate) => candidate.id === sessionId && candidate.status === "waiting");
+      if (session) {
+        session.status = "active";
+        session.started_at = startedAt;
+      }
+    }
+    if (this.query.includes("SET status = 'stopped'")) {
+      const [stoppedAt, decision, nextAction, followUp, sessionId] = this.values;
+      const session = this.db.sessions.find((candidate) => candidate.id === String(sessionId) && candidate.status === "active");
+      if (session) {
+        session.status = "stopped";
+        session.stopped_at = String(stoppedAt);
+        session.decision = String(decision);
+        session.next_action = String(nextAction);
+        session.follow_up = followUp === null ? null : String(followUp);
+      }
+    }
+    if (this.query.includes("UPDATE forum_conference_control_events SET status = 'completed'")) {
+      const [completedAt, eventId] = this.values.map(String);
+      const event = this.db.events.find((candidate) => candidate.id === eventId);
+      if (event) {
+        event.status = "completed";
+        event.completed_at = completedAt;
+      }
+    }
+    return {};
+  }
+}
+
 describe("API auth", () => {
   it("permits the explicitly enabled local operator runtime without a token", async () => {
     const response = await onRequest({
@@ -1189,5 +1370,103 @@ describe("API auth", () => {
     if (!response) throw new Error("Expected response");
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: "signup_handle_not_allowed" });
+  });
+
+  it("persists named Go and Stop control events exactly once across repeated operator posts", async () => {
+    const db = new MockForumConferenceDb();
+    const env = {
+      DB: db,
+      OPERATOR_API_TOKEN: "operator-token",
+      OPERATOR_ID: "operator_ada",
+      OPERATOR_DISPLAY_NAME: "Ada Example",
+    } as never;
+    const request = (path: string, body: Record<string, unknown>) => onRequest({
+      request: new Request(`https://example.test/api/operator/${path}`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer operator-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      }),
+      env,
+    });
+
+    const created = await request("forum-conferences", { threadId: "thread_design" });
+    expect(created?.status).toBe(201);
+    const createdPayload = await created?.json() as { session?: { id?: string; createdByDisplayName?: string } };
+    const sessionId = createdPayload.session?.id;
+    expect(sessionId).toBeTruthy();
+    expect(createdPayload.session?.createdByDisplayName).toBe("Ada Example");
+
+    expect((await request(`forum-conferences/${sessionId}/participants`, { agentId: "agent_a" }))?.status).toBe(200);
+    expect((await request(`forum-conferences/${sessionId}/go`, {}))?.status).toBe(200);
+    expect((await request(`forum-conferences/${sessionId}/go`, {}))?.status).toBe(200);
+    expect((await request(`forum-conferences/${sessionId}/stop`, {
+      decision: "Adopt the recorded approach.",
+      followUp: "Agent A implements the agreed change.",
+    }))?.status).toBe(200);
+    const replayedStop = await request(`forum-conferences/${sessionId}/stop`, {
+      decision: "Ignored replay value.",
+      followUp: "Ignored replay follow-up.",
+    });
+    expect(replayedStop?.status).toBe(200);
+    const replayedPayload = await replayedStop?.json() as {
+      session?: { status?: string; decision?: string; nextAction?: string; followUp?: string; controlEvents?: Array<{ status?: string }> };
+    };
+
+    expect(db.events).toHaveLength(2);
+    expect(db.events.every((event) => event.status === "completed")).toBe(true);
+    expect(db.replies.map((reply) => reply.body)).toEqual([
+      "CONFERENCE GO",
+      "CONFERENCE STOP — decision: Adopt the recorded approach. — follow-up: Agent A implements the agreed change.",
+    ]);
+    expect(replayedPayload.session).toMatchObject({
+      status: "stopped",
+      decision: "Adopt the recorded approach.",
+      nextAction: "follow_up",
+      followUp: "Agent A implements the agreed change.",
+    });
+    expect(replayedPayload.session?.controlEvents).toHaveLength(2);
+  });
+
+  it("blocks a waiting conference participant from posting before the human Go signal", async () => {
+    const db = new MockForumConferenceDb();
+    db.sessions.push({
+      id: "conference_waiting",
+      thread_id: "thread_design",
+      status: "waiting",
+      created_by_human_id: "operator_ada",
+      created_by_display_name: "Ada Example",
+      created_at: "2026-08-03T10:00:00.000Z",
+    });
+    db.participants.push({
+      session_id: "conference_waiting",
+      agent_id: "agent_a",
+      joined_at: "2026-08-03T10:01:00.000Z",
+    });
+    const response = await onRequest({
+      request: new Request("https://example.test/api/agent/thread-replies", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer minted-agent-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ threadId: "thread_design", authorId: "agent_a", body: "Starting too soon." }),
+      }),
+      env: {
+        DB: db,
+        DOMAIN_WORKSPACE_CONFIG: JSON.stringify({
+          domains: [{ id: "general", name: "General" }],
+          defaultDomainId: "general",
+          writePolicy: "home_and_default",
+        }),
+      } as never,
+    });
+    expect(response?.status).toBe(409);
+    await expect(response?.json()).resolves.toMatchObject({
+      code: "conference_waiting",
+      conferenceId: "conference_waiting",
+    });
   });
 });

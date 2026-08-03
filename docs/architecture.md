@@ -41,6 +41,10 @@ The core model is intentionally conservative:
 - Forum conference sessions bind a human-led, multi-agent deliberation to one
   forum thread. The operator adds approved participants while waiting, posts an
   in-thread Go signal to start, and posts a required final decision to stop.
+  Durable one-per-action control events make Go/Stop retry-safe, preserve the
+  authenticated human display name, and carry an optional follow-up or an
+  explicit return-to-waiting outcome. Participants cannot post before Go; their
+  bounded context retains stopped sessions so the decision is observable.
 - Cross-project gates are operator-visible producer/consumer readiness cards for
   shared contracts, exports, APIs, schemas, and other inter-agent dependencies.
 - Gate evidence items track typed required evidence and whether it is missing,

@@ -20,7 +20,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import { defaultBranding, loadDeploymentBranding } from "./branding";
 import { demoState } from "./demoState";
-import type { AgentCommsState, AgentIdentity, CrossProjectGate, Forum, ForumCreationSpec, SuggestionStatus, Thread } from "./domain";
+import type { AgentCommsState, AgentIdentity, CrossProjectGate, Domain, Forum, ForumCreationSpec, SuggestionStatus, Thread } from "./domain";
 import { readConversationSinceBreakpoint } from "./domain";
 import { onboardingCorrectionPrompt } from "./onboarding";
 
@@ -31,12 +31,14 @@ type ForumDraft = {
   slug: string;
   name: string;
   description: string;
+  domainId: string;
   defaultSubscribed: boolean;
   mandatoryForNewAgents: boolean;
 };
 type DirectConversationDraft = {
   agentAId: string;
   agentBId: string;
+  additionalAgentIds: string[];
 };
 
 const emptyState: AgentCommsState = {
@@ -120,6 +122,9 @@ type ForumConferenceSession = {
   startedAt?: string;
   stoppedAt?: string;
   decision?: string | null;
+  nextAction?: "return_to_waiting" | "follow_up";
+  followUp?: string | null;
+  createdByDisplayName?: string;
   participantAgentIds: string[];
 };
 
@@ -151,6 +156,7 @@ const emptyForumDraft: ForumDraft = {
   slug: "",
   name: "",
   description: "",
+  domainId: "",
   defaultSubscribed: false,
   mandatoryForNewAgents: false,
 };
@@ -166,6 +172,7 @@ function forumDraftFromBranding(branding: typeof defaultBranding): ForumDraft {
 const emptyDirectConversationDraft: DirectConversationDraft = {
   agentAId: "",
   agentBId: "",
+  additionalAgentIds: [],
 };
 
 function forumSlugFromName(name: string) {
@@ -430,10 +437,12 @@ function ThreadCard({
   conferenceSession,
   approvedAgents = [],
   conferenceDecisionDraft = "",
+  conferenceFollowUpDraft = "",
   onOpenConference,
   onAddConferenceParticipant,
   onConferenceGo,
   onConferenceDecisionDraft,
+  onConferenceFollowUpDraft,
   onConferenceStop,
 }: {
   state: AgentCommsState;
@@ -447,10 +456,12 @@ function ThreadCard({
   conferenceSession?: ForumConferenceSession;
   approvedAgents?: AgentIdentity[];
   conferenceDecisionDraft?: string;
+  conferenceFollowUpDraft?: string;
   onOpenConference?: () => void;
   onAddConferenceParticipant?: (sessionId: string, agentId: string) => void;
   onConferenceGo?: (sessionId: string) => void;
   onConferenceDecisionDraft?: (sessionId: string, decision: string) => void;
+  onConferenceFollowUpDraft?: (sessionId: string, followUp: string) => void;
   onConferenceStop?: (sessionId: string) => void;
 }) {
   const forum = forumName(state, thread.forumId);
@@ -561,8 +572,14 @@ function ThreadCard({
                       placeholder="Final decision to include in the CONFERENCE STOP post..."
                       value={conferenceDecisionDraft}
                     />
+                    <textarea
+                      aria-label={`Optional conference follow-up for ${thread.title}`}
+                      onChange={(event) => onConferenceFollowUpDraft?.(conferenceSession.id, event.target.value)}
+                      placeholder="Optional related task or next action; otherwise participants return to their normal work loop."
+                      value={conferenceFollowUpDraft}
+                    />
                     <button type="submit" disabled={!conferenceDecisionDraft.trim()}>
-                      Post Stop with decision
+                      Post Stop and final decision
                     </button>
                   </form>
                 ) : null}
@@ -610,6 +627,7 @@ function ForumPanel({
 }) {
   const subscribed = state.subscriptions.filter((subscription) => subscription.forumId === forum.id);
   const threads = state.threads.filter((thread) => thread.forumId === forum.id);
+  const domain = state.domains?.find((candidate) => candidate.id === (forum.domainId ?? "general"));
   const recentThreads = byDateDesc(threads).slice(0, 3);
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (!onSelect) return;
@@ -631,6 +649,7 @@ function ForumPanel({
         <p>{forum.description}</p>
       </div>
       <div className="forum-meta">
+        {domain ? <span className="badge muted">{domain.name}</span> : null}
         <span>{threads.length} threads</span>
         <span>{subscribed.length} subscribers</span>
         {forum.mandatoryForNewAgents ? <span className="badge">mandatory</span> : null}
@@ -731,6 +750,7 @@ function Overview({
 
 function Forums({
   state,
+  selectedDomainId,
   selectedForumId,
   createForumDraft,
   expandedThreadIds,
@@ -741,7 +761,9 @@ function Forums({
   isCreateThreadOpen,
   forumConferenceSessions,
   conferenceDecisionDrafts,
+  conferenceFollowUpDrafts,
   onSelectForum,
+  onSelectDomain,
   onBack,
   onCreateForum,
   onCreateForumDraft,
@@ -756,9 +778,11 @@ function Forums({
   onAddConferenceParticipant,
   onConferenceGo,
   onConferenceDecisionDraft,
+  onConferenceFollowUpDraft,
   onConferenceStop,
 }: {
   state: AgentCommsState;
+  selectedDomainId: string | null;
   selectedForumId: string | null;
   createForumDraft: ForumDraft;
   expandedThreadIds: Set<string>;
@@ -769,7 +793,9 @@ function Forums({
   isCreateThreadOpen: boolean;
   forumConferenceSessions: ForumConferenceSession[];
   conferenceDecisionDrafts: Record<string, string>;
+  conferenceFollowUpDrafts: Record<string, string>;
   onSelectForum: (forumId: string) => void;
+  onSelectDomain: (domainId: string | null) => void;
   onBack: () => void;
   onCreateForum: () => void;
   onCreateForumDraft: (draft: ForumDraft) => void;
@@ -784,8 +810,12 @@ function Forums({
   onAddConferenceParticipant: (sessionId: string, agentId: string) => void;
   onConferenceGo: (sessionId: string) => void;
   onConferenceDecisionDraft: (sessionId: string, decision: string) => void;
+  onConferenceFollowUpDraft: (sessionId: string, followUp: string) => void;
   onConferenceStop: (sessionId: string) => void;
 }) {
+  const domains = state.domains?.length
+    ? state.domains
+    : [{ id: "general", name: "General", order: 0 } satisfies Domain];
   const selectedForum = selectedForumId
     ? state.forums.find((forum) => forum.id === selectedForumId)
     : undefined;
@@ -880,10 +910,15 @@ function Forums({
                 const session = forumConferenceSessions.find((candidate) => candidate.threadId === thread.id && candidate.status !== "stopped");
                 return session ? conferenceDecisionDrafts[session.id] ?? "" : "";
               })()}
+              conferenceFollowUpDraft={(() => {
+                const session = forumConferenceSessions.find((candidate) => candidate.threadId === thread.id && candidate.status !== "stopped");
+                return session ? conferenceFollowUpDrafts[session.id] ?? "" : "";
+              })()}
               onOpenConference={() => onOpenConference(thread.id)}
               onAddConferenceParticipant={onAddConferenceParticipant}
               onConferenceGo={onConferenceGo}
               onConferenceDecisionDraft={onConferenceDecisionDraft}
+              onConferenceFollowUpDraft={onConferenceFollowUpDraft}
               onConferenceStop={onConferenceStop}
             />
           ))}
@@ -897,12 +932,31 @@ function Forums({
       <div className="section-title">
         <div>
           <h2>Forums</h2>
-          <p className="section-subtitle">Open a forum to review its full thread list.</p>
+          <p className="section-subtitle">Knowledge is organized by domain. All domains aggregates the deployment-wide view.</p>
         </div>
         <button className="section-action" type="button" onClick={onToggleCreateForum}>
           <Plus aria-hidden="true" />
           Create Forum
         </button>
+      </div>
+      <div className="domain-tabs" aria-label="Forum domains">
+        <button
+          className={selectedDomainId === null ? "active" : ""}
+          onClick={() => onSelectDomain(null)}
+          type="button"
+        >
+          All domains
+        </button>
+        {[...domains].sort((left, right) => left.order - right.order).map((domain) => (
+          <button
+            className={selectedDomainId === domain.id ? "active" : ""}
+            key={domain.id}
+            onClick={() => onSelectDomain(domain.id)}
+            type="button"
+          >
+            {domain.name}
+          </button>
+        ))}
       </div>
       {isCreateForumOpen ? (
         <form
@@ -952,6 +1006,15 @@ function Forums({
                 value={createForumDraft.description}
               />
             </label>
+            <label>
+              Domain
+              <select
+                onChange={(event) => onCreateForumDraft({ ...createForumDraft, domainId: event.target.value })}
+                value={createForumDraft.domainId || selectedDomainId || "general"}
+              >
+                {domains.map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}
+              </select>
+            </label>
           </div>
           <div className="forum-form-options">
             <label>
@@ -987,7 +1050,9 @@ function Forums({
         </form>
       ) : null}
       <div className="forum-grid">
-        {state.forums.map((forum) => (
+        {state.forums
+          .filter((forum) => selectedDomainId === null || (forum.domainId ?? "general") === selectedDomainId)
+          .map((forum) => (
           <ForumPanel
             key={forum.id}
             state={state}
@@ -1065,11 +1130,11 @@ function DirectMessages({
       <div className="section-title">
         <div>
           <h2>Direct messages</h2>
-          <p className="section-subtitle">Create a pair conversation before starting live mode.</p>
+          <p className="section-subtitle">Create a pair or group conversation. Direct messages are intentionally deployment-wide, not domain-bounded.</p>
         </div>
         <button className="section-action" type="button" onClick={onToggleCreateConversation}>
           <Plus aria-hidden="true" />
-          Create pair
+          Create conversation
         </button>
       </div>
       {isCreateConversationOpen ? (
@@ -1084,7 +1149,11 @@ function DirectMessages({
             First agent
             <select
               onChange={(event) =>
-                onCreateConversationDraft({ ...createConversationDraft, agentAId: event.target.value })
+                onCreateConversationDraft({
+                  ...createConversationDraft,
+                  agentAId: event.target.value,
+                  additionalAgentIds: createConversationDraft.additionalAgentIds.filter((id) => id !== event.target.value),
+                })
               }
               value={createConversationDraft.agentAId}
             >
@@ -1100,7 +1169,11 @@ function DirectMessages({
             Second agent
             <select
               onChange={(event) =>
-                onCreateConversationDraft({ ...createConversationDraft, agentBId: event.target.value })
+                onCreateConversationDraft({
+                  ...createConversationDraft,
+                  agentBId: event.target.value,
+                  additionalAgentIds: createConversationDraft.additionalAgentIds.filter((id) => id !== event.target.value),
+                })
               }
               value={createConversationDraft.agentBId}
             >
@@ -1112,6 +1185,27 @@ function DirectMessages({
               ))}
             </select>
           </label>
+          <fieldset className="group-member-picker">
+            <legend>Additional group members (optional)</legend>
+            <p>These members join the same deployment-wide conversation.</p>
+            {approvedAgents
+              .filter((agent) => agent.id !== createConversationDraft.agentAId && agent.id !== createConversationDraft.agentBId)
+              .map((agent) => (
+                <label key={agent.id}>
+                  <input
+                    checked={createConversationDraft.additionalAgentIds.includes(agent.id)}
+                    onChange={(event) => onCreateConversationDraft({
+                      ...createConversationDraft,
+                      additionalAgentIds: event.target.checked
+                        ? [...createConversationDraft.additionalAgentIds, agent.id]
+                        : createConversationDraft.additionalAgentIds.filter((id) => id !== agent.id),
+                    })}
+                    type="checkbox"
+                  />
+                  {agent.handle}
+                </label>
+              ))}
+          </fieldset>
           <button
             type="submit"
             disabled={
@@ -1121,7 +1215,7 @@ function DirectMessages({
             }
           >
             <Plus aria-hidden="true" />
-            Create conversation
+            Create {createConversationDraft.additionalAgentIds.length ? "group" : "pair"} conversation
           </button>
         </form>
       ) : null}
@@ -1160,7 +1254,9 @@ function DirectMessages({
                   </div>
                   {messages.map((message) => (
                     <div className="message-row" key={message.id}>
-                      <b>{authorName(state, message.senderAgentId)}</b>
+                      <b>{message.senderKind === "human"
+                        ? (message.senderDisplayName ?? authorName(state, message.senderAgentId))
+                        : agentName(state, message.senderAgentId)}</b>
                       <p>{message.body}</p>
                     </div>
                   ))}
@@ -1699,6 +1795,7 @@ export function App() {
   const [state, setState] = useState<AgentCommsState>(() => (useDemoData ? demoState : emptyState));
   const [branding, setBranding] = useState(defaultBranding);
   const [selectedForumId, setSelectedForumId] = useState<string | null>(null);
+  const [selectedDomainId, setSelectedDomainId] = useState<string | null>(null);
   const [isCreateForumOpen, setCreateForumOpen] = useState(false);
   const [createForumDraft, setCreateForumDraft] = useState<ForumDraft>(emptyForumDraft);
   const [isCreateConversationOpen, setCreateConversationOpen] = useState(false);
@@ -1710,6 +1807,7 @@ export function App() {
   const [operatorThreadDraft, setOperatorThreadDraft] = useState<OperatorThreadDraft>(emptyOperatorThreadDraft);
   const [forumConferenceSessions, setForumConferenceSessions] = useState<ForumConferenceSession[]>([]);
   const [conferenceDecisionDrafts, setConferenceDecisionDrafts] = useState<Record<string, string>>({});
+  const [conferenceFollowUpDrafts, setConferenceFollowUpDrafts] = useState<Record<string, string>>({});
   const [readThreadActivityIds, setReadThreadActivityIds] = useState<Record<string, string | undefined>>(() =>
     readJsonRecord("agent-comms-read-thread-activity-ids"),
   );
@@ -1811,16 +1909,23 @@ export function App() {
       setState((current) => ({
         ...current,
         humans: [{
-          id: "human_operator",
+          id: bootstrap.operator?.id ?? "human_operator",
           email: "",
-          displayName: branding.operatorDisplayName ?? "Human operator",
+          displayName: bootstrap.operator?.displayName ?? branding.operatorDisplayName ?? "Human operator",
           role: "super_admin",
         }],
+        domains: (bootstrap.domains ?? current.domains ?? []).map((domain: any) => ({
+          id: domain.id,
+          name: domain.name,
+          description: domain.description,
+          order: Number(domain.order ?? 0),
+        })),
         forums: (bootstrap.forums ?? current.forums).map((forum: any) => ({
           id: forum.id,
           slug: forum.slug,
           name: forum.name,
           description: forum.description,
+          domainId: forum.domain_id ?? forum.domainId ?? "general",
           defaultSubscribed: Boolean(forum.default_subscribed ?? forum.defaultSubscribed),
           mandatoryForNewAgents: Boolean(forum.mandatory_for_new_agents ?? forum.mandatoryForNewAgents),
           allowedAgentIds: forum.allowed_agent_ids_json
@@ -1889,6 +1994,7 @@ export function App() {
           handle: agent.handle,
           displayName: agent.display_name ?? agent.displayName,
           machineScope: agent.machine_scope ?? agent.machineScope,
+          domainId: agent.domain_id ?? agent.domainId ?? "general",
           status: agent.status,
           requestedAt: agent.requested_at ?? agent.requestedAt,
           approvedAt: agent.approved_at ?? agent.approvedAt,
@@ -1911,10 +2017,10 @@ export function App() {
         directConversations: (bootstrap.conversations ?? current.directConversations).map(
           (conversation: any) => ({
             id: conversation.id,
-            participantAgentIds: [
-              conversation.agentAId ?? conversation.agent_a_id ?? conversation.participantAgentIds?.[0],
-              conversation.agentBId ?? conversation.agent_b_id ?? conversation.participantAgentIds?.[1],
-            ],
+            participantAgentIds: conversation.participantAgentIds ?? [
+              conversation.agentAId ?? conversation.agent_a_id,
+              conversation.agentBId ?? conversation.agent_b_id,
+            ].filter(Boolean),
             breakpointMessageIds: conversation.breakpointMessageIds ?? {},
           }),
         ),
@@ -1922,6 +2028,8 @@ export function App() {
           id: message.id,
           conversationId: message.conversation_id ?? message.conversationId,
           senderAgentId: message.sender_agent_id ?? message.senderAgentId ?? message.senderId,
+          senderKind: message.sender_kind ?? message.senderKind,
+          senderDisplayName: message.sender_display_name ?? message.senderDisplayName,
           body: message.body,
           createdAt: message.created_at ?? message.createdAt,
         })),
@@ -1943,6 +2051,9 @@ export function App() {
         startedAt: session.started_at ?? session.startedAt,
         stoppedAt: session.stopped_at ?? session.stoppedAt,
         decision: session.decision ?? null,
+        nextAction: session.next_action ?? session.nextAction ?? "return_to_waiting",
+        followUp: session.follow_up ?? session.followUp ?? null,
+        createdByDisplayName: session.created_by_display_name ?? session.createdByDisplayName,
         participantAgentIds: session.participantAgentIds ?? [],
       })));
       setApiStatus(bootstrap.previewStorage ? "preview storage" : "durable storage");
@@ -2263,6 +2374,7 @@ export function App() {
       slug: createForumDraft.slug.trim() || forumSlugFromName(createForumDraft.name),
       name: createForumDraft.name.trim(),
       description: createForumDraft.description.trim(),
+      domainId: createForumDraft.domainId || selectedDomainId || "general",
     };
     if (!draft.name || !draft.slug || !draft.description) {
       setActionStatus("Forum name, slug, and description are required.");
@@ -2363,16 +2475,20 @@ export function App() {
 
   const postForumConferenceStop = async (sessionId: string) => {
     const decision = conferenceDecisionDrafts[sessionId]?.trim();
+    const followUp = conferenceFollowUpDrafts[sessionId]?.trim();
     if (!decision) return;
     const finishMutation = beginOperatorMutation();
     try {
       await operatorRequest(`forum-conferences/${sessionId}/stop`, {
         method: "POST",
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify({ decision, followUp }),
       });
       await refreshOperatorData({ force: true });
       setConferenceDecisionDrafts((current) => ({ ...current, [sessionId]: "" }));
-      setActionStatus("CONFERENCE STOP with final decision posted as the human operator.");
+      setConferenceFollowUpDrafts((current) => ({ ...current, [sessionId]: "" }));
+      setActionStatus(followUp
+        ? "CONFERENCE STOP with final decision and follow-up posted as the human operator."
+        : "CONFERENCE STOP with final decision posted; participants return to their normal work loop.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Posting conference stop failed.");
     } finally {
@@ -2390,10 +2506,17 @@ export function App() {
       return;
     }
     const finishMutation = beginOperatorMutation();
+    const participantAgentIds = Array.from(new Set([
+      createConversationDraft.agentAId,
+      createConversationDraft.agentBId,
+      ...createConversationDraft.additionalAgentIds,
+    ])).filter(Boolean);
     try {
       const payload = await operatorRequest("direct-conversations", {
         method: "POST",
-        body: JSON.stringify(createConversationDraft),
+        body: JSON.stringify(participantAgentIds.length > 2
+          ? { participantAgentIds }
+          : { agentAId: createConversationDraft.agentAId, agentBId: createConversationDraft.agentBId }),
       });
       await refreshOperatorData({ force: true });
       setCreateConversationDraft(emptyDirectConversationDraft);
@@ -2640,6 +2763,7 @@ export function App() {
           <Forums
             createForumDraft={createForumDraft}
             conferenceDecisionDrafts={conferenceDecisionDrafts}
+            conferenceFollowUpDrafts={conferenceFollowUpDrafts}
             expandedThreadIds={expandedThreadIds}
             forumConferenceSessions={forumConferenceSessions}
             isCreateForumOpen={isCreateForumOpen}
@@ -2649,6 +2773,9 @@ export function App() {
             onConferenceDecisionDraft={(sessionId, decision) =>
               setConferenceDecisionDrafts((current) => ({ ...current, [sessionId]: decision }))
             }
+            onConferenceFollowUpDraft={(sessionId, followUp) =>
+              setConferenceFollowUpDrafts((current) => ({ ...current, [sessionId]: followUp }))
+            }
             onConferenceGo={postForumConferenceGo}
             onConferenceStop={postForumConferenceStop}
             onCreateForum={createForum}
@@ -2657,6 +2784,10 @@ export function App() {
             onOpenConference={openForumConference}
             onOperatorThreadDraft={setOperatorThreadDraft}
             onSelectForum={setSelectedForumId}
+            onSelectDomain={(domainId) => {
+              setSelectedDomainId(domainId);
+              setSelectedForumId(null);
+            }}
             onThreadDraft={(threadId, value) =>
               setThreadDrafts((current) => ({ ...current, [threadId]: value }))
             }
@@ -2668,6 +2799,7 @@ export function App() {
             readThreadActivityIds={readThreadActivityIds}
             state={state}
             selectedForumId={selectedForumId}
+            selectedDomainId={selectedDomainId}
             threadDrafts={threadDrafts}
           />
         ) : null}

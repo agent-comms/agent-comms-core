@@ -247,6 +247,35 @@ svg {
   gap: 12px;
 }
 
+.domain-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.domain-tabs button {
+  border: 1px solid var(--color-line-strong);
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.domain-tabs button:hover,
+.domain-tabs button:focus-visible {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+  outline: 0;
+}
+
+.domain-tabs button.active {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-inverse);
+}
+
 .stat,
 .operator-box,
 .thread-card,
@@ -743,6 +772,31 @@ meter {
   border-radius: 8px;
   background: var(--color-surface);
   box-shadow: var(--shadow-card);
+}
+
+.group-member-picker {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: 0;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.group-member-picker legend,
+.group-member-picker p {
+  width: 100%;
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 0.82rem;
+}
+
+.group-member-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .direct-create-panel label {
