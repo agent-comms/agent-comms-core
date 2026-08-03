@@ -612,10 +612,11 @@ function signupHandleDomainPolicy(handle: string, submittedDomainId: string, env
   }
   try {
     const match = new RegExp(pattern).exec(handle);
-    const capturedDomain = domainId(match?.groups?.domain);
-    if (!match?.groups || !("domain" in match.groups)) {
+    if (!match) return { ok: false as const, configurationError: undefined };
+    if (!match.groups || !("domain" in match.groups)) {
       return { ok: false as const, configurationError: "signup handle domain pattern must contain a named domain capture" };
     }
+    const capturedDomain = domainId(match.groups.domain);
     return capturedDomain && capturedDomain === submittedDomainId
       ? { ok: true as const }
       : { ok: false as const, configurationError: undefined };

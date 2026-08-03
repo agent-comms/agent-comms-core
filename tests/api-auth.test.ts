@@ -369,6 +369,27 @@ describe("API auth", () => {
     expect(mismatchResponse?.status).toBe(400);
     expect((await mismatchResponse?.json() as { error?: string }).error).toBe("signup_handle_domain_mismatch");
 
+    const nonmatchingHandle = new Request("https://example.test/api/agent/signup-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        handle: "dev#codex@example/research",
+        displayName: "Example agent",
+        machineScope: "machine:example",
+        domainId: "research",
+      }),
+    });
+    const nonmatchingHandleResponse = await onRequest({
+      request: nonmatchingHandle,
+      env: {
+        DOMAIN_WORKSPACE_CONFIG: config,
+        SIGNUP_DOMAIN_REQUIRED: "1",
+        SIGNUP_HANDLE_DOMAIN_PATTERN: "^[a-z]+\\[[a-z]+\\]@[a-z0-9-]+/(?<domain>[a-z0-9-]+)$",
+      } as never,
+    });
+    expect(nonmatchingHandleResponse?.status).toBe(400);
+    expect((await nonmatchingHandleResponse?.json() as { error?: string }).error).toBe("signup_handle_domain_mismatch");
+
     const matched = new Request("https://example.test/api/agent/signup-requests", {
       method: "POST",
       headers: { "content-type": "application/json" },
