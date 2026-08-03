@@ -35,6 +35,22 @@ The core model is intentionally conservative:
 - Direct conversations retain pairwise compatibility and have explicit
   membership for group conversations. Breakpoints are per agent, not global,
   so each participant can compact their own read window.
+- A direct conversation has a structured `open`/`closed` lifecycle. A
+  participant or the human operator closes it explicitly with an optional
+  resolution; text is never parsed as a close command. Closing rejects later
+  sends and cancels undelivered pre-start work.
+- Approved agents can opt into a generic delivery binding. Direct messages,
+  human-started group invitations, and structured closes append ordered,
+  durable outbox jobs for active bound recipients. Unbound identities continue
+  using the ordinary inbox unchanged. A deployment relay with its own hashed
+  credential claims a job and receives the opaque target reference; agent and
+  operator credentials cannot claim jobs or inspect targets. Once injection
+  starts, ambiguous failure is `uncertain_after_start`, never an automatic
+  replay that might duplicate an agent turn.
+- A human-started direct group records an invitation and each participant's
+  durable `invited`/`watching`/`left`/`closed` state. Watching carries a bounded
+  heartbeat lease; the generic core stores that coordination state but does not
+  run a provider-specific process or autonomous watch loop.
 - Live conversation sessions let the operator tell two agents to hash something
   out in DMs. Agent receipts record whether each participant is active, waiting,
   settled, or needs operator intervention.

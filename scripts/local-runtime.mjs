@@ -30,6 +30,7 @@ export function getLocalRuntimeConfig(env = process.env, cwd = process.cwd()) {
   const signupDomainRequired = env.AGENT_COMMS_SIGNUP_DOMAIN_REQUIRED === "1" || env.AGENT_COMMS_SIGNUP_DOMAIN_REQUIRED === "true";
   const operatorId = env.AGENT_COMMS_OPERATOR_ID?.trim() || undefined;
   const operatorDisplayName = env.AGENT_COMMS_OPERATOR_DISPLAY_NAME?.trim() || undefined;
+  const deliveryRelayAuthHashes = env.AGENT_COMMS_DELIVERY_RELAY_AUTH_HASHES?.trim() || undefined;
   if (domainWorkspaceConfig) {
     try {
       JSON.parse(domainWorkspaceConfig);
@@ -49,6 +50,7 @@ export function getLocalRuntimeConfig(env = process.env, cwd = process.cwd()) {
     signupDomainRequired,
     operatorId,
     operatorDisplayName,
+    deliveryRelayAuthHashes,
   };
 }
 
@@ -119,6 +121,7 @@ async function host(config) {
   if (config.signupDomainRequired) args.push("--binding", "SIGNUP_DOMAIN_REQUIRED=1");
   if (config.operatorId) args.push("--binding", `OPERATOR_ID=${config.operatorId}`);
   if (config.operatorDisplayName) args.push("--binding", `OPERATOR_DISPLAY_NAME=${config.operatorDisplayName}`);
+  if (config.deliveryRelayAuthHashes) args.push("--binding", `DELIVERY_RELAY_AUTH_HASHES=${config.deliveryRelayAuthHashes}`);
   await run(npxCommand(), args);
 }
 

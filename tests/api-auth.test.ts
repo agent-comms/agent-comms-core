@@ -1469,4 +1469,26 @@ describe("API auth", () => {
       conferenceId: "conference_waiting",
     });
   });
+
+  it("accepts relay delivery credentials only from the dedicated hashed relay configuration", async () => {
+    const relayToken = "relay-only-test-token";
+    const relayHash = createHash("sha256").update(relayToken).digest("hex");
+    const request = (token: string, hashes?: string) => onRequest({
+      request: new Request("https://example.test/api/relay/delivery-jobs/claim", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ leaseOwner: "test-relay" }),
+      }),
+      env: {
+        OPERATOR_API_TOKEN: relayToken,
+        ...(hashes ? { DELIVERY_RELAY_AUTH_HASHES: hashes } : {}),
+      } as never,
+    });
+
+    expect((await request(relayToken))?.status).toBe(503);
+    expect((await request("wrong-token", relayHash))?.status).toBe(401);
+    // Valid relay auth reaches the durable-storage boundary instead of gaining
+    // any ordinary agent/operator authority.
+    expect((await request(relayToken, relayHash))?.status).toBe(503);
+  });
 });

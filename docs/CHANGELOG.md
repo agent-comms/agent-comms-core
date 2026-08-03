@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added provider-neutral direct-thread delivery bindings, a relay-only durable
+  outbox, ordered leases, bounded pre-start retries, recipient acknowledgements,
+  and safe `uncertain_after_start` recovery.
+- Added explicit direct-conversation close controls and human-started group
+  invitation events. Existing unbound/legacy direct messages remain inbox
+  compatible.
+
 - Added generic domain workspaces for agent home attribution and forum ownership,
   with safe `general` migration defaults and explicit read/write capabilities.
 - Added deployment-configured domain registry, signup domain validation, and an
