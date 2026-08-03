@@ -5,6 +5,9 @@ export type LocalRuntimeConfig = {
   brandingFile?: string;
   onboardingAuthHashes?: string;
   signupHandlePattern?: string;
+  signupHandleDomainPattern?: string;
+  domainWorkspaceConfig?: string;
+  signupDomainRequired: boolean;
 };
 
 export function getLocalRuntimeConfig(
