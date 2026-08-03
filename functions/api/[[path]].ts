@@ -226,7 +226,13 @@ function domainWorkspaceConfig(env: Env): { ok: true; config: DomainWorkspaceCon
   if (!domains.some((domain) => domain.id === "general")) {
     return { ok: false, error: "Configured domains must include the general fallback domain." };
   }
-  const defaultDomainId = domainId(input.defaultDomainId) || "general";
+  const configuredDefaultDomainId = input.defaultDomainId === undefined
+    ? ""
+    : domainId(input.defaultDomainId);
+  if (input.defaultDomainId !== undefined && !configuredDefaultDomainId) {
+    return { ok: false, error: "defaultDomainId must be a valid domain slug." };
+  }
+  const defaultDomainId = configuredDefaultDomainId || "general";
   if (!domains.some((domain) => domain.id === defaultDomainId)) {
     return { ok: false, error: "defaultDomainId must name one configured domain." };
   }
@@ -238,12 +244,20 @@ function domainWorkspaceConfig(env: Env): { ok: true; config: DomainWorkspaceCon
 }
 
 function domainCapabilities(config: DomainWorkspaceConfig, homeDomainId: string, targetDomainId: string) {
+  const targetIsConfigured = config.domains.some((domain) => domain.id === targetDomainId);
   return {
     read: true,
-    write: config.writePolicy === "all"
+    write: targetIsConfigured && (config.writePolicy === "all"
       || homeDomainId === targetDomainId
-      || (config.writePolicy === "home_and_default" && targetDomainId === config.defaultDomainId),
+      || (config.writePolicy === "home_and_default" && targetDomainId === config.defaultDomainId)),
   };
+}
+
+function configuredDomainId(config: DomainWorkspaceConfig, value: unknown) {
+  const candidate = domainId(value);
+  return config.domains.some((domain) => domain.id === candidate)
+    ? candidate
+    : config.defaultDomainId;
 }
 
 function requireDomainWorkspaceConfig(env: Env): { ok: true; config: DomainWorkspaceConfig } | { ok: false; response: Response } {
@@ -266,12 +280,12 @@ async function ensureConfiguredDomains(database: D1Database | PgDatabase, config
   }
 }
 
-async function agentDomain(database: D1Database | PgDatabase, agentId: string, fallback: string) {
+async function agentDomain(database: D1Database | PgDatabase, agentId: string, config: DomainWorkspaceConfig) {
   const row = await database
     .prepare("SELECT domain_id FROM agent_identities WHERE id = ?")
     .bind(agentId)
     .first<{ domain_id?: string }>();
-  return domainId(row?.domain_id) || fallback;
+  return configuredDomainId(config, row?.domain_id);
 }
 
 async function assertAgentCanWriteDomain(
@@ -280,7 +294,16 @@ async function assertAgentCanWriteDomain(
   targetDomainId: string,
   config: DomainWorkspaceConfig,
 ) {
-  const homeDomainId = await agentDomain(database, agentId, config.defaultDomainId);
+  if (!config.domains.some((domain) => domain.id === targetDomainId)) {
+    return {
+      ok: false as const,
+      response: json({
+        error: "The target domain is not configured for this deployment.",
+        domainId: targetDomainId,
+      }, 409),
+    };
+  }
+  const homeDomainId = await agentDomain(database, agentId, config);
   if (!domainCapabilities(config, homeDomainId, targetDomainId).write) {
     return {
       ok: false as const,
@@ -430,39 +453,24 @@ async function participantsForConversation(database: D1Database | PgDatabase, co
 async function ensureDirectConversation(database: D1Database | PgDatabase, requestedParticipants: string[]) {
   const participants = normalizedParticipants(requestedParticipants);
   if (participants.length < 2) throw new Error("Direct conversations require at least two distinct agents.");
-  if (participants.length === 2) {
-    const pair = orderedAgentPair(participants[0], participants[1]);
-    const existing = await database
-      .prepare(
-        `SELECT id, agent_a_id, agent_b_id
-         FROM direct_conversations c
-         WHERE c.agent_a_id = ? AND c.agent_b_id = ?
-           AND 2 = (
-             SELECT COUNT(*) FROM direct_conversation_participants p
-             WHERE p.conversation_id = c.id
-           )`,
-      )
-      .bind(pair.agentAId, pair.agentBId)
-      .first<Row>();
-    if (existing) {
-      await database
-        .prepare(
-          `INSERT INTO direct_conversation_participants (conversation_id, agent_id)
-           VALUES (?, ?)
-           ON CONFLICT(conversation_id, agent_id) DO NOTHING`,
-        )
-        .bind(String(existing.id), pair.agentAId)
-        .run();
-      await database
-        .prepare(
-          `INSERT INTO direct_conversation_participants (conversation_id, agent_id)
-           VALUES (?, ?)
-           ON CONFLICT(conversation_id, agent_id) DO NOTHING`,
-        )
-        .bind(String(existing.id), pair.agentBId)
-        .run();
-      return { conversation: normalizeConversation(existing, participants), existing: true };
-    }
+  const existing = await database
+    .prepare(
+      `SELECT id, agent_a_id, agent_b_id
+       FROM direct_conversations c
+       WHERE ? = (
+         SELECT COUNT(*) FROM direct_conversation_participants p
+         WHERE p.conversation_id = c.id
+       )
+         AND NOT EXISTS (
+           SELECT 1 FROM direct_conversation_participants p
+           WHERE p.conversation_id = c.id
+             AND p.agent_id NOT IN (${participants.map(() => "?").join(", ")})
+         )`,
+    )
+    .bind(participants.length, ...participants)
+    .first<Row>();
+  if (existing) {
+    return { conversation: normalizeConversation(existing, participants), existing: true };
   }
   const pair = orderedAgentPair(participants[0], participants[1]);
   const id = makeId("dm");
@@ -1174,7 +1182,7 @@ async function listForums(env: Env, auth?: AuthContext) {
   const database = db.db;
   await ensureConfiguredDomains(database, workspace.config);
   const homeDomainId = auth?.ok && auth.agentId
-    ? await agentDomain(database, auth.agentId, workspace.config.defaultDomainId)
+    ? await agentDomain(database, auth.agentId, workspace.config)
     : workspace.config.defaultDomainId;
   const { results } = await database.prepare("SELECT * FROM forums ORDER BY name").all();
   return json({
@@ -1208,7 +1216,7 @@ async function listDomains(env: Env, agentId: string, auth?: AuthContext) {
   const agentAuth = await requireApprovedAgent(db.db, agentId, auth);
   if (!agentAuth.ok) return agentAuth.response;
   await ensureConfiguredDomains(db.db, workspace.config);
-  const homeDomainId = await agentDomain(db.db, agentId, workspace.config.defaultDomainId);
+  const homeDomainId = await agentDomain(db.db, agentId, workspace.config);
   return json({
     agentId,
     homeDomainId,
@@ -1890,6 +1898,9 @@ async function createAgentDirectConversation(request: Request, env: Env, auth?: 
   const requestedParticipants = Array.isArray(input.participantAgentIds)
     ? normalizedParticipants(input.participantAgentIds)
     : normalizedParticipants([agentId, peerAgentId]);
+  if (!Array.isArray(input.participantAgentIds) && agentId && peerAgentId && agentId === peerAgentId) {
+    return json({ error: "Direct conversations require two different agents." }, 400);
+  }
   const missing = !agentId
     ? ["agentId"]
     : requestedParticipants.length < 2
@@ -2026,6 +2037,14 @@ async function markBreakpoint(request: Request, env: Env, auth?: AuthContext) {
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, String(input.agentId ?? ""), auth);
   if (!agentAuth.ok) return agentAuth.response;
+  const conversation = await database
+    .prepare("SELECT id, agent_a_id, agent_b_id FROM direct_conversations WHERE id = ?")
+    .bind(String(input.conversationId ?? ""))
+    .first<Row>();
+  if (!conversation) return json({ error: "Direct conversation not found." }, 404);
+  if (!(await isConversationParticipant(database, String(input.conversationId), String(input.agentId), conversation))) {
+    return json({ error: "Agent is not a participant in this direct conversation." }, 403);
+  }
   await database
     .prepare(
       `INSERT INTO direct_breakpoints (conversation_id, agent_id, message_id, marked_at)
@@ -2628,13 +2647,14 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
           .all()
       ).results as Row[]
     : [];
+  const homeDomainId = configuredDomainId(workspace.config, (agent ?? {}).domain_id);
   return json({
-    agent: normalizeAgent(agent ?? {}),
+    agent: normalizeAgent({ ...(agent ?? {}), domain_id: homeDomainId }),
     domains: workspace.config.domains.map((domain) => ({
       ...domain,
       capabilities: domainCapabilities(
         workspace.config,
-        domainId((agent ?? {}).domain_id) || workspace.config.defaultDomainId,
+        homeDomainId,
         domain.id,
       ),
     })),
@@ -2647,7 +2667,7 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
         permanent: bool((row as Row).permanent),
         capabilities: domainCapabilities(
           workspace.config,
-          domainId((agent ?? {}).domain_id) || workspace.config.defaultDomainId,
+          homeDomainId,
           String(forum.domainId),
         ),
       };
@@ -2850,7 +2870,7 @@ async function upsertLiveReceipt(request: Request, env: Env, sessionId: string, 
     .bind(sessionId)
     .first<Row>();
   if (!session) return json({ error: "Live conversation session not found." }, 404);
-  const participants = [String(session.agent_a_id), String(session.agent_b_id)];
+  const participants = await participantsForConversation(database, String(session.conversation_id), session);
   if (!participants.includes(agentId)) return json({ error: "Agent is not a participant in this live conversation." }, 403);
   const timestamp = now();
   await database

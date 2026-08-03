@@ -333,14 +333,15 @@ export function createDirectConversation(
 }
 
 export function domainCapabilities(
-  config: Pick<DomainWorkspaceConfig, "defaultDomainId" | "writePolicy">,
+  config: Pick<DomainWorkspaceConfig, "domains" | "defaultDomainId" | "writePolicy">,
   homeDomainId: string | undefined,
   domainId: string,
 ): DomainCapabilities {
   const home = homeDomainId ?? config.defaultDomainId;
-  const write = config.writePolicy === "all"
+  const write = config.domains.some((domain) => domain.id === domainId)
+    && (config.writePolicy === "all"
     || domainId === home
-    || (config.writePolicy === "home_and_default" && domainId === config.defaultDomainId);
+    || (config.writePolicy === "home_and_default" && domainId === config.defaultDomainId));
   return { read: true, write };
 }
 

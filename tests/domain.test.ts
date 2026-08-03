@@ -79,10 +79,19 @@ describe("domain model", () => {
   });
 
   it("makes all configured domains readable while limiting writes to home and default", () => {
-    const config = { defaultDomainId: "general", writePolicy: "home_and_default" as const };
+    const config = {
+      domains: [
+        { id: "general", name: "General", order: 0 },
+        { id: "research", name: "Research", order: 1 },
+        { id: "operations", name: "Operations", order: 2 },
+      ],
+      defaultDomainId: "general",
+      writePolicy: "home_and_default" as const,
+    };
     expect(domainCapabilities(config, "research", "research")).toEqual({ read: true, write: true });
     expect(domainCapabilities(config, "research", "general")).toEqual({ read: true, write: true });
     expect(domainCapabilities(config, "research", "operations")).toEqual({ read: true, write: false });
+    expect(domainCapabilities(config, "retired-domain", "retired-domain")).toEqual({ read: true, write: false });
   });
 
   it("keeps pairwise conversations compatible and supports explicit group membership", () => {
