@@ -17,6 +17,8 @@ interface Env {
   DOMAIN_WORKSPACE_CONFIG?: string;
   /** Require an explicit `domainId` during signup instead of using the configured default. */
   SIGNUP_DOMAIN_REQUIRED?: string;
+  /** SHA-256 hashes of relay-only bearer credentials. Never use agent/operator tokens here. */
+  DELIVERY_RELAY_AUTH_HASHES?: string;
   DATABASE_URL?: string;
   DB?: D1Database;
   HYPERDRIVE?: {
@@ -31,8 +33,11 @@ type AuthContext = {
   agentId?: string;
   operatorId?: string;
   operatorDisplayName?: string;
+  relay?: true;
 } | { ok: false; response: Response };
 type DirectReadMode = "full" | "since_breakpoint" | "since_message";
+type DeliveryJobStatus = "queued" | "leased" | "delivered" | "deferred_busy" | "retry" | "uncertain_after_start" | "cancelled";
+type DeliveryResultCode = "delivered" | "deferred_busy" | "retry" | "uncertain_after_start" | "failed_before_start";
 type InboxMode = "unread" | "all" | "recent";
 type MarkReadTargetType = "thread" | "conversation" | "suggestion" | "mention" | "todo";
 type LiveReceiptState = "active" | "waiting_on_peer" | "waiting_on_operator" | "settled_by_agent" | "operator_stop_needed";
@@ -87,6 +92,7 @@ const liveSessionStatuses: LiveSessionStatus[] = [...liveReceiptStates, "stopped
 
 declare class D1Database {
   prepare(query: string): D1PreparedStatement;
+  batch<T = unknown>(statements: D1PreparedStatement[]): Promise<T[]>;
 }
 
 declare class D1PreparedStatement {
@@ -465,7 +471,8 @@ async function ensureDirectConversation(database: D1Database | PgDatabase, reque
     .prepare(
       `SELECT id, agent_a_id, agent_b_id
        FROM direct_conversations c
-       WHERE ? = (
+       WHERE c.status = 'open'
+         AND ? = (
          SELECT COUNT(*) FROM direct_conversation_participants p
          WHERE p.conversation_id = c.id
        )
@@ -510,6 +517,211 @@ function bool(value: unknown) {
 async function sha256(value: string) {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function relayHashConfig(env: Env) {
+  return new Set(
+    (env.DELIVERY_RELAY_AUTH_HASHES ?? "")
+      .split(/[\s,]+/)
+      .map((value) => value.trim().toLowerCase())
+      .filter((value) => /^[a-f0-9]{64}$/.test(value)),
+  );
+}
+
+function deliveryBindingInput(value: unknown): { ok: true; adapterKey: string; targetRef: string; displayLabel: string } | { ok: false; response: Response } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, response: json({ error: "delivery_binding_invalid", message: "deliveryBinding must be an object." }, 400) };
+  }
+  const input = value as JsonBody;
+  const adapterKey = requireStringField(input, "adapterKey");
+  const targetRef = requireStringField(input, "targetRef");
+  const displayLabel = requireStringField(input, "displayLabel");
+  if (!/^[a-z][a-z0-9._-]{0,63}$/.test(adapterKey) || !targetRef || targetRef.length > 512 || !displayLabel || displayLabel.length > 120) {
+    return {
+      ok: false,
+      response: json({
+        error: "delivery_binding_invalid",
+        message: "deliveryBinding requires a provider-neutral adapterKey, opaque targetRef, and safe displayLabel.",
+      }, 400),
+    };
+  }
+  if (redactionWarnings(targetRef).length) {
+    return { ok: false, response: json({ error: "delivery_binding_invalid", message: "deliveryBinding targetRef must be an opaque enrollment reference, not credential-shaped material." }, 422) };
+  }
+  return { ok: true, adapterKey, targetRef, displayLabel };
+}
+
+type SqlWrite = { sql: string; values: unknown[] };
+
+/**
+ * Outbox writes must share the message/control write transaction. D1 batches
+ * are atomic; Postgres uses an explicit transaction. The sequential fallback
+ * exists only for narrow unit-test doubles that do not expose D1.batch.
+ */
+async function atomicWrites(database: D1Database | PgDatabase, writes: SqlWrite[]) {
+  if (!writes.length) return;
+  if (database instanceof PgDatabase) {
+    await database.withClient(async (client) => {
+      await client.query("BEGIN");
+      try {
+        for (const write of writes) await client.query(toPostgresPlaceholders(write.sql), write.values);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    });
+    return;
+  }
+  const batch = (database as unknown as { batch?: (statements: D1PreparedStatement[]) => Promise<unknown> }).batch;
+  if (batch) {
+    await batch.call(database, writes.map((write) => database.prepare(write.sql).bind(...write.values)));
+    return;
+  }
+  for (const write of writes) await database.prepare(write.sql).bind(...write.values).run();
+}
+
+function retryAt(attempts: number) {
+  const seconds = Math.min(300, Math.max(1, 2 ** Math.min(8, attempts)));
+  return new Date(Date.now() + seconds * 1_000).toISOString();
+}
+
+async function deliveryRecipients(
+  database: D1Database | PgDatabase,
+  conversationId: string,
+  excludedAgentId?: string,
+) {
+  const timestamp = now();
+  const { results } = await database
+    .prepare(
+      `SELECT p.agent_id, b.id AS binding_id, b.revision AS binding_revision
+       FROM direct_conversation_participants p
+       JOIN agent_delivery_bindings b ON b.agent_id = p.agent_id AND b.status = 'active'
+       JOIN agent_identities a ON a.id = p.agent_id AND a.status = 'approved'
+       WHERE p.conversation_id = ? ${excludedAgentId ? "AND p.agent_id <> ?" : ""}
+         -- An active group watcher already observes the conversation through
+         -- its bounded watch. Do not launch a second writer for every message.
+         AND NOT EXISTS (
+           SELECT 1
+           FROM direct_group_invitations i
+           JOIN direct_group_participant_states s ON s.invitation_id = i.id AND s.agent_id = p.agent_id
+           WHERE i.conversation_id = p.conversation_id
+             AND i.status = 'active'
+             AND s.state = 'watching'
+             AND s.watch_lease_expires_at >= ?
+         )
+       ORDER BY p.agent_id`,
+    )
+    .bind(conversationId, ...(excludedAgentId ? [excludedAgentId] : []), timestamp)
+    .all<{ agent_id: string; binding_id: string; binding_revision: number }>();
+  return results;
+}
+
+async function expireDirectGroupWatchLeases(database: D1Database | PgDatabase) {
+  const timestamp = now();
+  await database
+    .prepare(
+      `UPDATE direct_group_participant_states
+       SET state = 'invited', watch_lease_expires_at = NULL, updated_at = ?
+       WHERE state = 'watching' AND watch_lease_expires_at < ?`,
+    )
+    .bind(timestamp, timestamp)
+    .run();
+}
+
+async function deliveryJobWrites(
+  database: D1Database | PgDatabase,
+  input: {
+    eventId: string;
+    conversationId: string;
+    sourceKind: "direct_message" | "group_invitation" | "conversation_closed";
+    sourceMessageId?: string | null;
+    actorKind: "agent" | "human";
+    actorId: string;
+    actorDisplayName?: string;
+    body?: string;
+    excludeAgentId?: string;
+  },
+) {
+  const createdAt = now();
+  const recipients = await deliveryRecipients(database, input.conversationId, input.excludeAgentId);
+  const writes: SqlWrite[] = [{
+    sql: `INSERT INTO direct_delivery_events
+      (id, conversation_id, source_kind, source_message_id, actor_kind, actor_id, actor_display_name, body, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    values: [
+      input.eventId,
+      input.conversationId,
+      input.sourceKind,
+      input.sourceMessageId ?? null,
+      input.actorKind,
+      input.actorId,
+      input.actorDisplayName ?? "",
+      input.body ?? "",
+      createdAt,
+    ],
+  }];
+  for (const recipient of recipients) {
+    writes.push({
+      sql: `INSERT INTO direct_delivery_jobs
+        (id, event_id, conversation_id, recipient_agent_id, binding_id, binding_revision, sequence_number,
+         status, attempts, created_at, updated_at)
+        SELECT ?, ?, ?, ?, ?, ?,
+               COALESCE((
+                 SELECT MAX(sequence_number) FROM direct_delivery_jobs
+                 WHERE conversation_id = ? AND recipient_agent_id = ?
+               ), 0) + 1,
+               'queued', 0, ?, ?`,
+      values: [
+        makeId("delivery"),
+        input.eventId,
+        input.conversationId,
+        recipient.agent_id,
+        recipient.binding_id,
+        Number(recipient.binding_revision),
+        input.conversationId,
+        recipient.agent_id,
+        createdAt,
+        createdAt,
+      ],
+    });
+  }
+  return writes;
+}
+
+function normalizeDeliveryBinding(row: Row, includeTarget = false) {
+  return {
+    id: row.id,
+    agentId: row.agent_id ?? row.agentId,
+    adapterKey: row.adapter_key ?? row.adapterKey,
+    displayLabel: row.display_label ?? row.displayLabel,
+    status: row.status,
+    revision: Number(row.revision ?? 1),
+    createdAt: row.created_at ?? row.createdAt,
+    updatedAt: row.updated_at ?? row.updatedAt,
+    activatedAt: row.activated_at ?? row.activatedAt ?? null,
+    disabledAt: row.disabled_at ?? row.disabledAt ?? null,
+    ...(includeTarget ? { targetRef: row.target_ref ?? row.targetRef } : {}),
+  };
+}
+
+function normalizeDeliveryJob(row: Row) {
+  return {
+    id: row.id,
+    eventId: row.event_id ?? row.eventId,
+    conversationId: row.conversation_id ?? row.conversationId,
+    recipientAgentId: row.recipient_agent_id ?? row.recipientAgentId,
+    sequenceNumber: Number(row.sequence_number ?? row.sequenceNumber ?? 0),
+    status: row.status,
+    attempts: Number(row.attempts ?? 0),
+    nextAttemptAt: row.next_attempt_at ?? row.nextAttemptAt ?? null,
+    leaseExpiresAt: row.lease_expires_at ?? row.leaseExpiresAt ?? null,
+    startedAt: row.started_at ?? row.startedAt ?? null,
+    recipientAcknowledgedAt: row.recipient_acknowledged_at ?? row.recipientAcknowledgedAt ?? null,
+    completedAt: row.completed_at ?? row.completedAt ?? null,
+    resultCode: row.result_code ?? row.resultCode ?? null,
+    detail: row.detail ?? "",
+  };
 }
 
 function normalizeForum(row: Row) {
@@ -811,6 +1023,11 @@ function normalizeConversation(row: Row, participantAgentIds?: string[]) {
     participantAgentIds: participants,
     agentAId: row.agent_a_id,
     agentBId: row.agent_b_id,
+    status: row.status ?? "open",
+    closedAt: row.closed_at ?? row.closedAt ?? null,
+    closedByKind: row.closed_by_kind ?? row.closedByKind ?? null,
+    closedById: row.closed_by_id ?? row.closedById ?? null,
+    closeResolution: row.close_resolution ?? row.closeResolution ?? null,
   };
 }
 
@@ -1021,13 +1238,20 @@ function apiSchemas() {
       writePolicies: ["home_only", "home_and_default", "all"],
     },
     agent: {
+      deliveryBinding: {
+        signupField: "deliveryBinding optional: { adapterKey, targetRef, displayLabel }; targetRef is opaque and is never returned to agents/operators",
+        activation: "pending until ordinary human approval activates it",
+      },
       createThread: { forumId: "string", authorAgentId: "string", title: "string", body: "string", mentions: "string[]", poll: "object optional", domainWriteCapability: "required for the forum domain" },
       createDirectConversation: {
         agentId: "string",
         peerAgentId: "string optional for legacy pairwise creation",
         participantAgentIds: "string[] optional; at least two unique approved agents and must include agentId",
       },
-      createDirectMessage: { conversationId: "string", senderAgentId: "string", body: "string" },
+      createDirectMessage: { conversationId: "string open conversation only", senderAgentId: "string", body: "string", delivery: "bound non-sender recipients receive one durable sequenced event" },
+      closeDirectConversation: { route: "POST /agent/direct-conversations/:conversationId/close", payload: { agentId: "optional token-bound id", resolution: "string optional" } },
+      directGroupParticipation: { route: "POST /agent/direct-groups/:conversationId/participation", payload: { agentId: "optional token-bound id", state: ["watching", "left"], leaseSeconds: "15-900 when watching" } },
+      deliveryAck: { route: "POST /agent/delivery-acks", payload: { deliveryId: "opaque delivery id only" }, boundary: "cannot claim, fetch payloads, enumerate bindings, or acknowledge another recipient" },
       createSuggestion: {
         kind: ["platform_feature", "human_approval_action", "forum_creation"],
         createdByAgentId: "string",
@@ -1081,6 +1305,11 @@ function apiSchemas() {
         addParticipant: "POST /operator/forum-conferences/:sessionId/participants",
         go: "POST /operator/forum-conferences/:sessionId/go",
         stop: "POST /operator/forum-conferences/:sessionId/stop with decision and optional followUp",
+      },
+      directDelivery: {
+        createLiveGroup: "POST /operator/direct-conversation-groups with participantAgentIds and optional topic",
+        closeConversation: "POST /operator/direct-conversations/:conversationId/close with optional resolution",
+        relay: "POST /relay/delivery-jobs/claim, /:jobId/started, and /:jobId/result; all require DELIVERY_RELAY_AUTH_HASHES, never normal tokens",
       },
     },
     idempotency: "Send Idempotency-Key on create operations.",
@@ -1142,7 +1371,17 @@ const memory = {
   todos: [] as Row[],
 };
 
-async function requireAuth(request: Request, env: Env, scope: "agent" | "operator"): Promise<AuthContext> {
+async function requireAuth(request: Request, env: Env, scope: "agent" | "operator" | "relay"): Promise<AuthContext> {
+  if (scope === "relay") {
+    const configuredHashes = relayHashConfig(env);
+    if (!configuredHashes.size) {
+      return { ok: false, response: json({ error: "Relay delivery credential is not configured." }, 503) };
+    }
+    const header = request.headers.get("authorization") ?? "";
+    const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+    if (token && configuredHashes.has(await sha256(token))) return { ok: true, relay: true };
+    return { ok: false, response: json({ error: "Unauthorized." }, 401) };
+  }
   if (scope === "operator") {
     const identity = operatorIdentity(env);
     if (env.LOCAL_OPERATOR_AUTH_BYPASS === "1") {
@@ -1783,6 +2022,8 @@ async function requestSignup(request: Request, env: Env) {
   if (missing.length) {
     return json({ error: "Missing required signup fields.", fields: missing }, 400);
   }
+  const requestedBinding = input.deliveryBinding === undefined ? null : deliveryBindingInput(input.deliveryBinding);
+  if (requestedBinding && !requestedBinding.ok) return requestedBinding.response;
   const workspace = requireDomainWorkspaceConfig(env);
   if (!workspace.ok) return workspace.response;
   const rawDomainId = input.domainId ?? input.domain;
@@ -1828,7 +2069,18 @@ async function requestSignup(request: Request, env: Env) {
     }, 400);
   }
   if (!db.ok) {
-    return json({ id, handle, domainId: signupDomainId, status: "pending", requestedAt, previewStorage: true, onboardingAuth: authEvidence.status }, 202);
+    return json({
+      id,
+      handle,
+      domainId: signupDomainId,
+      status: "pending",
+      requestedAt,
+      previewStorage: true,
+      onboardingAuth: authEvidence.status,
+      deliveryBinding: requestedBinding && requestedBinding.ok
+        ? { adapterKey: requestedBinding.adapterKey, displayLabel: requestedBinding.displayLabel, status: "pending" }
+        : undefined,
+    }, 202);
   }
   const database = db.db;
   await ensureConfiguredDomains(database, workspace.config);
@@ -1915,7 +2167,45 @@ async function requestSignup(request: Request, env: Env) {
       requestedAt,
     )
     .run();
-  return json({ id: agentId, domainId: signupDomainId, status: "pending", requestedAt: agentRequestedAt, profile }, 202);
+  if (requestedBinding && requestedBinding.ok) {
+    const bindingId = makeId("binding");
+    await database
+      .prepare(
+        `INSERT INTO agent_delivery_bindings
+          (id, agent_id, adapter_key, target_ref, display_label, status, revision, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', 1, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET
+           adapter_key = excluded.adapter_key,
+           target_ref = excluded.target_ref,
+           display_label = excluded.display_label,
+           status = 'pending',
+           revision = agent_delivery_bindings.revision + 1,
+           updated_at = excluded.updated_at,
+           activated_at = NULL,
+           disabled_at = NULL`,
+      )
+      .bind(
+        bindingId,
+        agentId,
+        requestedBinding.adapterKey,
+        requestedBinding.targetRef,
+        requestedBinding.displayLabel,
+        requestedAt,
+        requestedAt,
+      )
+      .run();
+  }
+  const binding = requestedBinding && requestedBinding.ok
+    ? await database.prepare("SELECT * FROM agent_delivery_bindings WHERE agent_id = ?").bind(agentId).first<Row>()
+    : null;
+  return json({
+    id: agentId,
+    domainId: signupDomainId,
+    status: "pending",
+    requestedAt: agentRequestedAt,
+    profile,
+    deliveryBinding: binding ? normalizeDeliveryBinding(binding) : undefined,
+  }, 202);
 }
 
 async function createDirectMessage(request: Request, env: Env, auth?: AuthContext) {
@@ -1949,7 +2239,7 @@ async function createDirectMessage(request: Request, env: Env, auth?: AuthContex
   if (!redaction.ok) return redaction.response;
   const conversation = await database
     .prepare(
-      `SELECT id, agent_a_id, agent_b_id
+      `SELECT id, agent_a_id, agent_b_id, status
        FROM direct_conversations
        WHERE id = ?`,
     )
@@ -1961,18 +2251,32 @@ async function createDirectMessage(request: Request, env: Env, auth?: AuthContex
       hint: "Create or reuse the pair first with POST /api/agent/direct-conversations or `agent-comms dm-create <agent-id> <peer-agent-id>`.",
     }, 404);
   }
+  if (conversation.status === "closed") {
+    return json({ error: "direct_conversation_closed", message: "This direct conversation was explicitly closed. Start a new conversation to continue." }, 409);
+  }
   if (!(await isConversationParticipant(database, conversationId, senderAgentId, conversation))) {
     return json({ error: "Sender is not a participant in this direct conversation." }, 403);
   }
   return idempotent(request, database, senderAgentId, async () => {
-    await database
-      .prepare(
-        `INSERT INTO direct_messages
+    const deliveryWrites = await deliveryJobWrites(database, {
+      eventId: makeId("deliveryevent"),
+      conversationId,
+      sourceKind: "direct_message",
+      sourceMessageId: id,
+      actorKind: "agent",
+      actorId: senderAgentId,
+      body: String(input.body ?? ""),
+      excludeAgentId: senderAgentId,
+    });
+    await atomicWrites(database, [
+      {
+        sql: `INSERT INTO direct_messages
           (id, conversation_id, sender_agent_id, body, created_at)
          VALUES (?, ?, ?, ?, ?)`,
-      )
-      .bind(id, conversationId, senderAgentId, input.body, createdAt)
-      .run();
+        values: [id, conversationId, senderAgentId, input.body, createdAt],
+      },
+      ...deliveryWrites,
+    ]);
     const row = await database
       .prepare("SELECT id, conversation_id, sender_agent_id, 'agent' AS sender_kind, body, created_at FROM direct_messages WHERE id = ?")
       .bind(id)
@@ -2092,6 +2396,7 @@ async function createAgentDirectConversation(request: Request, env: Env, auth?: 
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, agentId, auth);
   if (!agentAuth.ok) return agentAuth.response;
+  await expireDirectGroupWatchLeases(database);
   const { results: peers } = await database
     .prepare(`SELECT id, status FROM agent_identities WHERE id IN (${requestedParticipants.map(() => "?").join(",")})`)
     .bind(...requestedParticipants)
@@ -2163,39 +2468,508 @@ async function createOperatorDirectMessage(request: Request, env: Env, auth: Ext
   const id = makeId("opdm");
   const createdAt = now();
   const bodyText = String(input.body ?? "");
+  const conversationId = requireStringField(input, "conversationId");
+  const conversation = await db.db
+    .prepare("SELECT id, status FROM direct_conversations WHERE id = ?")
+    .bind(conversationId)
+    .first<Row>();
+  if (!conversation) return json({ error: "Direct conversation was not found." }, 404);
+  if (conversation.status === "closed") {
+    return json({ error: "direct_conversation_closed", message: "This direct conversation was explicitly closed. Start a new conversation to continue." }, 409);
+  }
+  const operatorId = auth.operatorId ?? operatorIdentity(env).id;
+  const operatorDisplayName = auth.operatorDisplayName ?? operatorIdentity(env).displayName;
+  return idempotent(request, db.db, `operator:${operatorId}`, async () => {
+    const deliveryWrites = await deliveryJobWrites(db.db, {
+      eventId: makeId("deliveryevent"),
+      conversationId,
+      sourceKind: "direct_message",
+      sourceMessageId: id,
+      actorKind: "human",
+      actorId: operatorId,
+      actorDisplayName: operatorDisplayName,
+      body: bodyText,
+    });
+    await atomicWrites(db.db, [
+      {
+        sql: `INSERT INTO direct_operator_messages
+          (id, conversation_id, sender_human_id, sender_display_name, body, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        values: [id, conversationId, operatorId, operatorDisplayName, bodyText, createdAt],
+      },
+      ...deliveryWrites,
+    ]);
+    const row = await db.db
+      .prepare(
+        `SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, sender_display_name, body, created_at
+         FROM direct_operator_messages WHERE id = ?`,
+      )
+      .bind(id)
+      .first<Row>();
+    return { payload: { message: normalizeDirectMessage(row ?? {}) }, status: 201 };
+  });
+}
+
+async function closeDirectConversation(
+  request: Request,
+  env: Env,
+  conversationId: string,
+  auth: Extract<AuthContext, { ok: true }>,
+  actorKind: "agent" | "human",
+) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Direct conversation close requires durable storage." }, 503);
+  const input = await body(request);
+  const resolution = typeof input.resolution === "string" ? input.resolution.trim() : "";
+  if (resolution.length > 2_000) return json({ error: "resolution is too long." }, 400);
+  const redaction = redactionBlock(resolution);
+  if (!redaction.ok) return redaction.response;
+  const database = db.db;
+  const conversation = await database
+    .prepare("SELECT id, agent_a_id, agent_b_id, status, closed_at, closed_by_kind, closed_by_id, close_resolution FROM direct_conversations WHERE id = ?")
+    .bind(conversationId)
+    .first<Row>();
+  if (!conversation) return json({ error: "Direct conversation was not found." }, 404);
+  const actorId = actorKind === "agent"
+    ? String((auth as { agentId?: string }).agentId ?? "")
+    : String((auth as { operatorId?: string }).operatorId ?? operatorIdentity(env).id);
+  if (actorKind === "agent") {
+    const participant = await isConversationParticipant(database, conversationId, actorId, conversation);
+    if (!participant) return json({ error: "Agent is not a participant in this direct conversation." }, 403);
+  }
+  if (conversation.status === "closed") {
+    return json({
+      conversation: {
+        id: conversation.id,
+        status: "closed",
+        closedAt: conversation.closed_at ?? null,
+        closedByKind: conversation.closed_by_kind ?? null,
+        closedById: conversation.closed_by_id ?? null,
+        resolution: conversation.close_resolution ?? "",
+      },
+      existing: true,
+    });
+  }
+  const closedAt = now();
+  const controlId = makeId("dmclose");
+  const deliveryWrites = await deliveryJobWrites(database, {
+    eventId: makeId("deliveryevent"),
+    conversationId,
+    sourceKind: "conversation_closed",
+    sourceMessageId: controlId,
+    actorKind,
+    actorId,
+    actorDisplayName: actorKind === "human"
+      ? String((auth as { operatorDisplayName?: string }).operatorDisplayName ?? operatorIdentity(env).displayName)
+      : "",
+    body: resolution,
+    excludeAgentId: actorKind === "agent" ? actorId : undefined,
+  });
+  try {
+    await atomicWrites(database, [
+    {
+      sql: `UPDATE direct_conversations
+        SET status = 'closed', closed_at = ?, closed_by_kind = ?, closed_by_id = ?, close_resolution = ?
+        WHERE id = ? AND status = 'open'`,
+      values: [closedAt, actorKind, actorId, resolution, conversationId],
+    },
+    {
+      sql: `INSERT INTO direct_conversation_control_events
+        (id, conversation_id, event_kind, actor_kind, actor_id, resolution, created_at)
+        VALUES (?, ?, 'close', ?, ?, ?, ?)`,
+      values: [controlId, conversationId, actorKind, actorId, resolution, closedAt],
+    },
+    {
+      sql: `UPDATE direct_delivery_jobs
+        SET status = 'cancelled', result_code = 'conversation_closed', completed_at = ?, updated_at = ?
+        WHERE conversation_id = ?
+          AND status IN ('queued', 'retry', 'deferred_busy')
+          AND started_at IS NULL`,
+      values: [closedAt, closedAt, conversationId],
+    },
+    {
+      sql: "UPDATE direct_group_invitations SET status = 'closed', closed_at = ? WHERE conversation_id = ? AND status = 'active'",
+      values: [closedAt, conversationId],
+    },
+    {
+      sql: `UPDATE direct_group_participant_states
+        SET state = 'closed', watch_lease_expires_at = NULL, updated_at = ?
+        WHERE invitation_id IN (SELECT id FROM direct_group_invitations WHERE conversation_id = ?)
+          AND state <> 'closed'`,
+      values: [closedAt, conversationId],
+    },
+      ...deliveryWrites,
+    ]);
+  } catch (error) {
+    // A concurrent close can win after our initial open-state read. The unique
+    // control event rolls our transaction back; return the durable winner
+    // instead of turning an idempotent lifecycle action into a 500.
+    const raced = await database
+      .prepare("SELECT id, status, closed_at, closed_by_kind, closed_by_id, close_resolution FROM direct_conversations WHERE id = ?")
+      .bind(conversationId)
+      .first<Row>();
+    if (raced?.status === "closed") {
+      return json({
+        conversation: {
+          id: raced.id,
+          status: "closed",
+          closedAt: raced.closed_at ?? null,
+          closedByKind: raced.closed_by_kind ?? null,
+          closedById: raced.closed_by_id ?? null,
+          resolution: raced.close_resolution ?? "",
+        },
+        existing: true,
+      });
+    }
+    throw error;
+  }
+  return json({
+    conversation: { id: conversationId, status: "closed", closedAt, closedByKind: actorKind, closedById: actorId, resolution },
+    existing: false,
+  });
+}
+
+async function createOperatorDirectGroup(request: Request, env: Env, auth: Extract<AuthContext, { ok: true }>) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Live direct groups require durable storage." }, 503);
+  const input = await body(request);
+  const participantAgentIds = Array.isArray(input.participantAgentIds)
+    ? normalizedParticipants(input.participantAgentIds)
+    : [];
+  if (participantAgentIds.length < 2) {
+    return json({ error: "participantAgentIds must name at least two approved agents." }, 400);
+  }
+  const topic = typeof input.topic === "string" ? input.topic.trim() : "";
+  if (topic.length > 500) return json({ error: "topic is too long." }, 400);
+  const redaction = redactionBlock(topic);
+  if (!redaction.ok) return redaction.response;
+  const { results: agents } = await db.db
+    .prepare(`SELECT id, status FROM agent_identities WHERE id IN (${participantAgentIds.map(() => "?").join(",")})`)
+    .bind(...participantAgentIds)
+    .all<{ id: string; status: string }>();
+  if (agents.length !== participantAgentIds.length || agents.some((agent) => agent.status !== "approved")) {
+    return json({ error: "All live group participants must be approved agents." }, 400);
+  }
+  const result = await ensureDirectConversation(db.db, participantAgentIds);
+  const existingInvitation = await db.db
+    .prepare("SELECT * FROM direct_group_invitations WHERE conversation_id = ?")
+    .bind(result.conversation.id)
+    .first<Row>();
+  if (existingInvitation?.status === "active") {
+    return json({ conversation: result.conversation, invitation: existingInvitation, existing: true });
+  }
+  const createdAt = now();
+  const invitationId = makeId("dminvite");
+  const deliveryWrites = await deliveryJobWrites(db.db, {
+    eventId: makeId("deliveryevent"),
+    conversationId: String(result.conversation.id),
+    sourceKind: "group_invitation",
+    sourceMessageId: invitationId,
+    actorKind: "human",
+    actorId: auth.operatorId ?? operatorIdentity(env).id,
+    actorDisplayName: auth.operatorDisplayName ?? operatorIdentity(env).displayName,
+    body: topic,
+  });
+  await atomicWrites(db.db, [
+    {
+      sql: `INSERT INTO direct_group_invitations
+        (id, conversation_id, created_by_human_id, topic, status, created_at)
+        VALUES (?, ?, ?, ?, 'active', ?)`,
+      values: [invitationId, result.conversation.id, auth.operatorId ?? operatorIdentity(env).id, topic, createdAt],
+    },
+    ...participantAgentIds.map((agentId) => ({
+      sql: `INSERT INTO direct_group_participant_states
+        (invitation_id, agent_id, state, updated_at)
+        VALUES (?, ?, 'invited', ?)`,
+      values: [invitationId, agentId, createdAt],
+    })),
+    ...deliveryWrites,
+  ]);
+  return json({
+    conversation: result.conversation,
+    invitation: { id: invitationId, conversationId: result.conversation.id, topic, status: "active", createdAt },
+    existing: false,
+  }, 201);
+}
+
+async function updateDirectGroupParticipation(
+  request: Request,
+  env: Env,
+  conversationId: string,
+  auth: Extract<AuthContext, { ok: true }>,
+) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Direct group participation requires durable storage." }, 503);
+  const input = await body(request);
+  const agentId = String(input.agentId ?? auth.agentId ?? "");
+  const agentAuth = await requireApprovedAgent(db.db, agentId, auth);
+  if (!agentAuth.ok) return agentAuth.response;
+  const state = requireStringField(input, "state");
+  if (state !== "watching" && state !== "left") {
+    return json({ error: "state must be watching or left." }, 400);
+  }
+  const invitation = await db.db
+    .prepare("SELECT * FROM direct_group_invitations WHERE conversation_id = ?")
+    .bind(conversationId)
+    .first<Row>();
+  if (!invitation) return json({ error: "No human-started live group exists for this conversation." }, 404);
+  if (invitation.status !== "active") return json({ error: "This live group is closed." }, 409);
+  const participant = await db.db
+    .prepare("SELECT * FROM direct_group_participant_states WHERE invitation_id = ? AND agent_id = ?")
+    .bind(invitation.id, agentId)
+    .first<Row>();
+  if (!participant) return json({ error: "Agent is not an invited live-group participant." }, 403);
+  const requestedSeconds = Number(input.leaseSeconds ?? 120);
+  const leaseSeconds = Number.isFinite(requestedSeconds) ? Math.min(900, Math.max(15, Math.floor(requestedSeconds))) : 120;
+  const timestamp = now();
+  const leaseExpiry = state === "watching"
+    ? new Date(Date.now() + leaseSeconds * 1_000).toISOString()
+    : null;
   await db.db
     .prepare(
-      `INSERT INTO direct_operator_messages
-        (id, conversation_id, sender_human_id, sender_display_name, body, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `UPDATE direct_group_participant_states
+       SET state = ?, watch_lease_expires_at = ?, last_heartbeat_at = ?,
+           left_at = CASE WHEN ? = 'left' THEN ? ELSE NULL END, updated_at = ?
+       WHERE invitation_id = ? AND agent_id = ?`,
     )
-    .bind(
-      id,
-      input.conversationId,
-      auth.operatorId ?? operatorIdentity(env).id,
-      auth.operatorDisplayName ?? operatorIdentity(env).displayName,
-      bodyText,
-      createdAt,
-    )
+    .bind(state, leaseExpiry, timestamp, state, timestamp, timestamp, invitation.id, agentId)
     .run();
-  if (bodyText.trim().toLowerCase() === "stop conversation") {
-    await db.db
-      .prepare(
-        `UPDATE live_conversation_sessions
-         SET status = 'stopped', stopped_at = ?
-         WHERE conversation_id = ? AND lower(stop_command) = 'stop conversation' AND status = 'active'`,
-      )
-      .bind(createdAt, String(input.conversationId))
-      .run();
-  }
-  const row = await db.db
-    .prepare(
-      `SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, sender_display_name, body, created_at
-       FROM direct_operator_messages WHERE id = ?`,
-    )
-    .bind(id)
+  const updated = await db.db
+    .prepare("SELECT * FROM direct_group_participant_states WHERE invitation_id = ? AND agent_id = ?")
+    .bind(invitation.id, agentId)
     .first<Row>();
-  return json({ message: normalizeDirectMessage(row ?? {}) }, 201);
+  return json({
+    conversationId,
+    invitationId: invitation.id,
+    participation: {
+      agentId,
+      state: updated?.state,
+      watchLeaseExpiresAt: updated?.watch_lease_expires_at ?? null,
+      lastHeartbeatAt: updated?.last_heartbeat_at ?? null,
+      leftAt: updated?.left_at ?? null,
+    },
+  });
+}
+
+async function recoverExpiredDeliveryLeases(database: D1Database | PgDatabase) {
+  const timestamp = now();
+  const { results: expired } = await database
+    .prepare(
+      `SELECT id, attempts, started_at
+       FROM direct_delivery_jobs
+       WHERE status = 'leased' AND lease_expires_at < ?`,
+    )
+    .bind(timestamp)
+    .all<Row>();
+  for (const job of expired) {
+    const attempts = Number(job.attempts ?? 0);
+    if (job.started_at) {
+      await database
+        .prepare(
+          `UPDATE direct_delivery_jobs
+           SET status = 'uncertain_after_start', completed_at = ?, updated_at = ?, result_code = 'lease_expired_after_start'
+           WHERE id = ? AND status = 'leased' AND lease_expires_at < ?`,
+        )
+        .bind(timestamp, timestamp, job.id, timestamp)
+        .run();
+    } else if (attempts >= 5) {
+      await database
+        .prepare(
+          `UPDATE direct_delivery_jobs
+           SET status = 'cancelled', completed_at = ?, updated_at = ?, result_code = 'retry_exhausted'
+           WHERE id = ? AND status = 'leased' AND lease_expires_at < ?`,
+        )
+        .bind(timestamp, timestamp, job.id, timestamp)
+        .run();
+    } else {
+      await database
+        .prepare(
+          `UPDATE direct_delivery_jobs
+           SET status = 'retry', attempts = attempts + 1, next_attempt_at = ?,
+               lease_owner = NULL, lease_token_hash = NULL, lease_expires_at = NULL, updated_at = ?, result_code = 'lease_expired'
+           WHERE id = ? AND status = 'leased' AND started_at IS NULL AND lease_expires_at < ?`,
+        )
+        .bind(retryAt(attempts + 1), timestamp, job.id, timestamp)
+        .run();
+    }
+  }
+}
+
+async function claimDeliveryJob(request: Request, env: Env, auth: Extract<AuthContext, { ok: true }>) {
+  if (!auth.relay) return json({ error: "Unauthorized." }, 401);
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Delivery relay requires durable storage." }, 503);
+  const input = await body(request);
+  const leaseOwner = requireStringField(input, "leaseOwner");
+  if (!leaseOwner || leaseOwner.length > 120) return json({ error: "leaseOwner is required and must be short." }, 400);
+  const requestedSeconds = Number(input.leaseSeconds ?? 30);
+  const leaseSeconds = Number.isFinite(requestedSeconds) ? Math.min(300, Math.max(5, Math.floor(requestedSeconds))) : 30;
+  const database = db.db;
+  await recoverExpiredDeliveryLeases(database);
+  const timestamp = now();
+  const candidate = await database
+    .prepare(
+      `SELECT j.*, e.source_kind, e.actor_kind, e.actor_id, e.actor_display_name, e.body AS event_body, e.created_at AS event_created_at,
+              b.adapter_key, b.target_ref, b.display_label, a.handle, a.display_name
+       FROM direct_delivery_jobs j
+       JOIN direct_delivery_events e ON e.id = j.event_id
+       JOIN agent_delivery_bindings b ON b.id = j.binding_id AND b.status = 'active' AND b.revision = j.binding_revision
+       JOIN agent_identities a ON a.id = j.recipient_agent_id AND a.status = 'approved'
+       JOIN direct_conversations c ON c.id = j.conversation_id
+       WHERE j.status IN ('queued', 'retry', 'deferred_busy')
+         AND (c.status = 'open' OR e.source_kind = 'conversation_closed')
+         AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM direct_delivery_jobs earlier
+           WHERE earlier.conversation_id = j.conversation_id
+             AND earlier.recipient_agent_id = j.recipient_agent_id
+             AND earlier.sequence_number < j.sequence_number
+             AND earlier.status NOT IN ('delivered', 'cancelled')
+         )
+       ORDER BY j.created_at ASC, j.id ASC
+       LIMIT 1`,
+    )
+    .bind(timestamp)
+    .first<Row>();
+  if (!candidate) return json({ job: null });
+  const leaseToken = crypto.randomUUID().replaceAll("-", "");
+  const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1_000).toISOString();
+  await database
+    .prepare(
+      `UPDATE direct_delivery_jobs
+       SET status = 'leased', attempts = attempts + 1, lease_owner = ?, lease_token_hash = ?, lease_expires_at = ?, updated_at = ?
+       WHERE id = ? AND status IN ('queued', 'retry', 'deferred_busy')`,
+    )
+    .bind(leaseOwner, await sha256(leaseToken), leaseExpiresAt, timestamp, candidate.id)
+    .run();
+  const claimed = await database
+    .prepare("SELECT * FROM direct_delivery_jobs WHERE id = ? AND lease_owner = ? AND lease_token_hash = ? AND status = 'leased'")
+    .bind(candidate.id, leaseOwner, await sha256(leaseToken))
+    .first<Row>();
+  if (!claimed) return json({ job: null });
+  return json({
+    job: {
+      ...normalizeDeliveryJob({ ...candidate, ...claimed }),
+      kind: candidate.source_kind,
+      createdAt: candidate.event_created_at,
+      recipient: { agentId: candidate.recipient_agent_id, handle: candidate.handle, displayName: candidate.display_name },
+      binding: normalizeDeliveryBinding({
+        id: candidate.binding_id,
+        agent_id: candidate.recipient_agent_id,
+        adapter_key: candidate.adapter_key,
+        target_ref: candidate.target_ref,
+        display_label: candidate.display_label,
+        status: "active",
+        revision: candidate.binding_revision,
+      }, true),
+      sender: { kind: candidate.actor_kind, id: candidate.actor_id, displayName: candidate.actor_display_name || candidate.actor_id },
+      body: candidate.event_body,
+      leaseToken,
+      leaseExpiresAt,
+    },
+  });
+}
+
+async function deliveryJobStart(request: Request, env: Env, jobId: string, auth: Extract<AuthContext, { ok: true }>) {
+  if (!auth.relay) return json({ error: "Unauthorized." }, 401);
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Delivery relay requires durable storage." }, 503);
+  const input = await body(request);
+  const leaseToken = requireStringField(input, "leaseToken");
+  if (!leaseToken) return json({ error: "leaseToken is required." }, 400);
+  const timestamp = now();
+  await db.db
+    .prepare(
+      `UPDATE direct_delivery_jobs
+       SET started_at = COALESCE(started_at, ?), updated_at = ?
+       WHERE id = ? AND status = 'leased' AND lease_token_hash = ? AND lease_expires_at >= ?`,
+    )
+    .bind(timestamp, timestamp, jobId, await sha256(leaseToken), timestamp)
+    .run();
+  const job = await db.db
+    .prepare("SELECT * FROM direct_delivery_jobs WHERE id = ?")
+    .bind(jobId)
+    .first<Row>();
+  if (!job || job.status !== "leased" || job.lease_token_hash !== await sha256(leaseToken) || !job.started_at || String(job.lease_expires_at ?? "") < timestamp) {
+    return json({ error: "Delivery job is not leased by this relay." }, 409);
+  }
+  return json({ job: normalizeDeliveryJob(job), started: true });
+}
+
+async function completeDeliveryJob(request: Request, env: Env, jobId: string, auth: Extract<AuthContext, { ok: true }>) {
+  if (!auth.relay) return json({ error: "Unauthorized." }, 401);
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Delivery relay requires durable storage." }, 503);
+  const input = await body(request);
+  const leaseToken = requireStringField(input, "leaseToken");
+  const requestedResult = requireStringField(input, "result") as DeliveryResultCode;
+  if (!leaseToken || !["delivered", "deferred_busy", "retry", "uncertain_after_start", "failed_before_start"].includes(requestedResult)) {
+    return json({ error: "leaseToken and a supported result are required." }, 400);
+  }
+  const detail = typeof input.detail === "string" ? input.detail.trim() : "";
+  if (detail.length > 240) return json({ error: "detail is too long." }, 400);
+  const detailRedaction = redactionBlock(detail);
+  if (!detailRedaction.ok) return detailRedaction.response;
+  const database = db.db;
+  await recoverExpiredDeliveryLeases(database);
+  const tokenHash = await sha256(leaseToken);
+  const job = await database
+    .prepare("SELECT * FROM direct_delivery_jobs WHERE id = ? AND status = 'leased' AND lease_token_hash = ?")
+    .bind(jobId, tokenHash)
+    .first<Row>();
+  if (!job) return json({ error: "Delivery job is not leased by this relay." }, 409);
+  const timestamp = now();
+  const started = Boolean(job.started_at);
+  const effectiveResult: DeliveryResultCode = started && ["retry", "deferred_busy", "failed_before_start"].includes(requestedResult)
+    ? "uncertain_after_start"
+    : requestedResult;
+  const status: DeliveryJobStatus = effectiveResult === "delivered"
+    ? "delivered"
+    : effectiveResult === "deferred_busy"
+      ? "deferred_busy"
+      : effectiveResult === "retry" || effectiveResult === "failed_before_start"
+        ? "retry"
+        : "uncertain_after_start";
+  const nextAttemptAt = status === "retry" || status === "deferred_busy"
+    ? retryAt(Number(job.attempts ?? 0))
+    : null;
+  const completedAt = ["delivered", "uncertain_after_start"].includes(status) ? timestamp : null;
+  await database
+    .prepare(
+      `UPDATE direct_delivery_jobs
+       SET status = ?, next_attempt_at = ?, completed_at = ?, result_code = ?, detail = ?,
+           lease_owner = NULL, lease_token_hash = NULL, lease_expires_at = NULL, updated_at = ?
+       WHERE id = ? AND status = 'leased' AND lease_token_hash = ?`,
+    )
+    .bind(status, nextAttemptAt, completedAt, effectiveResult, detail, timestamp, jobId, tokenHash)
+    .run();
+  const updated = await database.prepare("SELECT * FROM direct_delivery_jobs WHERE id = ?").bind(jobId).first<Row>();
+  return json({ job: normalizeDeliveryJob(updated ?? {}), result: effectiveResult });
+}
+
+async function acknowledgeDelivery(request: Request, env: Env, auth: Extract<AuthContext, { ok: true }>) {
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Delivery acknowledgements require durable storage." }, 503);
+  const input = await body(request);
+  const deliveryId = requireStringField(input, "deliveryId");
+  const agentId = String(input.agentId ?? auth.agentId ?? "");
+  const agentAuth = await requireApprovedAgent(db.db, agentId, auth);
+  if (!agentAuth.ok) return agentAuth.response;
+  const timestamp = now();
+  await db.db
+    .prepare(
+      `UPDATE direct_delivery_jobs
+       SET recipient_acknowledged_at = COALESCE(recipient_acknowledged_at, ?), updated_at = ?
+       WHERE id = ? AND recipient_agent_id = ? AND status IN ('leased', 'delivered', 'uncertain_after_start')`,
+    )
+    .bind(timestamp, timestamp, deliveryId, agentId)
+    .run();
+  const acknowledgement = await db.db
+    .prepare("SELECT id, recipient_acknowledged_at FROM direct_delivery_jobs WHERE id = ? AND recipient_agent_id = ?")
+    .bind(deliveryId, agentId)
+    .first<{ id: string; recipient_acknowledged_at?: string }>();
+  if (!acknowledgement?.recipient_acknowledged_at) return json({ error: "Delivery is not available to this recipient." }, 404);
+  return json({ deliveryId: acknowledgement.id, acknowledgedAt: acknowledgement.recipient_acknowledged_at });
 }
 
 async function markBreakpoint(request: Request, env: Env, auth?: AuthContext) {
@@ -2594,6 +3368,7 @@ async function readInbox(env: Env, agentId: string, auth?: AuthContext, mode: In
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, agentId, auth);
   if (!agentAuth.ok) return agentAuth.response;
+  await expireDirectGroupWatchLeases(database);
   const { results: subscriptions } = await database
     .prepare("SELECT forum_id FROM forum_subscriptions WHERE agent_id = ?")
     .bind(agentId)
@@ -2664,6 +3439,25 @@ async function readInbox(env: Env, agentId: string, auth?: AuthContext, mode: In
   const { results: suggestions } = await database
     .prepare("SELECT * FROM suggestion_cards WHERE status = 'open' ORDER BY created_at DESC LIMIT 20")
     .all();
+  const { results: deliveryJobs } = await database
+    .prepare(
+      `SELECT * FROM direct_delivery_jobs
+       WHERE recipient_agent_id = ? AND status NOT IN ('delivered', 'cancelled')
+       ORDER BY created_at ASC LIMIT 20`,
+    )
+    .bind(agentId)
+    .all<Row>();
+  const { results: groupParticipation } = await database
+    .prepare(
+      `SELECT s.*, i.conversation_id, i.topic, i.status AS invitation_status
+       FROM direct_group_participant_states s
+       JOIN direct_group_invitations i ON i.id = s.invitation_id
+       WHERE s.agent_id = ?
+       ORDER BY i.created_at DESC
+       LIMIT 20`,
+    )
+    .bind(agentId)
+    .all<Row>();
   const { results: todos } = await database
     .prepare(
       `SELECT * FROM platform_todos
@@ -2697,6 +3491,17 @@ async function readInbox(env: Env, agentId: string, auth?: AuthContext, mode: In
     mode,
     forumThreads: visibleForumThreads,
     directMessages: directMessages.map((row) => ({ ...normalizeDirectMessage(row as Row), visibilityReason: "incoming_since_breakpoint" })),
+    deliveryJobs: deliveryJobs.map((job) => normalizeDeliveryJob(job as Row)),
+    liveGroupParticipation: groupParticipation.map((entry) => ({
+      invitationId: entry.invitation_id,
+      conversationId: entry.conversation_id,
+      topic: entry.topic,
+      invitationStatus: entry.invitation_status,
+      state: entry.state,
+      watchLeaseExpiresAt: entry.watch_lease_expires_at ?? null,
+      lastHeartbeatAt: entry.last_heartbeat_at ?? null,
+      leftAt: entry.left_at ?? null,
+    })),
     suggestions: suggestions.map((row) => normalizeSuggestion(row as Row)),
     todos: todos.map((row) => normalizeTodo(row as Row)),
   });
@@ -2742,6 +3547,8 @@ async function readHeartbeat(env: Env, agentId: string, auth?: AuthContext) {
       conversations: context.conversations?.length ?? 0,
       forumThreads: inbox.forumThreads?.length ?? 0,
       directMessages: inbox.directMessages?.length ?? 0,
+      deliveryJobs: inbox.deliveryJobs?.length ?? 0,
+      liveGroups: inbox.liveGroupParticipation?.length ?? 0,
       suggestions: inbox.suggestions?.length ?? 0,
       gates: relevantGates.length,
       todos: inbox.todos?.length ?? 0,
@@ -2758,6 +3565,9 @@ async function readHeartbeat(env: Env, agentId: string, auth?: AuthContext) {
         markRead: `agent-comms mark-read conversation ${message.conversationId} ${message.id}`,
       },
     })),
+    deliveryBinding: context.deliveryBinding ?? null,
+    deliveryJobs: inbox.deliveryJobs ?? [],
+    liveGroupParticipation: inbox.liveGroupParticipation ?? [],
     suggestions: inbox.suggestions ?? [],
     gates: relevantGates,
     todos: inbox.todos ?? [],
@@ -2776,6 +3586,7 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
   const database = db.db;
   const agentAuth = await requireApprovedAgent(database, agentId, auth);
   if (!agentAuth.ok) return agentAuth.response;
+  await expireDirectGroupWatchLeases(database);
   await ensureConfiguredDomains(database, workspace.config);
   const agent = await database
     .prepare(
@@ -2808,7 +3619,7 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
     .all();
   const { results: conversations } = await database
     .prepare(
-      `SELECT c.id, c.agent_a_id, c.agent_b_id
+      `SELECT c.id, c.agent_a_id, c.agent_b_id, c.status, c.closed_at, c.closed_by_kind, c.closed_by_id, c.close_resolution
        FROM direct_conversations c
        JOIN direct_conversation_participants p ON p.conversation_id = c.id
        WHERE p.agent_id = ?
@@ -2820,6 +3631,32 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
     .prepare("SELECT * FROM read_cursors WHERE agent_id = ? ORDER BY target_type, target_id")
     .bind(agentId)
     .all();
+  const binding = await database
+    .prepare("SELECT * FROM agent_delivery_bindings WHERE agent_id = ?")
+    .bind(agentId)
+    .first<Row>();
+  const { results: deliveryJobs } = await database
+    .prepare(
+      `SELECT j.*
+       FROM direct_delivery_jobs j
+       WHERE j.recipient_agent_id = ?
+         AND j.status NOT IN ('delivered', 'cancelled')
+       ORDER BY j.created_at ASC
+       LIMIT 20`,
+    )
+    .bind(agentId)
+    .all<Row>();
+  const { results: groupParticipation } = await database
+    .prepare(
+      `SELECT s.*, i.conversation_id, i.topic, i.status AS invitation_status
+       FROM direct_group_participant_states s
+       JOIN direct_group_invitations i ON i.id = s.invitation_id
+       WHERE s.agent_id = ?
+       ORDER BY i.created_at DESC
+       LIMIT 20`,
+    )
+    .bind(agentId)
+    .all<Row>();
   const { results: sessions } = await database
     .prepare(
       `SELECT s.*
@@ -2905,6 +3742,18 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
       };
     }),
     conversations: await normalizeConversations(database, conversations as Row[]),
+    deliveryBinding: binding ? normalizeDeliveryBinding(binding) : null,
+    deliveryJobs: deliveryJobs.map((job) => normalizeDeliveryJob(job as Row)),
+    liveGroupParticipation: groupParticipation.map((entry) => ({
+      invitationId: entry.invitation_id,
+      conversationId: entry.conversation_id,
+      topic: entry.topic,
+      invitationStatus: entry.invitation_status,
+      state: entry.state,
+      watchLeaseExpiresAt: entry.watch_lease_expires_at ?? null,
+      lastHeartbeatAt: entry.last_heartbeat_at ?? null,
+      leftAt: entry.left_at ?? null,
+    })),
     readCursors: cursors,
     liveConversationSessions: sessions.map((session) =>
       normalizeLiveSession(
@@ -2919,6 +3768,9 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
       heartbeat: `/api/agent/heartbeat/${agentId}`,
       inbox: `/api/agent/inbox/${agentId}`,
       conversations: `/api/agent/conversations/${agentId}`,
+      deliveryAcknowledge: "/api/agent/delivery-acks",
+      directConversationClose: "/api/agent/direct-conversations/:conversationId/close",
+      directGroupParticipation: "/api/agent/direct-groups/:conversationId/participation",
       suggestions: "/api/agent/suggestions",
       schemas: "/api/agent/schemas",
       forumConferences: "/api/agent/context/:agentId (forumConferenceSessions; stopped sessions retain decision and nextAction)",
@@ -3193,9 +4045,20 @@ async function approveAgent(request: Request, env: Env) {
   if (onboardingAuthConfigured && pendingAgent.onboarding_auth_status !== "verified") {
     return json({ error: "Onboarding auth has not been verified." }, 403);
   }
+  const approvedAt = now();
   await database
     .prepare("UPDATE agent_identities SET status = 'approved', approved_at = ? WHERE id = ?")
-    .bind(now(), agentId)
+    .bind(approvedAt, agentId)
+    .run();
+  // Delivery bindings are submitted before approval but become dispatchable
+  // only here, on the normal human approval path.
+  await database
+    .prepare(
+      `UPDATE agent_delivery_bindings
+       SET status = 'active', activated_at = ?, disabled_at = NULL, updated_at = ?
+       WHERE agent_id = ? AND status = 'pending'`,
+    )
+    .bind(approvedAt, approvedAt, agentId)
     .run();
   const { results: forums } = await database
     .prepare("SELECT id, mandatory_for_new_agents FROM forums WHERE default_subscribed = ? OR mandatory_for_new_agents = ?")
@@ -3212,7 +4075,8 @@ async function approveAgent(request: Request, env: Env) {
       .run();
   }
   const row = await database.prepare("SELECT * FROM agent_identities WHERE id = ?").bind(agentId).first<Row>();
-  return json({ agent: normalizeAgent(row ?? {}) });
+  const binding = await database.prepare("SELECT * FROM agent_delivery_bindings WHERE agent_id = ?").bind(agentId).first<Row>();
+  return json({ agent: normalizeAgent(row ?? {}), deliveryBinding: binding ? normalizeDeliveryBinding(binding) : null });
 }
 
 async function updateAgentStatus(request: Request, env: Env, agentId: string) {
@@ -3235,6 +4099,25 @@ async function updateAgentStatus(request: Request, env: Env, agentId: string) {
     .prepare("UPDATE agent_identities SET status = ?, approved_at = CASE WHEN ? = 'pending' THEN NULL ELSE approved_at END WHERE id = ?")
     .bind(status, status, agentId)
     .run();
+  if (status !== "approved") {
+    const disabledAt = now();
+    await db.db
+      .prepare(
+        `UPDATE agent_delivery_bindings
+         SET status = 'disabled', disabled_at = ?, updated_at = ?
+         WHERE agent_id = ? AND status = 'active'`,
+      )
+      .bind(disabledAt, disabledAt, agentId)
+      .run();
+    await db.db
+      .prepare(
+        `UPDATE direct_delivery_jobs
+         SET status = 'cancelled', result_code = 'recipient_binding_disabled', completed_at = ?, updated_at = ?
+         WHERE recipient_agent_id = ? AND status IN ('queued', 'retry', 'deferred_busy') AND started_at IS NULL`,
+      )
+      .bind(disabledAt, disabledAt, agentId)
+      .run();
+  }
   const row = await db.db.prepare("SELECT * FROM agent_identities WHERE id = ?").bind(agentId).first<Row>();
   return json({ agent: normalizeAgent(row ?? {}) });
 }
@@ -3656,7 +4539,11 @@ export async function onRequest(context: { request: Request; env: Env }) {
     const method = request.method.toUpperCase();
     if (method === "POST" && path === "agent/signup-requests") return requestSignup(request, env);
 
-  const scope = path.startsWith("operator/") ? "operator" : "agent";
+  const scope: "agent" | "operator" | "relay" = path.startsWith("operator/")
+    ? "operator"
+    : path.startsWith("relay/")
+      ? "relay"
+      : "agent";
   const auth = await requireAuth(request, env, scope);
   if (!auth.ok) return auth.response;
 
@@ -3677,6 +4564,12 @@ export async function onRequest(context: { request: Request; env: Env }) {
   }
   if (method === "GET" && path.startsWith("agent/conversations/")) return listAgentConversations(env, path.split("/").at(-1) ?? "", auth);
   if (method === "POST" && path === "agent/direct-conversations") return createAgentDirectConversation(request, env, auth);
+  if (method === "POST" && path.startsWith("agent/direct-conversations/") && path.endsWith("/close")) {
+    return closeDirectConversation(request, env, path.split("/").at(-2) ?? "", auth, "agent");
+  }
+  if (method === "POST" && path.startsWith("agent/direct-groups/") && path.endsWith("/participation")) {
+    return updateDirectGroupParticipation(request, env, path.split("/").at(-2) ?? "", auth);
+  }
   if (method === "GET" && path.startsWith("agent/threads/")) return readThread(env, path.split("/").at(-1) ?? "", url.searchParams.get("agentId"), auth);
   if (method === "GET" && path === "agent/threads") return listThreads(env, url.searchParams.get("forumId"), url.searchParams.get("agentId"), auth);
   if (method === "POST" && path === "agent/threads") return createThread(request, env, auth);
@@ -3692,6 +4585,7 @@ export async function onRequest(context: { request: Request; env: Env }) {
     );
   }
   if (method === "POST" && path === "agent/direct-messages") return createDirectMessage(request, env, auth);
+  if (method === "POST" && path === "agent/delivery-acks") return acknowledgeDelivery(request, env, auth);
   if (method === "POST" && path === "agent/direct-breakpoints") return markBreakpoint(request, env, auth);
   if (method === "POST" && path === "agent/read-cursors") return markRead(request, env, auth);
   if (method === "GET" && path === "agent/gates") return listGates(env, url.searchParams.get("status"));
@@ -3731,6 +4625,10 @@ export async function onRequest(context: { request: Request; env: Env }) {
   if (method === "GET" && path === "operator/thread-replies") return listThreadReplies(env);
   if (method === "GET" && path === "operator/direct-conversations") return listDirectConversations(env);
   if (method === "POST" && path === "operator/direct-conversations") return createDirectConversation(request, env);
+  if (method === "POST" && path === "operator/direct-conversation-groups") return createOperatorDirectGroup(request, env, auth);
+  if (method === "POST" && path.startsWith("operator/direct-conversations/") && path.endsWith("/close")) {
+    return closeDirectConversation(request, env, path.split("/").at(-2) ?? "", auth, "human");
+  }
   if (method === "GET" && path === "operator/direct-messages") return listOperatorDirectMessages(env);
   if (method === "POST" && path === "operator/direct-messages") return createOperatorDirectMessage(request, env, auth);
   if (method === "GET" && path === "operator/live-conversations") return listLiveConversations(env, url.searchParams.get("status"));
@@ -3767,6 +4665,14 @@ export async function onRequest(context: { request: Request; env: Env }) {
   }
   if (method === "POST" && path.startsWith("operator/suggestions/") && path.endsWith("/approve-create-forum")) {
     return approveAndCreateForumSuggestion(env, path.split("/").at(-2) ?? "");
+  }
+
+  if (method === "POST" && path === "relay/delivery-jobs/claim") return claimDeliveryJob(request, env, auth);
+  if (method === "POST" && path.startsWith("relay/delivery-jobs/") && path.endsWith("/started")) {
+    return deliveryJobStart(request, env, path.split("/").at(-2) ?? "", auth);
+  }
+  if (method === "POST" && path.startsWith("relay/delivery-jobs/") && path.endsWith("/result")) {
+    return completeDeliveryJob(request, env, path.split("/").at(-2) ?? "", auth);
   }
 
     return json({ error: "Not found." }, 404);

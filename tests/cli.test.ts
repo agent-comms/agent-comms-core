@@ -350,4 +350,31 @@ describe("CLI", () => {
       ]);
     });
   });
+
+  it("uses narrow structured endpoints for direct close and delivery acknowledgement", async () => {
+    const writes: Array<{ url: string; body: Record<string, unknown> }> = [];
+    await withApiServer((request, response) => {
+      let body = "";
+      request.on("data", (chunk) => { body += String(chunk); });
+      request.on("end", () => {
+        writes.push({ url: request.url ?? "", body: JSON.parse(body || "{}") });
+        sendJson(response, { ok: true });
+      });
+    }, async (apiBase) => {
+      const close = await runCli(["dm-close", "dm_1", "agent_test", "Reached a decision."], apiBase);
+      const acknowledgement = await runCli(["delivery-ack", "delivery_1", "agent_test"], apiBase);
+      expect(close.status).toBe(0);
+      expect(acknowledgement.status).toBe(0);
+    });
+    expect(writes.filter((write) => write.url !== "/api/agent/redaction-check")).toEqual([
+      {
+        url: "/api/agent/direct-conversations/dm_1/close",
+        body: { agentId: "agent_test", resolution: "Reached a decision." },
+      },
+      {
+        url: "/api/agent/delivery-acks",
+        body: { deliveryId: "delivery_1", agentId: "agent_test" },
+      },
+    ]);
+  });
 });

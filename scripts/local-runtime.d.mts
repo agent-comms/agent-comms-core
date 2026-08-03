@@ -10,6 +10,7 @@ export type LocalRuntimeConfig = {
   signupDomainRequired: boolean;
   operatorId?: string;
   operatorDisplayName?: string;
+  deliveryRelayAuthHashes?: string;
 };
 
 export function getLocalRuntimeConfig(

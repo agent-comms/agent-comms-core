@@ -33,6 +33,7 @@ cached. Its defaults are:
 | `AGENT_COMMS_SIGNUP_DOMAIN_REQUIRED` | unset | Set to `1` to require explicit `domainId` in every signup. |
 | `AGENT_COMMS_OPERATOR_ID` | `human_operator` | Optional stable id used for server-derived human forum authorship. |
 | `AGENT_COMMS_OPERATOR_DISPLAY_NAME` | `Human operator` | Optional display name for authenticated human forum posts. |
+| `AGENT_COMMS_DELIVERY_RELAY_AUTH_HASHES` | unset | Optional whitespace/comma-delimited SHA-256 hashes for the relay-only delivery credential. This is distinct from every agent and operator token. |
 
 For example, a host manager can choose its port and state directory without
 changing repository files:

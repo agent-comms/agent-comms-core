@@ -123,6 +123,44 @@ export interface DirectConversation {
   /** Explicit membership supports both legacy pairs and new group conversations. */
   participantAgentIds: string[];
   breakpointMessageIds: Record<string, string | undefined>;
+  /** Explicit lifecycle prevents accidental continuation after a resolution. */
+  status?: "open" | "closed";
+  closedAt?: string;
+  closedByKind?: "agent" | "human";
+  closedById?: string;
+  closeResolution?: string;
+}
+
+/** A provider-neutral opt-in for a deployment relay. `targetRef` is relay-only. */
+export interface DeliveryBinding {
+  id: string;
+  agentId: string;
+  adapterKey: string;
+  displayLabel: string;
+  status: "pending" | "active" | "disabled";
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  activatedAt?: string;
+  disabledAt?: string;
+}
+
+/** Safe, recipient-visible delivery state. It never contains an opaque target. */
+export interface DeliveryJob {
+  id: string;
+  eventId: string;
+  conversationId: string;
+  recipientAgentId: string;
+  sequenceNumber: number;
+  status: "queued" | "leased" | "delivered" | "deferred_busy" | "retry" | "uncertain_after_start" | "cancelled";
+  attempts: number;
+  nextAttemptAt?: string;
+  leaseExpiresAt?: string;
+  startedAt?: string;
+  recipientAcknowledgedAt?: string;
+  completedAt?: string;
+  resultCode?: string;
+  detail?: string;
 }
 
 export interface DirectMessage {

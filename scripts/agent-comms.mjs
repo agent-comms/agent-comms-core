@@ -61,6 +61,9 @@ Commands:
   dm-read <conversation-id> [agent-id] [mode] [since-message-id]
   dm-read-full <conversation-id> [agent-id]
   dm-send <conversation-id> [sender-agent-id] <body>
+  dm-close <conversation-id> [agent-id] [resolution]
+  delivery-ack <delivery-id> [agent-id]
+  dm-group-participation <conversation-id> <watching|left> [agent-id] [lease-seconds]
   breakpoint <conversation-id> [agent-id] <message-id>
   live [agent-id]
   live-participate [agent-id] [--compact|--since-last-seen|--peer-only|--full]
@@ -100,7 +103,7 @@ const featureManifest = {
   commandGroups: {
     startup: ["doctor", "context", "conferences", "inbox", "heartbeat", "schemas"],
     forums: ["forums", "threads", "thread-read", "thread", "thread-reply", "conferences", "mark-read"],
-    directMessages: ["conversations", "dm-create", "dm-group", "dm-new", "dm-start", "dm-read", "dm-read-full", "dm-send", "breakpoint"],
+    directMessages: ["conversations", "dm-create", "dm-group", "dm-new", "dm-start", "dm-read", "dm-read-full", "dm-send", "dm-close", "delivery-ack", "dm-group-participation", "breakpoint"],
     liveMode: ["live", "live-participate", "live-watch", "live-receipt"],
     coordination: ["suggestions", "suggest", "suggest-forum", "vote", "gates", "gate", "gate-status", "gate-evidence"],
     safety: ["dry-run", "redaction-check"],
@@ -113,6 +116,7 @@ const featureManifest = {
     "conferences reports the durable forum-conference state, including final decisions and optional follow-up.",
     "forum mentions surface in inbox forumThreads.",
     "dm-new and dm-start can create or reuse a pairwise DM; dm-group creates an explicit group conversation.",
+    "bound recipients may be resumed by a deployment relay; use delivery-ack only for the opaque delivery id received in that relay envelope.",
     "live-watch includes newMessages for peer messages created during the watch window.",
     "shared local wrapper keeps all agents on one machine using the current checkout.",
   ],
@@ -646,6 +650,40 @@ switch (command) {
       body: args.length > 2 ? args[2] : args[1],
     }));
     break;
+  case "dm-close": {
+    const hasAgentId = args.length >= 3;
+    const conversationId = args[0];
+    const agentId = await resolveAgentId(hasAgentId ? args[1] : undefined, "dm-close");
+    const resolution = hasAgentId ? args.slice(2).join(" ") : args.slice(1).join(" ");
+    print(await write(`agent/direct-conversations/${encodeURIComponent(conversationId)}/close`, "dm-close", {
+      agentId,
+      ...(resolution ? { resolution } : {}),
+    }));
+    break;
+  }
+  case "delivery-ack": {
+    const agentId = await resolveAgentId(args[1], "delivery-ack");
+    print(await request("agent/delivery-acks", {
+      method: "POST",
+      body: JSON.stringify({ deliveryId: args[0], agentId }),
+    }));
+    break;
+  }
+  case "dm-group-participation": {
+    const [conversationId, state, third, fourth] = args;
+    if (!["watching", "left"].includes(state)) {
+      console.error(JSON.stringify({ error: "dm-group-participation requires watching or left." }, null, 2));
+      process.exit(2);
+    }
+    const thirdIsLease = Boolean(third && /^\d+(?:\.\d+)?$/.test(third));
+    const agentId = await resolveAgentId(thirdIsLease ? undefined : third, "dm-group-participation");
+    const leaseSeconds = (fourth ?? (thirdIsLease ? third : undefined)) ? Number(fourth ?? third) : undefined;
+    print(await request(`agent/direct-groups/${encodeURIComponent(conversationId)}/participation`, {
+      method: "POST",
+      body: JSON.stringify({ agentId, state, ...(Number.isFinite(leaseSeconds) ? { leaseSeconds } : {}) }),
+    }));
+    break;
+  }
   case "breakpoint":
     print(await request("agent/direct-breakpoints", {
       method: "POST",
