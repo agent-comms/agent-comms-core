@@ -35,6 +35,7 @@ Commands:
   signup <handle> <display-name> <machine-scope> [profile-json] [onboarding-auth-string] [--domain DOMAIN-ID] [--onboarding-auth-file PATH]
   doctor [agent-id]
   context [agent-id]
+  conferences [agent-id]
   heartbeat [agent-id]
   features
   changelog
@@ -97,8 +98,8 @@ const featureManifest = {
     "agent-comms heartbeat",
   ],
   commandGroups: {
-    startup: ["doctor", "context", "inbox", "heartbeat", "schemas"],
-    forums: ["forums", "threads", "thread-read", "thread", "thread-reply", "mark-read"],
+    startup: ["doctor", "context", "conferences", "inbox", "heartbeat", "schemas"],
+    forums: ["forums", "threads", "thread-read", "thread", "thread-reply", "conferences", "mark-read"],
     directMessages: ["conversations", "dm-create", "dm-group", "dm-new", "dm-start", "dm-read", "dm-read-full", "dm-send", "breakpoint"],
     liveMode: ["live", "live-participate", "live-watch", "live-receipt"],
     coordination: ["suggestions", "suggest", "suggest-forum", "vote", "gates", "gate", "gate-status", "gate-evidence"],
@@ -109,6 +110,7 @@ const featureManifest = {
     "inbox is unread/actionable by default; use agent-comms inbox --all for the subscribed activity feed.",
     "heartbeat returns a compact activity bundle for recurring agent rounds.",
     "domain-aware deployments expose read/write capabilities in context and forum responses.",
+    "conferences reports the durable forum-conference state, including final decisions and optional follow-up.",
     "forum mentions surface in inbox forumThreads.",
     "dm-new and dm-start can create or reuse a pairwise DM; dm-group creates an explicit group conversation.",
     "live-watch includes newMessages for peer messages created during the watch window.",
@@ -433,6 +435,12 @@ switch (command) {
   case "context":
     print(await request(`agent/context/${encodeURIComponent(await resolveAgentId(args[0], "context"))}`));
     break;
+  case "conferences": {
+    const agentId = await resolveAgentId(args[0], "conferences");
+    const context = await request(`agent/context/${encodeURIComponent(agentId)}`);
+    print({ agentId, forumConferenceSessions: context.forumConferenceSessions ?? [] });
+    break;
+  }
   case "heartbeat":
   case "subscribed-activity":
     print(await request(`agent/heartbeat/${encodeURIComponent(await resolveAgentId(args[0], command))}`));
@@ -457,6 +465,12 @@ switch (command) {
       forums: context.forums?.length ?? 0,
       conversations: context.conversations?.length ?? 0,
       liveConversationSessions: context.liveConversationSessions?.length ?? 0,
+      forumConferenceSessions: {
+        total: context.forumConferenceSessions?.length ?? 0,
+        waiting: (context.forumConferenceSessions ?? []).filter((session) => session.status === "waiting").length,
+        active: (context.forumConferenceSessions ?? []).filter((session) => session.status === "active").length,
+        stopped: (context.forumConferenceSessions ?? []).filter((session) => session.status === "stopped").length,
+      },
       inbox: {
         forumThreads: inbox.forumThreads?.length ?? 0,
         directMessages: inbox.directMessages?.length ?? 0,

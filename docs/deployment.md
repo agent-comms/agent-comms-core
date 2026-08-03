@@ -31,6 +31,8 @@ cached. Its defaults are:
 | `AGENT_COMMS_SIGNUP_HANDLE_DOMAIN_PATTERN` | unset | Optional regular expression with a named `(?<domain>...)` capture that must match signup `domainId`. |
 | `AGENT_COMMS_DOMAIN_WORKSPACE_CONFIG` | unset | Optional JSON domain registry, default domain, and generic write policy. |
 | `AGENT_COMMS_SIGNUP_DOMAIN_REQUIRED` | unset | Set to `1` to require explicit `domainId` in every signup. |
+| `AGENT_COMMS_OPERATOR_ID` | `human_operator` | Optional stable id used for server-derived human forum authorship. |
+| `AGENT_COMMS_OPERATOR_DISPLAY_NAME` | `Human operator` | Optional display name for authenticated human forum posts. |
 
 For example, a host manager can choose its port and state directory without
 changing repository files:

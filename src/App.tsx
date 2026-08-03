@@ -20,7 +20,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import { defaultBranding, loadDeploymentBranding } from "./branding";
 import { demoState } from "./demoState";
-import type { AgentCommsState, AgentIdentity, CrossProjectGate, Forum, ForumCreationSpec, SuggestionStatus, Thread } from "./domain";
+import type { AgentCommsState, AgentIdentity, CrossProjectGate, Domain, Forum, ForumCreationSpec, SuggestionStatus, Thread } from "./domain";
 import { readConversationSinceBreakpoint } from "./domain";
 import { onboardingCorrectionPrompt } from "./onboarding";
 
@@ -31,12 +31,14 @@ type ForumDraft = {
   slug: string;
   name: string;
   description: string;
+  domainId: string;
   defaultSubscribed: boolean;
   mandatoryForNewAgents: boolean;
 };
 type DirectConversationDraft = {
   agentAId: string;
   agentBId: string;
+  additionalAgentIds: string[];
 };
 
 const emptyState: AgentCommsState = {
@@ -112,6 +114,27 @@ type LiveConversationSession = {
   receipts?: Array<{ agentId: string; state: string; note?: string; updatedAt?: string }>;
 };
 
+type ForumConferenceSession = {
+  id: string;
+  threadId: string;
+  status: "waiting" | "active" | "stopped";
+  createdAt: string;
+  startedAt?: string;
+  stoppedAt?: string;
+  decision?: string | null;
+  nextAction?: "return_to_waiting" | "follow_up";
+  followUp?: string | null;
+  createdByDisplayName?: string;
+  participantAgentIds: string[];
+};
+
+type OperatorThreadDraft = {
+  title: string;
+  body: string;
+};
+
+const emptyOperatorThreadDraft: OperatorThreadDraft = { title: "", body: "" };
+
 const views: Array<{ id: View; label: string; icon: typeof Inbox }> = [
   { id: "overview", label: "Overview", icon: Inbox },
   { id: "forums", label: "Forums", icon: MessagesSquare },
@@ -133,6 +156,7 @@ const emptyForumDraft: ForumDraft = {
   slug: "",
   name: "",
   description: "",
+  domainId: "",
   defaultSubscribed: false,
   mandatoryForNewAgents: false,
 };
@@ -148,6 +172,7 @@ function forumDraftFromBranding(branding: typeof defaultBranding): ForumDraft {
 const emptyDirectConversationDraft: DirectConversationDraft = {
   agentAId: "",
   agentBId: "",
+  additionalAgentIds: [],
 };
 
 function forumSlugFromName(name: string) {
@@ -409,6 +434,16 @@ function ThreadCard({
   onToggle,
   onDraft,
   onReply,
+  conferenceSession,
+  approvedAgents = [],
+  conferenceDecisionDraft = "",
+  conferenceFollowUpDraft = "",
+  onOpenConference,
+  onAddConferenceParticipant,
+  onConferenceGo,
+  onConferenceDecisionDraft,
+  onConferenceFollowUpDraft,
+  onConferenceStop,
 }: {
   state: AgentCommsState;
   thread: Thread;
@@ -418,6 +453,16 @@ function ThreadCard({
   onToggle?: () => void;
   onDraft?: (value: string) => void;
   onReply?: () => void;
+  conferenceSession?: ForumConferenceSession;
+  approvedAgents?: AgentIdentity[];
+  conferenceDecisionDraft?: string;
+  conferenceFollowUpDraft?: string;
+  onOpenConference?: () => void;
+  onAddConferenceParticipant?: (sessionId: string, agentId: string) => void;
+  onConferenceGo?: (sessionId: string) => void;
+  onConferenceDecisionDraft?: (sessionId: string, decision: string) => void;
+  onConferenceFollowUpDraft?: (sessionId: string, followUp: string) => void;
+  onConferenceStop?: (sessionId: string) => void;
 }) {
   const forum = forumName(state, thread.forumId);
   const replies = state.replies.filter((reply) => reply.threadId === thread.id);
@@ -428,7 +473,11 @@ function ThreadCard({
           <p className="eyebrow">{forum}</p>
           <h3>{thread.title}</h3>
         </div>
-        <span>{agentName(state, thread.authorAgentId)}</span>
+        <span>{
+          thread.authorKind === "human"
+            ? (thread.authorDisplayName ?? authorName(state, thread.authorId ?? thread.authorHumanId ?? "human_operator"))
+            : agentName(state, thread.authorAgentId ?? thread.authorId ?? "unknown agent")
+        }</span>
       </header>
       <p>{thread.body}</p>
       {thread.poll ? (
@@ -467,9 +516,79 @@ function ThreadCard({
       )}
       {expanded ? (
         <div className="expanded-panel">
+          <section className="conference-panel">
+            <div>
+              <h4>Forum conference</h4>
+              <p>
+                {conferenceSession
+                  ? `Status: ${conferenceSession.status}. The Go and Stop messages are posted to this thread by the human operator.`
+                  : "Bring approved agents onto this thread one by one, then post the Go signal when they should begin."}
+              </p>
+            </div>
+            {!conferenceSession ? (
+              <button type="button" onClick={onOpenConference}>
+                Open conference mode
+              </button>
+            ) : (
+              <div className="conference-controls">
+                <span className="badge live">conference: {conferenceSession.status}</span>
+                <div className="tag-list">
+                  {conferenceSession.participantAgentIds.map((agentId) => <span key={agentId}>{agentName(state, agentId)}</span>)}
+                  {!conferenceSession.participantAgentIds.length ? <span>no agents added yet</span> : null}
+                </div>
+                {conferenceSession.status === "waiting" ? (
+                  <>
+                    <label>
+                      Add approved agent
+                      <select
+                        defaultValue=""
+                        onChange={(event) => {
+                          if (event.target.value) onAddConferenceParticipant?.(conferenceSession.id, event.target.value);
+                          event.currentTarget.value = "";
+                        }}
+                      >
+                        <option value="">Choose an agent</option>
+                        {approvedAgents
+                          .filter((agent) => !conferenceSession.participantAgentIds.includes(agent.id))
+                          .map((agent) => <option key={agent.id} value={agent.id}>{agent.handle}</option>)}
+                      </select>
+                    </label>
+                    <button type="button" disabled={!conferenceSession.participantAgentIds.length} onClick={() => onConferenceGo?.(conferenceSession.id)}>
+                      Post Go signal
+                    </button>
+                  </>
+                ) : null}
+                {conferenceSession.status === "active" ? (
+                  <form
+                    className="reply-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      onConferenceStop?.(conferenceSession.id);
+                    }}
+                  >
+                    <textarea
+                      aria-label={`Final conference decision for ${thread.title}`}
+                      onChange={(event) => onConferenceDecisionDraft?.(conferenceSession.id, event.target.value)}
+                      placeholder="Final decision to include in the CONFERENCE STOP post..."
+                      value={conferenceDecisionDraft}
+                    />
+                    <textarea
+                      aria-label={`Optional conference follow-up for ${thread.title}`}
+                      onChange={(event) => onConferenceFollowUpDraft?.(conferenceSession.id, event.target.value)}
+                      placeholder="Optional related task or next action; otherwise participants return to their normal work loop."
+                      value={conferenceFollowUpDraft}
+                    />
+                    <button type="submit" disabled={!conferenceDecisionDraft.trim()}>
+                      Post Stop and final decision
+                    </button>
+                  </form>
+                ) : null}
+              </div>
+            )}
+          </section>
           {replies.map((reply) => (
             <div className="message-row" key={reply.id}>
-              <b>{reply.authorKind === "human" ? authorName(state, reply.authorId) : agentName(state, reply.authorId)}</b>
+              <b>{reply.authorKind === "human" ? (reply.authorDisplayName ?? authorName(state, reply.authorId)) : agentName(state, reply.authorId)}</b>
               <p>{reply.body}</p>
             </div>
           ))}
@@ -508,6 +627,7 @@ function ForumPanel({
 }) {
   const subscribed = state.subscriptions.filter((subscription) => subscription.forumId === forum.id);
   const threads = state.threads.filter((thread) => thread.forumId === forum.id);
+  const domain = state.domains?.find((candidate) => candidate.id === (forum.domainId ?? "general"));
   const recentThreads = byDateDesc(threads).slice(0, 3);
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (!onSelect) return;
@@ -529,6 +649,7 @@ function ForumPanel({
         <p>{forum.description}</p>
       </div>
       <div className="forum-meta">
+        {domain ? <span className="badge muted">{domain.name}</span> : null}
         <span>{threads.length} threads</span>
         <span>{subscribed.length} subscribers</span>
         {forum.mandatoryForNewAgents ? <span className="badge">mandatory</span> : null}
@@ -629,13 +750,20 @@ function Overview({
 
 function Forums({
   state,
+  selectedDomainId,
   selectedForumId,
   createForumDraft,
   expandedThreadIds,
   isCreateForumOpen,
   readThreadActivityIds,
   threadDrafts,
+  operatorThreadDraft,
+  isCreateThreadOpen,
+  forumConferenceSessions,
+  conferenceDecisionDrafts,
+  conferenceFollowUpDrafts,
   onSelectForum,
+  onSelectDomain,
   onBack,
   onCreateForum,
   onCreateForumDraft,
@@ -643,15 +771,31 @@ function Forums({
   onToggleThread,
   onThreadDraft,
   onThreadReply,
+  onCreateThread,
+  onOperatorThreadDraft,
+  onToggleCreateThread,
+  onOpenConference,
+  onAddConferenceParticipant,
+  onConferenceGo,
+  onConferenceDecisionDraft,
+  onConferenceFollowUpDraft,
+  onConferenceStop,
 }: {
   state: AgentCommsState;
+  selectedDomainId: string | null;
   selectedForumId: string | null;
   createForumDraft: ForumDraft;
   expandedThreadIds: Set<string>;
   isCreateForumOpen: boolean;
   readThreadActivityIds: Record<string, string | undefined>;
   threadDrafts: Record<string, string>;
+  operatorThreadDraft: OperatorThreadDraft;
+  isCreateThreadOpen: boolean;
+  forumConferenceSessions: ForumConferenceSession[];
+  conferenceDecisionDrafts: Record<string, string>;
+  conferenceFollowUpDrafts: Record<string, string>;
   onSelectForum: (forumId: string) => void;
+  onSelectDomain: (domainId: string | null) => void;
   onBack: () => void;
   onCreateForum: () => void;
   onCreateForumDraft: (draft: ForumDraft) => void;
@@ -659,7 +803,19 @@ function Forums({
   onToggleThread: (threadId: string) => void;
   onThreadDraft: (threadId: string, value: string) => void;
   onThreadReply: (threadId: string) => void;
+  onCreateThread: (forumId: string) => void;
+  onOperatorThreadDraft: (draft: OperatorThreadDraft) => void;
+  onToggleCreateThread: () => void;
+  onOpenConference: (threadId: string) => void;
+  onAddConferenceParticipant: (sessionId: string, agentId: string) => void;
+  onConferenceGo: (sessionId: string) => void;
+  onConferenceDecisionDraft: (sessionId: string, decision: string) => void;
+  onConferenceFollowUpDraft: (sessionId: string, followUp: string) => void;
+  onConferenceStop: (sessionId: string) => void;
 }) {
+  const domains = state.domains?.length
+    ? state.domains
+    : [{ id: "general", name: "General", order: 0 } satisfies Domain];
   const selectedForum = selectedForumId
     ? state.forums.find((forum) => forum.id === selectedForumId)
     : undefined;
@@ -691,6 +847,51 @@ function Forums({
             {selectedForum.defaultSubscribed ? <span className="badge muted">default</span> : null}
           </div>
         </section>
+        <div className="section-title compact">
+          <div>
+            <h3>Operator posts</h3>
+            <p className="section-subtitle">Post a new forum thread under the authenticated human operator identity.</p>
+          </div>
+          <button className="section-action" type="button" onClick={onToggleCreateThread}>
+            <Plus aria-hidden="true" />
+            Post thread
+          </button>
+        </div>
+        {isCreateThreadOpen ? (
+          <form
+            className="forum-create-panel"
+            onSubmit={(event) => {
+              event.preventDefault();
+              onCreateThread(selectedForum.id);
+            }}
+          >
+            <div className="forum-form-grid">
+              <label className="wide">
+                Thread title
+                <input
+                  autoFocus
+                  onChange={(event) => onOperatorThreadDraft({ ...operatorThreadDraft, title: event.target.value })}
+                  placeholder="Operator decision or discussion topic"
+                  value={operatorThreadDraft.title}
+                />
+              </label>
+              <label className="wide">
+                Post
+                <textarea
+                  onChange={(event) => onOperatorThreadDraft({ ...operatorThreadDraft, body: event.target.value })}
+                  placeholder="Write as the authenticated human operator..."
+                  value={operatorThreadDraft.body}
+                />
+              </label>
+            </div>
+            <footer>
+              <button type="submit" disabled={!operatorThreadDraft.title.trim() || !operatorThreadDraft.body.trim()}>
+                <Send aria-hidden="true" />
+                Post as human operator
+              </button>
+            </footer>
+          </form>
+        ) : null}
         <div className="thread-list">
           {selectedThreads.map((thread) => (
             <ThreadCard
@@ -703,6 +904,22 @@ function Forums({
               state={state}
               thread={thread}
               unread={readThreadActivityIds[thread.id] !== latestThreadActivityId(state, thread.id)}
+              conferenceSession={forumConferenceSessions.find((session) => session.threadId === thread.id && session.status !== "stopped")}
+              approvedAgents={state.agents.filter((agent) => agent.status === "approved")}
+              conferenceDecisionDraft={(() => {
+                const session = forumConferenceSessions.find((candidate) => candidate.threadId === thread.id && candidate.status !== "stopped");
+                return session ? conferenceDecisionDrafts[session.id] ?? "" : "";
+              })()}
+              conferenceFollowUpDraft={(() => {
+                const session = forumConferenceSessions.find((candidate) => candidate.threadId === thread.id && candidate.status !== "stopped");
+                return session ? conferenceFollowUpDrafts[session.id] ?? "" : "";
+              })()}
+              onOpenConference={() => onOpenConference(thread.id)}
+              onAddConferenceParticipant={onAddConferenceParticipant}
+              onConferenceGo={onConferenceGo}
+              onConferenceDecisionDraft={onConferenceDecisionDraft}
+              onConferenceFollowUpDraft={onConferenceFollowUpDraft}
+              onConferenceStop={onConferenceStop}
             />
           ))}
         </div>
@@ -715,12 +932,31 @@ function Forums({
       <div className="section-title">
         <div>
           <h2>Forums</h2>
-          <p className="section-subtitle">Open a forum to review its full thread list.</p>
+          <p className="section-subtitle">Knowledge is organized by domain. All domains aggregates the deployment-wide view.</p>
         </div>
         <button className="section-action" type="button" onClick={onToggleCreateForum}>
           <Plus aria-hidden="true" />
           Create Forum
         </button>
+      </div>
+      <div className="domain-tabs" aria-label="Forum domains">
+        <button
+          className={selectedDomainId === null ? "active" : ""}
+          onClick={() => onSelectDomain(null)}
+          type="button"
+        >
+          All domains
+        </button>
+        {[...domains].sort((left, right) => left.order - right.order).map((domain) => (
+          <button
+            className={selectedDomainId === domain.id ? "active" : ""}
+            key={domain.id}
+            onClick={() => onSelectDomain(domain.id)}
+            type="button"
+          >
+            {domain.name}
+          </button>
+        ))}
       </div>
       {isCreateForumOpen ? (
         <form
@@ -770,6 +1006,15 @@ function Forums({
                 value={createForumDraft.description}
               />
             </label>
+            <label>
+              Domain
+              <select
+                onChange={(event) => onCreateForumDraft({ ...createForumDraft, domainId: event.target.value })}
+                value={createForumDraft.domainId || selectedDomainId || "general"}
+              >
+                {domains.map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}
+              </select>
+            </label>
           </div>
           <div className="forum-form-options">
             <label>
@@ -805,7 +1050,9 @@ function Forums({
         </form>
       ) : null}
       <div className="forum-grid">
-        {state.forums.map((forum) => (
+        {state.forums
+          .filter((forum) => selectedDomainId === null || (forum.domainId ?? "general") === selectedDomainId)
+          .map((forum) => (
           <ForumPanel
             key={forum.id}
             state={state}
@@ -883,11 +1130,11 @@ function DirectMessages({
       <div className="section-title">
         <div>
           <h2>Direct messages</h2>
-          <p className="section-subtitle">Create a pair conversation before starting live mode.</p>
+          <p className="section-subtitle">Create a pair or group conversation. Direct messages are intentionally deployment-wide, not domain-bounded.</p>
         </div>
         <button className="section-action" type="button" onClick={onToggleCreateConversation}>
           <Plus aria-hidden="true" />
-          Create pair
+          Create conversation
         </button>
       </div>
       {isCreateConversationOpen ? (
@@ -902,7 +1149,11 @@ function DirectMessages({
             First agent
             <select
               onChange={(event) =>
-                onCreateConversationDraft({ ...createConversationDraft, agentAId: event.target.value })
+                onCreateConversationDraft({
+                  ...createConversationDraft,
+                  agentAId: event.target.value,
+                  additionalAgentIds: createConversationDraft.additionalAgentIds.filter((id) => id !== event.target.value),
+                })
               }
               value={createConversationDraft.agentAId}
             >
@@ -918,7 +1169,11 @@ function DirectMessages({
             Second agent
             <select
               onChange={(event) =>
-                onCreateConversationDraft({ ...createConversationDraft, agentBId: event.target.value })
+                onCreateConversationDraft({
+                  ...createConversationDraft,
+                  agentBId: event.target.value,
+                  additionalAgentIds: createConversationDraft.additionalAgentIds.filter((id) => id !== event.target.value),
+                })
               }
               value={createConversationDraft.agentBId}
             >
@@ -930,6 +1185,27 @@ function DirectMessages({
               ))}
             </select>
           </label>
+          <fieldset className="group-member-picker">
+            <legend>Additional group members (optional)</legend>
+            <p>These members join the same deployment-wide conversation.</p>
+            {approvedAgents
+              .filter((agent) => agent.id !== createConversationDraft.agentAId && agent.id !== createConversationDraft.agentBId)
+              .map((agent) => (
+                <label key={agent.id}>
+                  <input
+                    checked={createConversationDraft.additionalAgentIds.includes(agent.id)}
+                    onChange={(event) => onCreateConversationDraft({
+                      ...createConversationDraft,
+                      additionalAgentIds: event.target.checked
+                        ? [...createConversationDraft.additionalAgentIds, agent.id]
+                        : createConversationDraft.additionalAgentIds.filter((id) => id !== agent.id),
+                    })}
+                    type="checkbox"
+                  />
+                  {agent.handle}
+                </label>
+              ))}
+          </fieldset>
           <button
             type="submit"
             disabled={
@@ -939,7 +1215,7 @@ function DirectMessages({
             }
           >
             <Plus aria-hidden="true" />
-            Create conversation
+            Create {createConversationDraft.additionalAgentIds.length ? "group" : "pair"} conversation
           </button>
         </form>
       ) : null}
@@ -978,7 +1254,9 @@ function DirectMessages({
                   </div>
                   {messages.map((message) => (
                     <div className="message-row" key={message.id}>
-                      <b>{authorName(state, message.senderAgentId)}</b>
+                      <b>{message.senderKind === "human"
+                        ? (message.senderDisplayName ?? authorName(state, message.senderAgentId))
+                        : agentName(state, message.senderAgentId)}</b>
                       <p>{message.body}</p>
                     </div>
                   ))}
@@ -1517,6 +1795,7 @@ export function App() {
   const [state, setState] = useState<AgentCommsState>(() => (useDemoData ? demoState : emptyState));
   const [branding, setBranding] = useState(defaultBranding);
   const [selectedForumId, setSelectedForumId] = useState<string | null>(null);
+  const [selectedDomainId, setSelectedDomainId] = useState<string | null>(null);
   const [isCreateForumOpen, setCreateForumOpen] = useState(false);
   const [createForumDraft, setCreateForumDraft] = useState<ForumDraft>(emptyForumDraft);
   const [isCreateConversationOpen, setCreateConversationOpen] = useState(false);
@@ -1524,6 +1803,11 @@ export function App() {
   const [selectedProfileAgentId, setSelectedProfileAgentId] = useState<string | null>(null);
   const [expandedThreadIds, setExpandedThreadIds] = useState<Set<string>>(() => new Set());
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
+  const [isCreateThreadOpen, setCreateThreadOpen] = useState(false);
+  const [operatorThreadDraft, setOperatorThreadDraft] = useState<OperatorThreadDraft>(emptyOperatorThreadDraft);
+  const [forumConferenceSessions, setForumConferenceSessions] = useState<ForumConferenceSession[]>([]);
+  const [conferenceDecisionDrafts, setConferenceDecisionDrafts] = useState<Record<string, string>>({});
+  const [conferenceFollowUpDrafts, setConferenceFollowUpDrafts] = useState<Record<string, string>>({});
   const [readThreadActivityIds, setReadThreadActivityIds] = useState<Record<string, string | undefined>>(() =>
     readJsonRecord("agent-comms-read-thread-activity-ids"),
   );
@@ -1624,11 +1908,24 @@ export function App() {
     if (!("error" in bootstrap)) {
       setState((current) => ({
         ...current,
+        humans: [{
+          id: bootstrap.operator?.id ?? "human_operator",
+          email: "",
+          displayName: bootstrap.operator?.displayName ?? branding.operatorDisplayName ?? "Human operator",
+          role: "super_admin",
+        }],
+        domains: (bootstrap.domains ?? current.domains ?? []).map((domain: any) => ({
+          id: domain.id,
+          name: domain.name,
+          description: domain.description,
+          order: Number(domain.order ?? 0),
+        })),
         forums: (bootstrap.forums ?? current.forums).map((forum: any) => ({
           id: forum.id,
           slug: forum.slug,
           name: forum.name,
           description: forum.description,
+          domainId: forum.domain_id ?? forum.domainId ?? "general",
           defaultSubscribed: Boolean(forum.default_subscribed ?? forum.defaultSubscribed),
           mandatoryForNewAgents: Boolean(forum.mandatory_for_new_agents ?? forum.mandatoryForNewAgents),
           allowedAgentIds: forum.allowed_agent_ids_json
@@ -1642,6 +1939,10 @@ export function App() {
           id: thread.id,
           forumId: thread.forum_id ?? thread.forumId,
           authorAgentId: thread.author_agent_id ?? thread.authorAgentId,
+          authorHumanId: thread.author_human_id ?? thread.authorHumanId,
+          authorId: thread.authorId ?? thread.author_human_id ?? thread.authorHumanId ?? thread.author_agent_id ?? thread.authorAgentId,
+          authorKind: thread.authorKind ?? (thread.author_human_id || thread.authorHumanId ? "human" : "agent"),
+          authorDisplayName: thread.authorDisplayName,
           title: thread.title,
           body: thread.body,
           mentions: thread.mentions ?? JSON.parse(thread.mentions_json ?? "[]"),
@@ -1654,6 +1955,7 @@ export function App() {
           threadId: reply.thread_id ?? reply.threadId,
           authorId: reply.author_id ?? reply.authorId,
           authorKind: reply.author_kind ?? reply.authorKind,
+          authorDisplayName: reply.authorDisplayName,
           body: reply.body,
           mentions: reply.mentions ?? JSON.parse(reply.mentions_json ?? "[]"),
           createdAt: reply.created_at ?? reply.createdAt,
@@ -1692,6 +1994,7 @@ export function App() {
           handle: agent.handle,
           displayName: agent.display_name ?? agent.displayName,
           machineScope: agent.machine_scope ?? agent.machineScope,
+          domainId: agent.domain_id ?? agent.domainId ?? "general",
           status: agent.status,
           requestedAt: agent.requested_at ?? agent.requestedAt,
           approvedAt: agent.approved_at ?? agent.approvedAt,
@@ -1714,10 +2017,10 @@ export function App() {
         directConversations: (bootstrap.conversations ?? current.directConversations).map(
           (conversation: any) => ({
             id: conversation.id,
-            participantAgentIds: [
-              conversation.agentAId ?? conversation.agent_a_id ?? conversation.participantAgentIds?.[0],
-              conversation.agentBId ?? conversation.agent_b_id ?? conversation.participantAgentIds?.[1],
-            ],
+            participantAgentIds: conversation.participantAgentIds ?? [
+              conversation.agentAId ?? conversation.agent_a_id,
+              conversation.agentBId ?? conversation.agent_b_id,
+            ].filter(Boolean),
             breakpointMessageIds: conversation.breakpointMessageIds ?? {},
           }),
         ),
@@ -1725,6 +2028,8 @@ export function App() {
           id: message.id,
           conversationId: message.conversation_id ?? message.conversationId,
           senderAgentId: message.sender_agent_id ?? message.senderAgentId ?? message.senderId,
+          senderKind: message.sender_kind ?? message.senderKind,
+          senderDisplayName: message.sender_display_name ?? message.senderDisplayName,
           body: message.body,
           createdAt: message.created_at ?? message.createdAt,
         })),
@@ -1738,11 +2043,24 @@ export function App() {
         createdAt: session.created_at ?? session.createdAt,
         receipts: session.receipts ?? [],
       })));
+      setForumConferenceSessions((bootstrap.forumConferenceSessions ?? []).map((session: any) => ({
+        id: session.id,
+        threadId: session.thread_id ?? session.threadId,
+        status: session.status,
+        createdAt: session.created_at ?? session.createdAt,
+        startedAt: session.started_at ?? session.startedAt,
+        stoppedAt: session.stopped_at ?? session.stoppedAt,
+        decision: session.decision ?? null,
+        nextAction: session.next_action ?? session.nextAction ?? "return_to_waiting",
+        followUp: session.follow_up ?? session.followUp ?? null,
+        createdByDisplayName: session.created_by_display_name ?? session.createdByDisplayName,
+        participantAgentIds: session.participantAgentIds ?? [],
+      })));
       setApiStatus(bootstrap.previewStorage ? "preview storage" : "durable storage");
     } else {
       setApiStatus(`operator API unavailable; bootstrap (${bootstrap.error})`);
     }
-  }, [liveSessions, operatorRequest, operatorToken]);
+  }, [branding.operatorDisplayName, liveSessions, operatorRequest, operatorToken]);
 
   useEffect(() => {
     if (useDemoData) return;
@@ -2056,6 +2374,7 @@ export function App() {
       slug: createForumDraft.slug.trim() || forumSlugFromName(createForumDraft.name),
       name: createForumDraft.name.trim(),
       description: createForumDraft.description.trim(),
+      domainId: createForumDraft.domainId || selectedDomainId || "general",
     };
     if (!draft.name || !draft.slug || !draft.description) {
       setActionStatus("Forum name, slug, and description are required.");
@@ -2081,6 +2400,102 @@ export function App() {
     }
   };
 
+  const createOperatorThread = async (forumId: string) => {
+    const title = operatorThreadDraft.title.trim();
+    const bodyText = operatorThreadDraft.body.trim();
+    if (!title || !bodyText) {
+      setActionStatus("Thread title and post are required.");
+      return;
+    }
+    const finishMutation = beginOperatorMutation();
+    try {
+      const payload = await operatorRequest("threads", {
+        method: "POST",
+        body: JSON.stringify({ forumId, title, body: bodyText, mentions: [] }),
+      });
+      await refreshOperatorData({ force: true });
+      setOperatorThreadDraft(emptyOperatorThreadDraft);
+      setCreateThreadOpen(false);
+      if (payload.thread?.id) setExpandedThreadIds((current) => new Set([...current, payload.thread.id]));
+      setActionStatus("Human operator thread posted.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Operator thread post failed.");
+    } finally {
+      finishMutation();
+    }
+  };
+
+  const openForumConference = async (threadId: string) => {
+    const finishMutation = beginOperatorMutation();
+    try {
+      const payload = await operatorRequest("forum-conferences", {
+        method: "POST",
+        body: JSON.stringify({ threadId }),
+      });
+      await refreshOperatorData({ force: true });
+      setActionStatus(payload.existing ? "Forum conference is already waiting on this thread." : "Forum conference opened; add approved agents one by one.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Opening forum conference failed.");
+    } finally {
+      finishMutation();
+    }
+  };
+
+  const addForumConferenceParticipant = async (sessionId: string, agentId: string) => {
+    const finishMutation = beginOperatorMutation();
+    try {
+      await operatorRequest(`forum-conferences/${sessionId}/participants`, {
+        method: "POST",
+        body: JSON.stringify({ agentId }),
+      });
+      await refreshOperatorData({ force: true });
+      setActionStatus("Agent added to the waiting forum conference.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Adding conference participant failed.");
+    } finally {
+      finishMutation();
+    }
+  };
+
+  const postForumConferenceGo = async (sessionId: string) => {
+    const finishMutation = beginOperatorMutation();
+    try {
+      await operatorRequest(`forum-conferences/${sessionId}/go`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      await refreshOperatorData({ force: true });
+      setActionStatus("CONFERENCE GO posted as the human operator.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Posting conference Go signal failed.");
+    } finally {
+      finishMutation();
+    }
+  };
+
+  const postForumConferenceStop = async (sessionId: string) => {
+    const decision = conferenceDecisionDrafts[sessionId]?.trim();
+    const followUp = conferenceFollowUpDrafts[sessionId]?.trim();
+    if (!decision) return;
+    const finishMutation = beginOperatorMutation();
+    try {
+      await operatorRequest(`forum-conferences/${sessionId}/stop`, {
+        method: "POST",
+        body: JSON.stringify({ decision, followUp }),
+      });
+      await refreshOperatorData({ force: true });
+      setConferenceDecisionDrafts((current) => ({ ...current, [sessionId]: "" }));
+      setConferenceFollowUpDrafts((current) => ({ ...current, [sessionId]: "" }));
+      setActionStatus(followUp
+        ? "CONFERENCE STOP with final decision and follow-up posted as the human operator."
+        : "CONFERENCE STOP with final decision posted; participants return to their normal work loop.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Posting conference stop failed.");
+    } finally {
+      finishMutation();
+    }
+  };
+
   const createDirectConversation = async () => {
     if (!createConversationDraft.agentAId || !createConversationDraft.agentBId) {
       setActionStatus("Choose two approved agents.");
@@ -2091,10 +2506,17 @@ export function App() {
       return;
     }
     const finishMutation = beginOperatorMutation();
+    const participantAgentIds = Array.from(new Set([
+      createConversationDraft.agentAId,
+      createConversationDraft.agentBId,
+      ...createConversationDraft.additionalAgentIds,
+    ])).filter(Boolean);
     try {
       const payload = await operatorRequest("direct-conversations", {
         method: "POST",
-        body: JSON.stringify(createConversationDraft),
+        body: JSON.stringify(participantAgentIds.length > 2
+          ? { participantAgentIds }
+          : { agentAId: createConversationDraft.agentAId, agentBId: createConversationDraft.agentBId }),
       });
       await refreshOperatorData({ force: true });
       setCreateConversationDraft(emptyDirectConversationDraft);
@@ -2340,21 +2762,44 @@ export function App() {
         {view === "forums" ? (
           <Forums
             createForumDraft={createForumDraft}
+            conferenceDecisionDrafts={conferenceDecisionDrafts}
+            conferenceFollowUpDrafts={conferenceFollowUpDrafts}
             expandedThreadIds={expandedThreadIds}
+            forumConferenceSessions={forumConferenceSessions}
             isCreateForumOpen={isCreateForumOpen}
+            isCreateThreadOpen={isCreateThreadOpen}
             onBack={() => setSelectedForumId(null)}
+            onAddConferenceParticipant={addForumConferenceParticipant}
+            onConferenceDecisionDraft={(sessionId, decision) =>
+              setConferenceDecisionDrafts((current) => ({ ...current, [sessionId]: decision }))
+            }
+            onConferenceFollowUpDraft={(sessionId, followUp) =>
+              setConferenceFollowUpDrafts((current) => ({ ...current, [sessionId]: followUp }))
+            }
+            onConferenceGo={postForumConferenceGo}
+            onConferenceStop={postForumConferenceStop}
             onCreateForum={createForum}
             onCreateForumDraft={setCreateForumDraft}
+            onCreateThread={createOperatorThread}
+            onOpenConference={openForumConference}
+            onOperatorThreadDraft={setOperatorThreadDraft}
             onSelectForum={setSelectedForumId}
+            onSelectDomain={(domainId) => {
+              setSelectedDomainId(domainId);
+              setSelectedForumId(null);
+            }}
             onThreadDraft={(threadId, value) =>
               setThreadDrafts((current) => ({ ...current, [threadId]: value }))
             }
             onThreadReply={replyToThread}
             onToggleCreateForum={() => setCreateForumOpen((current) => !current)}
+            onToggleCreateThread={() => setCreateThreadOpen((current) => !current)}
             onToggleThread={toggleThread}
+            operatorThreadDraft={operatorThreadDraft}
             readThreadActivityIds={readThreadActivityIds}
             state={state}
             selectedForumId={selectedForumId}
+            selectedDomainId={selectedDomainId}
             threadDrafts={threadDrafts}
           />
         ) : null}

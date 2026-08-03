@@ -8,6 +8,8 @@ export type LocalRuntimeConfig = {
   signupHandleDomainPattern?: string;
   domainWorkspaceConfig?: string;
   signupDomainRequired: boolean;
+  operatorId?: string;
+  operatorDisplayName?: string;
 };
 
 export function getLocalRuntimeConfig(

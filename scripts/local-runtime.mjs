@@ -28,6 +28,8 @@ export function getLocalRuntimeConfig(env = process.env, cwd = process.cwd()) {
   const signupHandleDomainPattern = env.AGENT_COMMS_SIGNUP_HANDLE_DOMAIN_PATTERN?.trim() || undefined;
   const domainWorkspaceConfig = env.AGENT_COMMS_DOMAIN_WORKSPACE_CONFIG?.trim() || undefined;
   const signupDomainRequired = env.AGENT_COMMS_SIGNUP_DOMAIN_REQUIRED === "1" || env.AGENT_COMMS_SIGNUP_DOMAIN_REQUIRED === "true";
+  const operatorId = env.AGENT_COMMS_OPERATOR_ID?.trim() || undefined;
+  const operatorDisplayName = env.AGENT_COMMS_OPERATOR_DISPLAY_NAME?.trim() || undefined;
   if (domainWorkspaceConfig) {
     try {
       JSON.parse(domainWorkspaceConfig);
@@ -45,6 +47,8 @@ export function getLocalRuntimeConfig(env = process.env, cwd = process.cwd()) {
     signupHandleDomainPattern,
     domainWorkspaceConfig,
     signupDomainRequired,
+    operatorId,
+    operatorDisplayName,
   };
 }
 
@@ -113,6 +117,8 @@ async function host(config) {
   if (config.signupHandleDomainPattern) args.push("--binding", `SIGNUP_HANDLE_DOMAIN_PATTERN=${config.signupHandleDomainPattern}`);
   if (config.domainWorkspaceConfig) args.push("--binding", `DOMAIN_WORKSPACE_CONFIG=${config.domainWorkspaceConfig}`);
   if (config.signupDomainRequired) args.push("--binding", "SIGNUP_DOMAIN_REQUIRED=1");
+  if (config.operatorId) args.push("--binding", `OPERATOR_ID=${config.operatorId}`);
+  if (config.operatorDisplayName) args.push("--binding", `OPERATOR_DISPLAY_NAME=${config.operatorDisplayName}`);
   await run(npxCommand(), args);
 }
 

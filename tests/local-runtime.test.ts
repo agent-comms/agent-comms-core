@@ -22,6 +22,8 @@ describe("local runtime launcher", () => {
       signupHandleDomainPattern: undefined,
       domainWorkspaceConfig: undefined,
       signupDomainRequired: false,
+      operatorId: undefined,
+      operatorDisplayName: undefined,
     });
   });
 
@@ -56,6 +58,16 @@ describe("local runtime launcher", () => {
       signupHandleDomainPattern: "^.+/(?<domain>[a-z]+)$",
       domainWorkspaceConfig: '{"domains":[{"id":"general","name":"General"}]}',
       signupDomainRequired: true,
+    });
+  });
+
+  it("passes an optional local operator identity to the API runtime", () => {
+    expect(getLocalRuntimeConfig({
+      AGENT_COMMS_OPERATOR_ID: "human_primary",
+      AGENT_COMMS_OPERATOR_DISPLAY_NAME: "Primary operator",
+    }, "/tmp/agent-comms-core")).toMatchObject({
+      operatorId: "human_primary",
+      operatorDisplayName: "Primary operator",
     });
   });
 

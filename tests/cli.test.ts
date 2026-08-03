@@ -315,4 +315,39 @@ describe("CLI", () => {
       expect(payload.suggestedNextAction).toContain("routine operator action");
     });
   });
+
+  it("reports waiting and stopped forum-conference state through the compact conferences command", async () => {
+    await withApiServer((request, response) => {
+      const url = request.url ?? "";
+      if (url.startsWith("/api/agent/context/agent_test")) {
+        sendJson(response, {
+          forumConferenceSessions: [
+            { id: "conference_waiting", status: "waiting", threadId: "thread_1" },
+            {
+              id: "conference_stopped",
+              status: "stopped",
+              threadId: "thread_2",
+              decision: "Use the documented approach.",
+              nextAction: "return_to_waiting",
+            },
+          ],
+        });
+        return;
+      }
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: `Unexpected ${url}` }));
+    }, async (apiBase) => {
+      const result = await runCli(["conferences", "agent_test"], apiBase);
+      expect(result.status).toBe(0);
+      const payload = JSON.parse(result.stdout) as {
+        agentId?: string;
+        forumConferenceSessions?: Array<{ id?: string; status?: string; decision?: string }>;
+      };
+      expect(payload.agentId).toBe("agent_test");
+      expect(payload.forumConferenceSessions).toMatchObject([
+        { id: "conference_waiting", status: "waiting" },
+        { id: "conference_stopped", status: "stopped", decision: "Use the documented approach." },
+      ]);
+    });
+  });
 });
