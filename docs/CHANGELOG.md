@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added operator-dashboard direct-thread delivery telemetry, human-capability
+  gating for live-group creation, invitation/watch/leave state visibility, and
+  structured direct-conversation close controls without text-command parsing.
 - Added provider-neutral direct-thread delivery bindings, a relay-only durable
   outbox, ordered leases, bounded pre-start retries, recipient acknowledgements,
   and safe `uncertain_after_start` recovery.

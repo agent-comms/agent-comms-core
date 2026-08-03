@@ -31,6 +31,7 @@ export function getLocalRuntimeConfig(env = process.env, cwd = process.cwd()) {
   const operatorId = env.AGENT_COMMS_OPERATOR_ID?.trim() || undefined;
   const operatorDisplayName = env.AGENT_COMMS_OPERATOR_DISPLAY_NAME?.trim() || undefined;
   const deliveryRelayAuthHashes = env.AGENT_COMMS_DELIVERY_RELAY_AUTH_HASHES?.trim() || undefined;
+  const operatorDirectGroupsEnabled = env.AGENT_COMMS_OPERATOR_DIRECT_GROUPS_ENABLED?.trim() || undefined;
   if (domainWorkspaceConfig) {
     try {
       JSON.parse(domainWorkspaceConfig);
@@ -51,6 +52,7 @@ export function getLocalRuntimeConfig(env = process.env, cwd = process.cwd()) {
     operatorId,
     operatorDisplayName,
     deliveryRelayAuthHashes,
+    operatorDirectGroupsEnabled,
   };
 }
 
@@ -122,6 +124,7 @@ async function host(config) {
   if (config.operatorId) args.push("--binding", `OPERATOR_ID=${config.operatorId}`);
   if (config.operatorDisplayName) args.push("--binding", `OPERATOR_DISPLAY_NAME=${config.operatorDisplayName}`);
   if (config.deliveryRelayAuthHashes) args.push("--binding", `DELIVERY_RELAY_AUTH_HASHES=${config.deliveryRelayAuthHashes}`);
+  if (config.operatorDirectGroupsEnabled) args.push("--binding", `OPERATOR_DIRECT_GROUPS_ENABLED=${config.operatorDirectGroupsEnabled}`);
   await run(npxCommand(), args);
 }
 

@@ -19,6 +19,8 @@ interface Env {
   SIGNUP_DOMAIN_REQUIRED?: string;
   /** SHA-256 hashes of relay-only bearer credentials. Never use agent/operator tokens here. */
   DELIVERY_RELAY_AUTH_HASHES?: string;
+  /** Enables human-created direct groups. Defaults to enabled for backwards compatibility. */
+  OPERATOR_DIRECT_GROUPS_ENABLED?: string;
   DATABASE_URL?: string;
   DB?: D1Database;
   HYPERDRIVE?: {
@@ -528,6 +530,10 @@ function relayHashConfig(env: Env) {
   );
 }
 
+function operatorDirectGroupsEnabled(env: Env) {
+  return String(env.OPERATOR_DIRECT_GROUPS_ENABLED ?? "true").trim().toLowerCase() !== "false";
+}
+
 function deliveryBindingInput(value: unknown): { ok: true; adapterKey: string; targetRef: string; displayLabel: string } | { ok: false; response: Response } {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { ok: false, response: json({ error: "delivery_binding_invalid", message: "deliveryBinding must be an object." }, 400) };
@@ -721,6 +727,39 @@ function normalizeDeliveryJob(row: Row) {
     completedAt: row.completed_at ?? row.completedAt ?? null,
     resultCode: row.result_code ?? row.resultCode ?? null,
     detail: row.detail ?? "",
+  };
+}
+
+/**
+ * Operator delivery telemetry intentionally omits relay diagnostics. A relay
+ * may persist implementation-specific detail while processing a job; that is
+ * neither a delivery target nor dashboard content.
+ */
+function normalizeOperatorDeliveryJob(row: Row) {
+  const { detail: _detail, ...job } = normalizeDeliveryJob(row);
+  return job;
+}
+
+function normalizeDirectGroupInvitation(row: Row) {
+  return {
+    id: row.id,
+    conversationId: row.conversation_id ?? row.conversationId,
+    topic: row.topic ?? "",
+    status: row.status,
+    createdAt: row.created_at ?? row.createdAt,
+    closedAt: row.closed_at ?? row.closedAt ?? null,
+  };
+}
+
+function normalizeDirectGroupParticipantState(row: Row) {
+  return {
+    invitationId: row.invitation_id ?? row.invitationId,
+    agentId: row.agent_id ?? row.agentId,
+    state: row.state,
+    watchLeaseExpiresAt: row.watch_lease_expires_at ?? row.watchLeaseExpiresAt ?? null,
+    lastHeartbeatAt: row.last_heartbeat_at ?? row.lastHeartbeatAt ?? null,
+    leftAt: row.left_at ?? row.leftAt ?? null,
+    updatedAt: row.updated_at ?? row.updatedAt,
   };
 }
 
@@ -1582,6 +1621,10 @@ function operatorBootstrapPayload(input: {
   directConversations: Row[];
   directParticipants: Row[];
   directMessages: Row[];
+  deliveryBindings: Row[];
+  deliveryJobs: Row[];
+  directGroupInvitations: Row[];
+  directGroupParticipantStates: Row[];
   gates: Row[];
   gateEvidenceItems: Row[];
   liveSessions: Row[];
@@ -1592,10 +1635,17 @@ function operatorBootstrapPayload(input: {
   forumConferenceControlEvents: Row[];
   operatorId: string;
   operatorDisplayName: string;
+  operatorCanCreateDirectGroups: boolean;
   previewStorage?: boolean;
 }) {
   return {
-    operator: { id: input.operatorId, displayName: input.operatorDisplayName },
+    // This is intentionally a capability rather than a dashboard assumption.
+    // The operator-only API remains the authority for this deployment policy.
+    operator: {
+      id: input.operatorId,
+      displayName: input.operatorDisplayName,
+      capabilities: { directGroups: { create: input.operatorCanCreateDirectGroups, close: true } },
+    },
     domains: input.domains ?? defaultDomainWorkspaceConfig().domains,
     forums: input.forums.map((row) => normalizeForum(row)),
     threads: input.threads.map((row) => withOperatorDisplayName(
@@ -1619,6 +1669,10 @@ function operatorBootstrapPayload(input: {
       ),
     ),
     messages: input.directMessages.map((row) => normalizeDirectMessage(row)),
+    deliveryBindings: input.deliveryBindings.map((row) => normalizeDeliveryBinding(row)),
+    deliveryJobs: input.deliveryJobs.map((row) => normalizeOperatorDeliveryJob(row)),
+    directGroupInvitations: input.directGroupInvitations.map((row) => normalizeDirectGroupInvitation(row)),
+    directGroupParticipantStates: input.directGroupParticipantStates.map((row) => normalizeDirectGroupParticipantState(row)),
     gates: input.gates.map((row) =>
       normalizeGate(row, input.gateEvidenceItems.filter((item) => item.gate_id === row.id)),
     ),
@@ -1650,6 +1704,10 @@ async function operatorBootstrap(env: Env) {
       directConversations: [],
       directParticipants: [],
       directMessages: memory.directMessages as Row[],
+      deliveryBindings: [],
+      deliveryJobs: [],
+      directGroupInvitations: [],
+      directGroupParticipantStates: [],
       gates: [],
       gateEvidenceItems: [],
       liveSessions: [],
@@ -1660,6 +1718,7 @@ async function operatorBootstrap(env: Env) {
       forumConferenceControlEvents: [],
       operatorId: operatorIdentity(env).id,
       operatorDisplayName: operatorIdentity(env).displayName,
+      operatorCanCreateDirectGroups: operatorDirectGroupsEnabled(env),
       previewStorage: true,
     }));
   }
@@ -1686,7 +1745,7 @@ async function operatorBootstrap(env: Env) {
       );
       const directConversations = await pgAll<Row>(
         client,
-        `SELECT id, agent_a_id, agent_b_id
+        `SELECT id, agent_a_id, agent_b_id, status, closed_at, closed_by_kind, closed_by_id, close_resolution
          FROM direct_conversations
          ORDER BY id`,
       );
@@ -1702,6 +1761,28 @@ async function operatorBootstrap(env: Env) {
          SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, sender_display_name, body, created_at
          FROM direct_operator_messages
          ORDER BY created_at ASC`,
+      );
+      const deliveryBindings = await pgAll<Row>(
+        client,
+        `SELECT id, agent_id, adapter_key, display_label, status, revision, created_at, updated_at, activated_at, disabled_at
+         FROM agent_delivery_bindings ORDER BY updated_at DESC`,
+      );
+      // Bootstrap is polled by the dashboard. Bound this to current/recent
+      // health rather than streaming an unbounded delivery-history table.
+      const deliveryJobs = await pgAll<Row>(
+        client,
+        `SELECT id, event_id, conversation_id, recipient_agent_id, sequence_number, status, attempts,
+                next_attempt_at, lease_expires_at, started_at, recipient_acknowledged_at, completed_at, result_code
+         FROM direct_delivery_jobs ORDER BY updated_at DESC LIMIT 250`,
+      );
+      const directGroupInvitations = await pgAll<Row>(
+        client,
+        "SELECT id, conversation_id, topic, status, created_at, closed_at FROM direct_group_invitations ORDER BY created_at DESC",
+      );
+      const directGroupParticipantStates = await pgAll<Row>(
+        client,
+        `SELECT invitation_id, agent_id, state, watch_lease_expires_at, last_heartbeat_at, left_at, updated_at
+         FROM direct_group_participant_states ORDER BY updated_at DESC`,
       );
       const gates = await pgAll<Row>(client, "SELECT * FROM cross_project_gates ORDER BY updated_at DESC");
       const liveSessions = await pgAll<Row>(client, "SELECT * FROM live_conversation_sessions ORDER BY created_at DESC");
@@ -1737,6 +1818,10 @@ async function operatorBootstrap(env: Env) {
         directConversations: directConversations.results,
         directParticipants: directParticipants.results,
         directMessages: directMessages.results,
+        deliveryBindings: deliveryBindings.results,
+        deliveryJobs: deliveryJobs.results,
+        directGroupInvitations: directGroupInvitations.results,
+        directGroupParticipantStates: directGroupParticipantStates.results,
         gates: gates.results,
         gateEvidenceItems: gateEvidenceItems.results,
         liveSessions: liveSessions.results,
@@ -1747,6 +1832,7 @@ async function operatorBootstrap(env: Env) {
         forumConferenceControlEvents: forumConferenceControlEvents.results,
         operatorId: operatorIdentity(env).id,
         operatorDisplayName: operatorIdentity(env).displayName,
+        operatorCanCreateDirectGroups: operatorDirectGroupsEnabled(env),
       });
     }));
   }
@@ -1760,6 +1846,10 @@ async function operatorBootstrap(env: Env) {
     directConversations,
     directParticipants,
     directMessages,
+    deliveryBindings,
+    deliveryJobs,
+    directGroupInvitations,
+    directGroupParticipantStates,
     gates,
     liveSessions,
     forumConferenceSessions,
@@ -1783,7 +1873,7 @@ async function operatorBootstrap(env: Env) {
     database.prepare("SELECT forum_id, agent_id, permanent FROM forum_subscriptions ORDER BY forum_id, agent_id").all<Row>(),
     database
       .prepare(
-        `SELECT id, agent_a_id, agent_b_id
+        `SELECT id, agent_a_id, agent_b_id, status, closed_at, closed_by_kind, closed_by_id, close_resolution
          FROM direct_conversations
          ORDER BY id`,
       )
@@ -1797,6 +1887,28 @@ async function operatorBootstrap(env: Env) {
          SELECT id, conversation_id, sender_human_id AS sender_agent_id, 'human' AS sender_kind, sender_display_name, body, created_at
          FROM direct_operator_messages
          ORDER BY created_at ASC`,
+      )
+      .all<Row>(),
+    database
+      .prepare(
+        `SELECT id, agent_id, adapter_key, display_label, status, revision, created_at, updated_at, activated_at, disabled_at
+         FROM agent_delivery_bindings ORDER BY updated_at DESC`,
+      )
+      .all<Row>(),
+    database
+      .prepare(
+        `SELECT id, event_id, conversation_id, recipient_agent_id, sequence_number, status, attempts,
+                next_attempt_at, lease_expires_at, started_at, recipient_acknowledged_at, completed_at, result_code
+         FROM direct_delivery_jobs ORDER BY updated_at DESC LIMIT 250`,
+      )
+      .all<Row>(),
+    database
+      .prepare("SELECT id, conversation_id, topic, status, created_at, closed_at FROM direct_group_invitations ORDER BY created_at DESC")
+      .all<Row>(),
+    database
+      .prepare(
+        `SELECT invitation_id, agent_id, state, watch_lease_expires_at, last_heartbeat_at, left_at, updated_at
+         FROM direct_group_participant_states ORDER BY updated_at DESC`,
       )
       .all<Row>(),
     database.prepare("SELECT * FROM cross_project_gates ORDER BY updated_at DESC").all<Row>(),
@@ -1836,6 +1948,10 @@ async function operatorBootstrap(env: Env) {
     directConversations: directConversations.results,
     directParticipants: directParticipants.results,
     directMessages: directMessages.results,
+    deliveryBindings: deliveryBindings.results,
+    deliveryJobs: deliveryJobs.results,
+    directGroupInvitations: directGroupInvitations.results,
+    directGroupParticipantStates: directGroupParticipantStates.results,
     gates: gates.results,
     gateEvidenceItems: gateEvidenceItems.results,
     liveSessions: liveSessions.results,
@@ -1846,6 +1962,7 @@ async function operatorBootstrap(env: Env) {
     forumConferenceControlEvents: forumConferenceControlEvents.results,
     operatorId: operatorIdentity(env).id,
     operatorDisplayName: operatorIdentity(env).displayName,
+    operatorCanCreateDirectGroups: operatorDirectGroupsEnabled(env),
   }));
 }
 
@@ -2630,6 +2747,9 @@ async function closeDirectConversation(
 }
 
 async function createOperatorDirectGroup(request: Request, env: Env, auth: Extract<AuthContext, { ok: true }>) {
+  if (!operatorDirectGroupsEnabled(env)) {
+    return json({ error: "Human-created direct groups are disabled by this deployment." }, 403);
+  }
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Live direct groups require durable storage." }, 503);
   const input = await body(request);

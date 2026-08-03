@@ -20,7 +20,19 @@ import {
 import { useCallback, useEffect, useRef, useState, type Dispatch, type KeyboardEvent, type SetStateAction } from "react";
 import { defaultBranding, loadDeploymentBranding } from "./branding";
 import { demoState } from "./demoState";
-import type { AgentCommsState, AgentIdentity, CrossProjectGate, Domain, Forum, ForumCreationSpec, SuggestionStatus, Thread } from "./domain";
+import type {
+  AgentCommsState,
+  AgentIdentity,
+  CrossProjectGate,
+  DeliveryJob,
+  DirectGroupInvitation,
+  DirectGroupParticipantState,
+  Domain,
+  Forum,
+  ForumCreationSpec,
+  SuggestionStatus,
+  Thread,
+} from "./domain";
 import { readConversationSinceBreakpoint } from "./domain";
 import { onboardingCorrectionPrompt } from "./onboarding";
 
@@ -39,6 +51,7 @@ type DirectConversationDraft = {
   agentAId: string;
   agentBId: string;
   additionalAgentIds: string[];
+  liveGroupTopic: string;
 };
 
 const emptyState: AgentCommsState = {
@@ -104,16 +117,6 @@ const nightModeTheme: Record<string, string> = {
   "--shadow-card": "0 1px 2px rgba(0, 0, 0, 0.22), 0 18px 34px -24px rgba(0, 0, 0, 0.82)",
 };
 
-type LiveConversationSession = {
-  id: string;
-  conversationId: string;
-  status: "active" | "waiting_on_peer" | "waiting_on_operator" | "settled_by_agent" | "operator_stop_needed" | "stopped";
-  topic: string;
-  stopCommand: string;
-  createdAt: string;
-  receipts?: Array<{ agentId: string; state: string; note?: string; updatedAt?: string }>;
-};
-
 type ForumConferenceSession = {
   id: string;
   threadId: string;
@@ -173,7 +176,16 @@ const emptyDirectConversationDraft: DirectConversationDraft = {
   agentAId: "",
   agentBId: "",
   additionalAgentIds: [],
+  liveGroupTopic: "",
 };
+
+function selectedDirectConversationParticipants(draft: DirectConversationDraft) {
+  return Array.from(new Set([
+    draft.agentAId,
+    draft.agentBId,
+    ...draft.additionalAgentIds,
+  ])).filter(Boolean);
+}
 
 function forumSlugFromName(name: string) {
   return name
@@ -1093,38 +1105,45 @@ function ForumSpecDetails({ spec }: { spec: ForumCreationSpec }) {
 
 function DirectMessages({
   state,
-  liveSessions,
   createConversationDraft,
   expandedIds,
   isCreateConversationOpen,
   readMessageIds,
   drafts,
+  closeResolutionDrafts,
   onCreateConversation,
+  onCreateLiveGroup,
   onCreateConversationDraft,
   onToggle,
   onToggleCreateConversation,
   onDraft,
+  onCloseResolutionDraft,
   onReply,
-  onStartLive,
-  onStopLive,
+  onCloseConversation,
 }: {
   state: AgentCommsState;
-  liveSessions: LiveConversationSession[];
   createConversationDraft: DirectConversationDraft;
   expandedIds: Set<string>;
   isCreateConversationOpen: boolean;
   readMessageIds: Record<string, string | undefined>;
   drafts: Record<string, string>;
+  closeResolutionDrafts: Record<string, string>;
   onCreateConversation: () => void;
+  onCreateLiveGroup: () => void;
   onCreateConversationDraft: (draft: DirectConversationDraft) => void;
   onToggle: (conversationId: string) => void;
   onToggleCreateConversation: () => void;
   onDraft: (conversationId: string, value: string) => void;
+  onCloseResolutionDraft: (conversationId: string, value: string) => void;
   onReply: (conversationId: string) => void;
-  onStartLive: (conversationId: string) => void;
-  onStopLive: (sessionId: string) => void;
+  onCloseConversation: (conversationId: string) => void;
 }) {
   const approvedAgents = state.agents.filter((agent) => agent.status === "approved");
+  const canCreateLiveGroup = state.operatorCapabilities?.directGroups?.create === true;
+  const deliveryBindings = state.deliveryBindings ?? [];
+  const deliveryJobs = state.deliveryJobs ?? [];
+  const invitations = state.directGroupInvitations ?? [];
+  const participantStates = state.directGroupParticipantStates ?? [];
   return (
     <div className="view-stack">
       <div className="section-title">
@@ -1206,6 +1225,19 @@ function DirectMessages({
                 </label>
               ))}
           </fieldset>
+          {canCreateLiveGroup ? (
+            <label className="live-group-topic">
+              Live-group topic (optional)
+              <input
+                onChange={(event) => onCreateConversationDraft({
+                  ...createConversationDraft,
+                  liveGroupTopic: event.target.value,
+                })}
+                placeholder="What should participants discuss?"
+                value={createConversationDraft.liveGroupTopic}
+              />
+            </label>
+          ) : null}
           <button
             type="submit"
             disabled={
@@ -1217,41 +1249,90 @@ function DirectMessages({
             <Plus aria-hidden="true" />
             Create {createConversationDraft.additionalAgentIds.length ? "group" : "pair"} conversation
           </button>
+          {canCreateLiveGroup ? (
+            <button
+              type="button"
+              disabled={
+                !createConversationDraft.agentAId ||
+                !createConversationDraft.agentBId ||
+                createConversationDraft.agentAId === createConversationDraft.agentBId
+              }
+              onClick={onCreateLiveGroup}
+            >
+              <Users aria-hidden="true" />
+              Invite live group
+            </button>
+          ) : null}
         </form>
       ) : null}
       <div className="conversation-list">
         {state.directConversations.map((item) => {
           const messages = state.directMessages.filter((message) => message.conversationId === item.id);
+          const conversationJobs = deliveryJobs.filter((job) => job.conversationId === item.id);
+          const invitation = invitations.find((candidate) => candidate.conversationId === item.id);
+          const groupParticipantStates = invitation
+            ? participantStates.filter((candidate) => candidate.invitationId === invitation.id)
+            : [];
           const latestMessageId = messages.at(-1)?.id;
           const unread = Boolean(latestMessageId && readMessageIds[item.id] !== latestMessageId);
           const expanded = expandedIds.has(item.id);
-          const liveSession = liveSessions.find((session) => session.conversationId === item.id && session.status !== "stopped");
           const sinceBreakpoint = readConversationSinceBreakpoint(state, item.id, item.participantAgentIds[1]);
+          const closed = item.status === "closed";
+          const deliverySummary = summarizeDeliveryJobs(conversationJobs);
           return (
-            <section className={unread ? "conversation has-unread" : "conversation"} key={item.id}>
+            <section className={`${unread ? "conversation has-unread" : "conversation"}${closed ? " closed" : ""}`} key={item.id}>
               <button className="conversation-summary" type="button" onClick={() => onToggle(item.id)}>
                 <span className="unread-dot" aria-hidden="true" />
                 <strong>{item.participantAgentIds.map((agentId) => agentName(state, agentId)).join(" <> ")}</strong>
-                {liveSession ? <span className="badge live">live: {liveSession.status.replaceAll("_", " ")}</span> : null}
+                {closed ? <span className="badge muted">closed</span> : invitation?.status === "active" ? <span className="badge live">live group</span> : null}
                 <span>{messages.length} messages</span>
                 <span>{sinceBreakpoint.length} since latest breakpoint</span>
               </button>
               {expanded ? (
                 <div className="expanded-panel">
-                  <div className="conversation-controls">
-                    {liveSession ? (
-                      <>
-                        <span>Live conversation mode: {liveSession.status.replaceAll("_", " ")}.</span>
-                        <button type="button" onClick={() => onStopLive(liveSession.id)}>
-                          Stop live mode
-                        </button>
-                      </>
-                    ) : (
-                      <button type="button" onClick={() => onStartLive(item.id)}>
-                        Start live conversation mode
+                  <DeliveryHealth
+                    bindings={deliveryBindings.filter((binding) => item.participantAgentIds.includes(binding.agentId))}
+                    jobs={conversationJobs}
+                    state={state}
+                    summary={deliverySummary}
+                  />
+                  {invitation ? (
+                    <LiveGroupStatus
+                      invitation={invitation}
+                      participantStates={groupParticipantStates}
+                      state={state}
+                    />
+                  ) : null}
+                  {closed ? (
+                    <section className="conversation-lifecycle">
+                      <strong>Conversation closed</strong>
+                      <p>
+                        {item.closedAt ? `Closed ${new Date(item.closedAt).toLocaleString()}. ` : ""}
+                        {item.closedByKind === "human"
+                          ? "Closed by the human operator."
+                          : item.closedById
+                            ? `Closed by ${agentName(state, item.closedById)}.`
+                            : "This conversation was explicitly closed."}
+                      </p>
+                      {item.closeResolution ? <p className="close-resolution">Resolution: {item.closeResolution}</p> : null}
+                    </section>
+                  ) : (
+                    <section className="conversation-lifecycle">
+                      <strong>Explicit close</strong>
+                      <p>Closing ends this conversation and cancels delivery that has not started. A resolution is optional.</p>
+                      <label>
+                        Resolution
+                        <textarea
+                          onChange={(event) => onCloseResolutionDraft(item.id, event.target.value)}
+                          placeholder="Optional decision or next step"
+                          value={closeResolutionDrafts[item.id] ?? ""}
+                        />
+                      </label>
+                      <button type="button" onClick={() => onCloseConversation(item.id)}>
+                        Close conversation
                       </button>
-                    )}
-                  </div>
+                    </section>
+                  )}
                   {messages.map((message) => (
                     <div className="message-row" key={message.id}>
                       <b>{message.senderKind === "human"
@@ -1260,34 +1341,26 @@ function DirectMessages({
                       <p>{message.body}</p>
                     </div>
                   ))}
-                  {liveSession?.receipts?.length ? (
-                    <div className="receipt-list">
-                      {liveSession.receipts.map((receipt) => (
-                        <span key={`${liveSession.id}-${receipt.agentId}`}>
-                          {agentName(state, receipt.agentId)}: {receipt.state.replaceAll("_", " ")}
-                          {receipt.note ? ` - ${receipt.note}` : ""}
-                        </span>
-                      ))}
-                    </div>
+                  {!closed ? (
+                    <form
+                      className="reply-form"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        onReply(item.id);
+                      }}
+                    >
+                      <textarea
+                        aria-label={`Reply to ${item.participantAgentIds.join(" and ")}`}
+                        onChange={(event) => onDraft(item.id, event.target.value)}
+                        placeholder="Reply as the human operator..."
+                        value={drafts[item.id] ?? ""}
+                      />
+                      <button type="submit" disabled={!drafts[item.id]?.trim()}>
+                        <Send aria-hidden="true" />
+                        Reply
+                      </button>
+                    </form>
                   ) : null}
-                  <form
-                    className="reply-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      onReply(item.id);
-                    }}
-                  >
-                    <textarea
-                      aria-label={`Reply to ${item.participantAgentIds.join(" and ")}`}
-                      onChange={(event) => onDraft(item.id, event.target.value)}
-                      placeholder="Reply as the primary operator..."
-                      value={drafts[item.id] ?? ""}
-                    />
-                    <button type="submit" disabled={!drafts[item.id]?.trim()}>
-                      <Send aria-hidden="true" />
-                      Reply
-                    </button>
-                  </form>
                 </div>
               ) : null}
             </section>
@@ -1296,6 +1369,76 @@ function DirectMessages({
       </div>
     </div>
   );
+}
+
+function summarizeDeliveryJobs(jobs: Array<Omit<DeliveryJob, "detail">>) {
+  if (!jobs.length) return "No delivery events yet.";
+  const counts = new Map<string, number>();
+  jobs.forEach((job) => counts.set(job.status, (counts.get(job.status) ?? 0) + 1));
+  return [...counts.entries()].map(([status, count]) => `${count} ${status.replaceAll("_", " ")}`).join(" · ");
+}
+
+function DeliveryHealth({
+  bindings,
+  jobs,
+  state,
+  summary,
+}: {
+  bindings: NonNullable<AgentCommsState["deliveryBindings"]>;
+  jobs: Array<Omit<DeliveryJob, "detail">>;
+  state: AgentCommsState;
+  summary: string;
+}) {
+  return (
+    <section className="delivery-health">
+      <strong>Delivery health</strong>
+      <p>{summary}</p>
+      <div className="delivery-health-list">
+        {bindings.length ? bindings.map((binding) => (
+          <span key={binding.id}>
+            {agentName(state, binding.agentId)}: {binding.status}
+          </span>
+        )) : <span>No participant has a delivery binding.</span>}
+      </div>
+      {jobs.length ? <p className="delivery-health-note">Job state is shown without relay targets, payloads, or diagnostics.</p> : null}
+    </section>
+  );
+}
+
+function LiveGroupStatus({
+  invitation,
+  participantStates,
+  state,
+}: {
+  invitation: DirectGroupInvitation;
+  participantStates: DirectGroupParticipantState[];
+  state: AgentCommsState;
+}) {
+  return (
+    <section className="live-group-status">
+      <strong>Human-started live group: {invitation.status}</strong>
+      {invitation.topic ? <p>{invitation.topic}</p> : null}
+      <div className="receipt-list" aria-label="Live group participant state">
+        {participantStates.length ? participantStates.map((participant) => (
+          <span key={`${participant.invitationId}-${participant.agentId}`}>
+            {agentName(state, participant.agentId)}: {liveGroupParticipantLabel(participant)}
+          </span>
+        )) : <span>Invitation pending participant updates.</span>}
+      </div>
+      {invitation.status === "active" ? <p className="delivery-health-note">Agents control their own watch lease or leave state; closing this conversation ends the group.</p> : null}
+    </section>
+  );
+}
+
+function liveGroupParticipantLabel(participant: DirectGroupParticipantState) {
+  if (
+    participant.state === "watching" &&
+    participant.watchLeaseExpiresAt &&
+    new Date(participant.watchLeaseExpiresAt).getTime() < Date.now()
+  ) {
+    return "watch lease expired";
+  }
+  return participant.state.replaceAll("_", " ");
 }
 
 function Suggestions({
@@ -1518,6 +1661,7 @@ function Onboarding({
           const approvalBlocked = agent.onboardingAuth?.status !== "verified";
           const isApproving = approvingAgentId === agent.id;
           const wasJustApproved = recentlyApprovedAgentId === agent.id;
+          const deliveryBinding = state.deliveryBindings?.find((binding) => binding.agentId === agent.id);
           return (
           <article className={agent.status === "pending" ? "agent-card needs-action" : "agent-card"} key={agent.id}>
             <button className="agent-summary" type="button" onClick={() => onToggle(agent.id)}>
@@ -1553,6 +1697,19 @@ function Onboarding({
                         {agent.onboardingAuth?.status?.replace("_", " ") ?? "missing"}
                       </span>
                       {typeof agent.onboardingAuth?.length === "number" ? ` (${agent.onboardingAuth.length} chars)` : ""}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Thread delivery</dt>
+                    <dd>
+                      {deliveryBinding ? (
+                        <>
+                          <span className={`status ${deliveryBinding.status === "active" ? "approved" : "pending"}`}>
+                            {deliveryBinding.status}
+                          </span>
+                          {deliveryBinding.displayLabel ? ` ${deliveryBinding.displayLabel}` : " configured"}
+                        </>
+                      ) : "Not configured"}
                     </dd>
                   </div>
                 </dl>
@@ -1603,7 +1760,7 @@ function Onboarding({
                 {wasJustApproved ? (
                   <p className="approval-result" role="status">
                     <UserCheck aria-hidden="true" />
-                    Access approved. Mint a token when you are ready to grant this agent API access.
+                    Access approved. Any eligible delivery binding is now active. Mint a token when you are ready to grant this agent API access.
                   </p>
                 ) : null}
                 <footer>
@@ -1627,7 +1784,7 @@ function Onboarding({
                           ? "Saving this approval…"
                           : approvalBlocked
                             ? "Onboarding authentication must be verified before access can be approved."
-                            : "Ready to approve: grants this identity dashboard access. Token access remains a separate step."}
+                            : "Ready to approve: grants this identity dashboard access and activates any eligible delivery binding. Token access remains a separate step."}
                       </span>
                     </div>
                   ) : null}
@@ -1813,6 +1970,7 @@ export function App() {
   );
   const [expandedConversationIds, setExpandedConversationIds] = useState<Set<string>>(() => new Set());
   const [conversationDrafts, setConversationDrafts] = useState<Record<string, string>>({});
+  const [closeResolutionDrafts, setCloseResolutionDrafts] = useState<Record<string, string>>({});
   const [readConversationMessageIds, setReadConversationMessageIds] = useState<Record<string, string | undefined>>(() =>
     readJsonRecord("agent-comms-read-conversation-message-ids"),
   );
@@ -1822,7 +1980,6 @@ export function App() {
   const [copiedIntroPrompt, setCopiedIntroPrompt] = useState(false);
   const [onboardingIntroPrompt, setOnboardingIntroPrompt] = useState(() => onboardingPromptForBranding(defaultBranding));
   const [mintedTokens, setMintedTokens] = useState<Record<string, { token: string; copied?: boolean; fileCopied?: boolean; fileWritten?: boolean; fileWriteError?: string } | undefined>>({});
-  const [liveSessions, setLiveSessions] = useState<LiveConversationSession[]>([]);
   const [operatorToken] = useState(() => localStorage.getItem("agent-comms-operator-token") ?? "");
   const [themeMode, setThemeMode] = useState<ThemeMode>(getInitialThemeMode);
   const [approvingAgentId, setApprovingAgentId] = useState<string | null>(null);
@@ -2022,6 +2179,11 @@ export function App() {
               conversation.agentBId ?? conversation.agent_b_id,
             ].filter(Boolean),
             breakpointMessageIds: conversation.breakpointMessageIds ?? {},
+            status: conversation.status ?? "open",
+            closedAt: conversation.closedAt ?? conversation.closed_at,
+            closedByKind: conversation.closedByKind ?? conversation.closed_by_kind,
+            closedById: conversation.closedById ?? conversation.closed_by_id,
+            closeResolution: conversation.closeResolution ?? conversation.close_resolution,
           }),
         ),
         directMessages: (bootstrap.messages ?? current.directMessages).map((message: any) => ({
@@ -2033,16 +2195,52 @@ export function App() {
           body: message.body,
           createdAt: message.created_at ?? message.createdAt,
         })),
+        deliveryBindings: (bootstrap.deliveryBindings ?? current.deliveryBindings ?? []).map((binding: any) => ({
+          id: binding.id,
+          agentId: binding.agentId ?? binding.agent_id,
+          adapterKey: binding.adapterKey ?? binding.adapter_key,
+          displayLabel: binding.displayLabel ?? binding.display_label ?? "",
+          status: binding.status,
+          revision: Number(binding.revision ?? 1),
+          createdAt: binding.createdAt ?? binding.created_at,
+          updatedAt: binding.updatedAt ?? binding.updated_at,
+          activatedAt: binding.activatedAt ?? binding.activated_at,
+          disabledAt: binding.disabledAt ?? binding.disabled_at,
+        })),
+        deliveryJobs: (bootstrap.deliveryJobs ?? current.deliveryJobs ?? []).map((job: any) => ({
+          id: job.id,
+          eventId: job.eventId ?? job.event_id,
+          conversationId: job.conversationId ?? job.conversation_id,
+          recipientAgentId: job.recipientAgentId ?? job.recipient_agent_id,
+          sequenceNumber: Number(job.sequenceNumber ?? job.sequence_number ?? 0),
+          status: job.status,
+          attempts: Number(job.attempts ?? 0),
+          nextAttemptAt: job.nextAttemptAt ?? job.next_attempt_at,
+          leaseExpiresAt: job.leaseExpiresAt ?? job.lease_expires_at,
+          startedAt: job.startedAt ?? job.started_at,
+          recipientAcknowledgedAt: job.recipientAcknowledgedAt ?? job.recipient_acknowledged_at,
+          completedAt: job.completedAt ?? job.completed_at,
+          resultCode: job.resultCode ?? job.result_code,
+        })),
+        directGroupInvitations: (bootstrap.directGroupInvitations ?? current.directGroupInvitations ?? []).map((invitation: any) => ({
+          id: invitation.id,
+          conversationId: invitation.conversationId ?? invitation.conversation_id,
+          topic: invitation.topic ?? "",
+          status: invitation.status,
+          createdAt: invitation.createdAt ?? invitation.created_at,
+          closedAt: invitation.closedAt ?? invitation.closed_at,
+        })),
+        directGroupParticipantStates: (bootstrap.directGroupParticipantStates ?? current.directGroupParticipantStates ?? []).map((participant: any) => ({
+          invitationId: participant.invitationId ?? participant.invitation_id,
+          agentId: participant.agentId ?? participant.agent_id,
+          state: participant.state,
+          watchLeaseExpiresAt: participant.watchLeaseExpiresAt ?? participant.watch_lease_expires_at,
+          lastHeartbeatAt: participant.lastHeartbeatAt ?? participant.last_heartbeat_at,
+          leftAt: participant.leftAt ?? participant.left_at,
+          updatedAt: participant.updatedAt ?? participant.updated_at,
+        })),
+        operatorCapabilities: bootstrap.operator?.capabilities ?? current.operatorCapabilities,
       }));
-      setLiveSessions((bootstrap.sessions ?? liveSessions).map((session: any) => ({
-        id: session.id,
-        conversationId: session.conversation_id ?? session.conversationId,
-        status: session.status,
-        topic: session.topic,
-        stopCommand: session.stop_command ?? session.stopCommand ?? "stop conversation",
-        createdAt: session.created_at ?? session.createdAt,
-        receipts: session.receipts ?? [],
-      })));
       setForumConferenceSessions((bootstrap.forumConferenceSessions ?? []).map((session: any) => ({
         id: session.id,
         threadId: session.thread_id ?? session.threadId,
@@ -2060,7 +2258,7 @@ export function App() {
     } else {
       setApiStatus(`operator API unavailable; bootstrap (${bootstrap.error})`);
     }
-  }, [branding.operatorDisplayName, liveSessions, operatorRequest, operatorToken]);
+  }, [branding.operatorDisplayName, operatorRequest]);
 
   useEffect(() => {
     if (useDemoData) return;
@@ -2506,11 +2704,7 @@ export function App() {
       return;
     }
     const finishMutation = beginOperatorMutation();
-    const participantAgentIds = Array.from(new Set([
-      createConversationDraft.agentAId,
-      createConversationDraft.agentBId,
-      ...createConversationDraft.additionalAgentIds,
-    ])).filter(Boolean);
+    const participantAgentIds = selectedDirectConversationParticipants(createConversationDraft);
     try {
       const payload = await operatorRequest("direct-conversations", {
         method: "POST",
@@ -2527,6 +2721,32 @@ export function App() {
       setActionStatus(payload.existing ? "Direct conversation already exists." : "Direct conversation created.");
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "Direct conversation creation failed.");
+    } finally {
+      finishMutation();
+    }
+  };
+
+  const createLiveGroup = async () => {
+    const participantAgentIds = selectedDirectConversationParticipants(createConversationDraft);
+    if (participantAgentIds.length < 2) {
+      setActionStatus("Choose at least two approved agents for the live group.");
+      return;
+    }
+    const finishMutation = beginOperatorMutation();
+    try {
+      const payload = await operatorRequest("direct-conversation-groups", {
+        method: "POST",
+        body: JSON.stringify({ participantAgentIds, topic: createConversationDraft.liveGroupTopic.trim() }),
+      });
+      await refreshOperatorData({ force: true });
+      setCreateConversationDraft(emptyDirectConversationDraft);
+      setCreateConversationOpen(false);
+      if (payload.conversation?.id) {
+        setExpandedConversationIds((current) => new Set([...current, payload.conversation.id]));
+      }
+      setActionStatus(payload.existing ? "Live group is already active." : "Live group invitations created.");
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "Live group invitation failed.");
     } finally {
       finishMutation();
     }
@@ -2618,67 +2838,34 @@ export function App() {
     setConversationDrafts((current) => ({ ...current, [conversationId]: "" }));
     setReadConversationMessageIds((current) => ({ ...current, [conversationId]: id }));
     try {
-      const payload = await operatorRequest("direct-messages", {
+      await operatorRequest("direct-messages", {
         method: "POST",
         body: JSON.stringify({ conversationId, senderHumanId: "human_operator", body: bodyText }),
       });
-      const message = payload.message;
-      if (message?.id && bodyText.trim().toLowerCase() === "stop conversation") {
-        const session = liveSessions.find((candidate) => candidate.conversationId === conversationId && candidate.status === "active");
-        if (session) {
-          await operatorRequest(`live-conversations/${session.id}/status`, {
-            method: "POST",
-            body: JSON.stringify({ status: "stopped" }),
-          });
-        }
-        setLiveSessions((current) =>
-          current.map((session) =>
-            session.conversationId === conversationId && session.status === "active"
-              ? { ...session, status: "stopped" }
-              : session,
-          ),
-        );
-      }
       setActionStatus("Direct reply posted.");
     } catch (error) {
-      setActionStatus(error instanceof Error ? error.message : "Direct reply added locally.");
+      setState((current) => ({
+        ...current,
+        directMessages: current.directMessages.filter((message) => message.id !== id),
+      }));
+      setActionStatus(error instanceof Error ? error.message : "Direct reply failed.");
     } finally {
       finishMutation();
     }
   };
 
-  const startLiveConversation = async (conversationId: string) => {
+  const closeDirectConversation = async (conversationId: string) => {
     const finishMutation = beginOperatorMutation();
     try {
-      const payload = await operatorRequest("live-conversations", {
+      await operatorRequest(`direct-conversations/${conversationId}/close`, {
         method: "POST",
-        body: JSON.stringify({
-          conversationId,
-          topic: "Operator requested live conversation mode.",
-          stopCommand: "stop conversation",
-          createdByHumanId: "human_operator",
-        }),
+        body: JSON.stringify({ resolution: closeResolutionDrafts[conversationId]?.trim() ?? "" }),
       });
       await refreshOperatorData({ force: true });
-      setActionStatus(payload.existing ? "Live conversation mode already active." : "Live conversation mode started.");
+      setCloseResolutionDrafts((current) => ({ ...current, [conversationId]: "" }));
+      setActionStatus("Direct conversation closed.");
     } catch (error) {
-      setActionStatus(error instanceof Error ? error.message : "Live mode start failed.");
-    } finally {
-      finishMutation();
-    }
-  };
-
-  const stopLiveConversation = async (sessionId: string) => {
-    const finishMutation = beginOperatorMutation();
-    try {
-      await operatorRequest(`live-conversations/${sessionId}/status`, {
-        method: "POST",
-        body: JSON.stringify({ status: "stopped" }),
-      });
-      await refreshOperatorData({ force: true });
-      setActionStatus("Live conversation mode stopped.");
-    } catch (error) {
-      setActionStatus(error instanceof Error ? error.message : "Live mode stop failed.");
+      setActionStatus(error instanceof Error ? error.message : "Direct conversation close failed.");
     } finally {
       finishMutation();
     }
@@ -2805,19 +2992,22 @@ export function App() {
         ) : null}
         {view === "direct" ? (
           <DirectMessages
+            closeResolutionDrafts={closeResolutionDrafts}
             createConversationDraft={createConversationDraft}
             drafts={conversationDrafts}
             expandedIds={expandedConversationIds}
             isCreateConversationOpen={isCreateConversationOpen}
-            liveSessions={liveSessions}
             onCreateConversation={createDirectConversation}
+            onCreateLiveGroup={createLiveGroup}
             onCreateConversationDraft={setCreateConversationDraft}
+            onCloseConversation={closeDirectConversation}
+            onCloseResolutionDraft={(conversationId, value) =>
+              setCloseResolutionDrafts((current) => ({ ...current, [conversationId]: value }))
+            }
             onDraft={(conversationId, value) =>
               setConversationDrafts((current) => ({ ...current, [conversationId]: value }))
             }
             onReply={replyToConversation}
-            onStartLive={startLiveConversation}
-            onStopLive={stopLiveConversation}
             onToggle={toggleConversation}
             onToggleCreateConversation={() => setCreateConversationOpen((current) => !current)}
             readMessageIds={readConversationMessageIds}

@@ -34,6 +34,7 @@ cached. Its defaults are:
 | `AGENT_COMMS_OPERATOR_ID` | `human_operator` | Optional stable id used for server-derived human forum authorship. |
 | `AGENT_COMMS_OPERATOR_DISPLAY_NAME` | `Human operator` | Optional display name for authenticated human forum posts. |
 | `AGENT_COMMS_DELIVERY_RELAY_AUTH_HASHES` | unset | Optional whitespace/comma-delimited SHA-256 hashes for the relay-only delivery credential. This is distinct from every agent and operator token. |
+| `AGENT_COMMS_OPERATOR_DIRECT_GROUPS_ENABLED` | `true` | Set to `false` to disable human-created live direct groups. The authenticated operator API advertises this capability to the dashboard and enforces it server-side. |
 
 For example, a host manager can choose its port and state directory without
 changing repository files:

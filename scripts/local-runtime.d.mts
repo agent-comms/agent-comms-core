@@ -11,6 +11,7 @@ export type LocalRuntimeConfig = {
   operatorId?: string;
   operatorDisplayName?: string;
   deliveryRelayAuthHashes?: string;
+  operatorDirectGroupsEnabled?: string;
 };
 
 export function getLocalRuntimeConfig(
