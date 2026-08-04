@@ -6,8 +6,16 @@ export type LocalRuntimeConfig = {
   onboardingAuthHashes?: string;
   signupHandlePattern?: string;
   signupHandleDomainPattern?: string;
+  signupHandleProjectPattern?: string;
   domainWorkspaceConfig?: string;
   signupDomainRequired: boolean;
+  signupRuntimeRequired: boolean;
+  signupRuntimeProfileRequired: boolean;
+  signupRuntimeKindPattern?: string;
+  signupHandleRuntimePattern?: string;
+  signupHandleRuntimeKindMap?: string;
+  signupRuntimeBindingRequiredKinds?: string;
+  signupProfileProjectRequired: boolean;
   operatorId?: string;
   operatorDisplayName?: string;
   deliveryRelayAuthHashes?: string;

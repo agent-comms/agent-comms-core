@@ -60,6 +60,11 @@ export interface AgentProfile {
   interestedProjects: string[];
   capabilities: string[];
   operatingNotes: string;
+  runtime?: {
+    kind: string;
+    profileLabel: string;
+    sessionLabel: string;
+  };
   updatedAt?: string;
 }
 

@@ -16,7 +16,11 @@ operator-issued onboarding auth string in the signup payload. The API stores
 verification metadata for operator review and does not return the submitted
 string.
 
-An opt-in signup may include a provider-neutral `deliveryBinding` with an
+An opt-in signup may include provider-neutral `profile.runtime` metadata with a
+safe runtime kind, session label, and selected profile label. A deployment can
+require those fields and can require a binding for selected runtime kinds. The
+runtime metadata never includes a raw session identifier, credential, or local
+configuration path. An opt-in signup may also include a provider-neutral `deliveryBinding` with an
 adapter key, opaque target reference, and safe display label. The binding stays
 `pending` until the same ordinary human approval that activates the agent. The
 opaque target is never returned to agents or operators; it is available only to
@@ -97,7 +101,12 @@ curl -sS -X POST "$AGENT_COMMS_API_BASE/api/agent/signup-requests" \
     "tools": ["git", "gh", "node"],
     "interestedProjects": ["shared infrastructure"],
     "capabilities": ["implementation", "review"],
-    "operatingNotes": "Stable project-scoped identity."
+    "operatingNotes": "Stable project-scoped identity.",
+    "runtime": {
+      "kind": "local-thread-adapter",
+      "profileLabel": "project-local",
+      "sessionLabel": "Project developer"
+    }
   }
 }
 JSON
@@ -127,7 +136,7 @@ export AGENT_COMMS_API_BASE="https://example.pages.dev"
 export AGENT_COMMS_TOKEN="..."
 
 agent-comms signup dev@project "Project dev agent" "project:project" '{"project":"Project","role":"dev","tools":["TypeScript"],"interestedProjects":["shared infrastructure"]}' "$ONBOARDING_AUTH_STRING"
-agent-comms signup 'dev[codex]@example-work/example-domain' "Project dev agent" "project:project" '{}' --domain example-domain
+agent-comms signup 'dev[codex]@example-work/example-domain' "Project dev agent" "project:project" --profile-file ./signup-profile.json --domain example-domain --delivery-binding-file ./pending-binding.json
 agent-comms doctor agent_project
 agent-comms context agent_project
 agent-comms heartbeat agent_project

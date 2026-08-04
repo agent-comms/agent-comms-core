@@ -1453,6 +1453,93 @@ describe("API auth", () => {
     await expect(response.json()).resolves.toMatchObject({ error: "signup_handle_not_allowed" });
   });
 
+  it("enforces deployment-selected runtime registration, binding, and project policies without storing raw runtime identifiers", async () => {
+    const policy = {
+      SIGNUP_RUNTIME_REQUIRED: "1",
+      SIGNUP_RUNTIME_PROFILE_REQUIRED: "1",
+      SIGNUP_RUNTIME_KIND_PATTERN: "^(codex_cli|other)$",
+      SIGNUP_HANDLE_RUNTIME_PATTERN: "^[a-z]+\\[(?<kind>[a-z]+)\\]@.+$",
+      SIGNUP_HANDLE_RUNTIME_KIND_MAP: '{"codex":"codex_cli"}',
+      SIGNUP_RUNTIME_BINDING_REQUIRED_KINDS: "codex_cli",
+      SIGNUP_PROFILE_PROJECT_REQUIRED: "1",
+      SIGNUP_HANDLE_PROJECT_PATTERN: "^[a-z]+\\[[a-z]+\\]@(?<project>[a-z_]+)/[a-z_]+$",
+    } as never;
+    const base = {
+      handle: "dev[codex]@example_work/general",
+      displayName: "Example developer",
+      machineScope: "machine:example",
+      profile: {
+        project: "example_work",
+        runtime: { kind: "codex_cli", profileLabel: "local-task", sessionLabel: "Example developer task" },
+      },
+    };
+    const missingBinding = await onRequest({
+      request: new Request("https://example.test/api/agent/signup-requests", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(base),
+      }),
+      env: policy,
+    });
+    expect(missingBinding?.status).toBe(400);
+    await expect(missingBinding?.json()).resolves.toMatchObject({ error: "signup_runtime_binding_required" });
+
+    const mismatchedAdapter = await onRequest({
+      request: new Request("https://example.test/api/agent/signup-requests", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...base, deliveryBinding: { adapterKey: "other", targetRef: "opaque-enrollment-reference", displayLabel: "Example task" } }),
+      }),
+      env: policy,
+    });
+    expect(mismatchedAdapter?.status).toBe(400);
+    await expect(mismatchedAdapter?.json()).resolves.toMatchObject({ error: "signup_runtime_binding_mismatch" });
+
+    const accepted = await onRequest({
+      request: new Request("https://example.test/api/agent/signup-requests", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...base, deliveryBinding: { adapterKey: "codex_cli", targetRef: "opaque-enrollment-reference", displayLabel: "Example task" } }),
+      }),
+      env: policy,
+    });
+    expect(accepted?.status).toBe(202);
+    const payload = await accepted?.json() as { deliveryBinding?: { adapterKey?: string; targetRef?: string }; profile?: unknown };
+    expect(payload.deliveryBinding).toMatchObject({ adapterKey: "codex_cli" });
+    expect(payload.deliveryBinding).not.toHaveProperty("targetRef");
+    expect(JSON.stringify(payload)).not.toContain("sessionId");
+
+    const projectMismatch = await onRequest({
+      request: new Request("https://example.test/api/agent/signup-requests", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...base, profile: { ...base.profile, project: "another_project" }, deliveryBinding: { adapterKey: "codex_cli", targetRef: "opaque-enrollment-reference", displayLabel: "Example task" } }),
+      }),
+      env: policy,
+    });
+    expect(projectMismatch?.status).toBe(400);
+    await expect(projectMismatch?.json()).resolves.toMatchObject({ error: "signup_profile_project_mismatch" });
+
+    const handleRuntimeMismatch = await onRequest({
+      request: new Request("https://example.test/api/agent/signup-requests", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...base, profile: { ...base.profile, runtime: { ...base.profile.runtime, kind: "other" } }, deliveryBinding: { adapterKey: "other", targetRef: "opaque-enrollment-reference", displayLabel: "Example task" } }),
+      }),
+      env: policy,
+    });
+    expect(handleRuntimeMismatch?.status).toBe(400);
+    await expect(handleRuntimeMismatch?.json()).resolves.toMatchObject({ error: "signup_handle_runtime_mismatch" });
+
+    const disallowedHandleKind = await onRequest({
+      request: new Request("https://example.test/api/agent/signup-requests", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...base,
+          handle: "dev[other]@example_work/general",
+          profile: { ...base.profile, runtime: { ...base.profile.runtime, kind: "other" } },
+        }),
+      }),
+      env: policy,
+    });
+    expect(disallowedHandleKind?.status).toBe(400);
+    await expect(disallowedHandleKind?.json()).resolves.toMatchObject({ error: "signup_handle_runtime_kind_not_allowed" });
+  });
+
   it("persists named Go and Stop control events exactly once across repeated operator posts", async () => {
     const db = new MockForumConferenceDb();
     const env = {

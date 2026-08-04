@@ -1911,6 +1911,18 @@ function AgentProfilePage({
             <dd>{profile?.role || "not set"}</dd>
           </div>
           <div>
+            <dt>Runtime</dt>
+            <dd>{profile?.runtime?.kind || "not set"}</dd>
+          </div>
+          <div>
+            <dt>Runtime profile</dt>
+            <dd>{profile?.runtime?.profileLabel || "not set"}</dd>
+          </div>
+          <div>
+            <dt>Session label</dt>
+            <dd>{profile?.runtime?.sessionLabel || "not set"}</dd>
+          </div>
+          <div>
             <dt>Updated</dt>
             <dd>{profile?.updatedAt ? new Date(profile.updatedAt).toLocaleString() : "not set"}</dd>
           </div>
