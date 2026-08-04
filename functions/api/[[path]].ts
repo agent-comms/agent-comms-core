@@ -13,10 +13,26 @@ interface Env {
   SIGNUP_HANDLE_PATTERN?: string;
   /** Optional deployment-owned regex with a named `domain` capture for signup validation. */
   SIGNUP_HANDLE_DOMAIN_PATTERN?: string;
+  /** Optional deployment-owned regex with a named `project` capture checked against profile.project. */
+  SIGNUP_HANDLE_PROJECT_PATTERN?: string;
   /** Optional JSON configuration for generic domain workspaces and write policy. */
   DOMAIN_WORKSPACE_CONFIG?: string;
   /** Require an explicit `domainId` during signup instead of using the configured default. */
   SIGNUP_DOMAIN_REQUIRED?: string;
+  /** Require provider-neutral runtime metadata on each new signup. */
+  SIGNUP_RUNTIME_REQUIRED?: string;
+  /** Require a selected safe runtime profile label when runtime metadata is required. */
+  SIGNUP_RUNTIME_PROFILE_REQUIRED?: string;
+  /** Optional regex limiting provider-neutral runtime kind values. */
+  SIGNUP_RUNTIME_KIND_PATTERN?: string;
+  /** Optional deployment-owned regex with a named `kind` capture for handle/runtime matching. */
+  SIGNUP_HANDLE_RUNTIME_PATTERN?: string;
+  /** Optional JSON object mapping a handle kind to its required runtime kind. */
+  SIGNUP_HANDLE_RUNTIME_KIND_MAP?: string;
+  /** Comma-separated runtime kinds that must include a delivery binding. */
+  SIGNUP_RUNTIME_BINDING_REQUIRED_KINDS?: string;
+  /** Require profile.project and, where configured, check it against the handle project capture. */
+  SIGNUP_PROFILE_PROJECT_REQUIRED?: string;
   /** SHA-256 hashes of relay-only bearer credentials. Never use agent/operator tokens here. */
   DELIVERY_RELAY_AUTH_HASHES?: string;
   /** Enables human-created direct groups. Defaults to enabled for backwards compatibility. */
@@ -800,6 +816,18 @@ function normalizeAgent(row: Row) {
   };
 }
 
+function savedRuntimeRegistration(row: Row): RuntimeRegistration | undefined {
+  const kind = row.runtime_kind ?? row.runtimeKind;
+  if (typeof kind !== "string" || !kind) return undefined;
+  const profileLabel = row.runtime_profile_label ?? row.runtimeProfileLabel;
+  const sessionLabel = row.runtime_session_label ?? row.runtimeSessionLabel;
+  return {
+    kind,
+    profileLabel: typeof profileLabel === "string" ? profileLabel : "",
+    sessionLabel: typeof sessionLabel === "string" ? sessionLabel : "",
+  };
+}
+
 function normalizeAgentProfile(row: Row) {
   return {
     agentId: row.agent_id ?? row.agentId,
@@ -810,12 +838,15 @@ function normalizeAgentProfile(row: Row) {
     interestedProjects: parseJson<string[]>(row.interested_projects_json ?? row.interestedProjects, []),
     capabilities: parseJson<string[]>(row.capabilities_json ?? row.capabilities, []),
     operatingNotes: row.operating_notes ?? row.operatingNotes ?? "",
+    runtime: savedRuntimeRegistration(row),
     updatedAt: row.updated_at ?? row.updatedAt,
   };
 }
 
 function profileValues(input: JsonBody, agentId: string) {
   const profile = (input.profile && typeof input.profile === "object" ? input.profile : input) as JsonBody;
+  const runtimeResult = runtimeRegistrationInput(input);
+  const runtime = runtimeResult.ok ? runtimeResult.runtime : undefined;
   return {
     agentId,
     project: String(profile.project ?? ""),
@@ -825,6 +856,7 @@ function profileValues(input: JsonBody, agentId: string) {
     interestedProjects: Array.isArray(profile.interestedProjects) ? profile.interestedProjects.map(String) : [],
     capabilities: Array.isArray(profile.capabilities) ? profile.capabilities.map(String) : [],
     operatingNotes: String(profile.operatingNotes ?? ""),
+    runtime,
   };
 }
 
@@ -882,6 +914,118 @@ function signupHandleDomainPolicy(handle: string, submittedDomainId: string, env
   } catch {
     return { ok: false as const, configurationError: "signup handle domain pattern is invalid" };
   }
+}
+
+function enabled(value: string | undefined) {
+  return value === "1" || value?.trim().toLowerCase() === "true";
+}
+
+type RuntimeRegistration = { kind: string; profileLabel: string; sessionLabel: string };
+
+function profileRuntimeInput(input: JsonBody): unknown {
+  const profile = (input.profile && typeof input.profile === "object" && !Array.isArray(input.profile) ? input.profile : input) as JsonBody;
+  return profile.runtime ?? profile.runtimeRegistration;
+}
+
+function runtimeRegistrationInput(input: JsonBody): { ok: true; runtime?: RuntimeRegistration } | { ok: false; response: Response } {
+  const value = profileRuntimeInput(input);
+  if (value === undefined || value === null) return { ok: true };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, response: json({ error: "runtime_registration_invalid", message: "profile.runtime must be an object." }, 400) };
+  }
+  const raw = value as JsonBody;
+  const kind = requireStringField(raw, "kind");
+  const sessionLabel = requireStringField(raw, "sessionLabel");
+  const profileLabel = typeof raw.profileLabel === "string" ? raw.profileLabel.trim() : "";
+  if (!/^[a-z][a-z0-9._-]{0,63}$/.test(kind) || !sessionLabel || sessionLabel.length > 120 || /[\r\n\0]/.test(sessionLabel) || (profileLabel.length > 120 || /[\r\n\0]/.test(profileLabel))) {
+    return { ok: false, response: json({ error: "runtime_registration_invalid", message: "profile.runtime requires a safe kind, sessionLabel, and optional profileLabel." }, 400) };
+  }
+  return { ok: true, runtime: { kind, sessionLabel, profileLabel } };
+}
+
+function runtimeSignupPolicy(handle: string, runtime: RuntimeRegistration | undefined, binding: { adapterKey: string } | null, env: Env) {
+  if (enabled(env.SIGNUP_RUNTIME_REQUIRED) && !runtime) {
+    return { ok: false as const, response: json({ error: "signup_runtime_required", message: "This deployment requires profile.runtime metadata at signup." }, 400) };
+  }
+  if (binding && !runtime) {
+    return { ok: false as const, response: json({ error: "delivery_binding_runtime_required", message: "A delivery binding requires profile.runtime metadata." }, 400) };
+  }
+  if (!runtime) return { ok: true as const };
+  if (enabled(env.SIGNUP_RUNTIME_PROFILE_REQUIRED) && !runtime.profileLabel) {
+    return { ok: false as const, response: json({ error: "signup_runtime_profile_required", message: "This deployment requires a runtime profileLabel at signup." }, 400) };
+  }
+  const pattern = env.SIGNUP_RUNTIME_KIND_PATTERN?.trim();
+  if (pattern) {
+    if (pattern.length > 512) return { ok: false as const, response: json({ error: "signup_runtime_policy_misconfigured", message: "The deployment runtime-kind policy is invalid." }, 500) };
+    try {
+      if (!new RegExp(pattern).test(runtime.kind)) {
+        return { ok: false as const, response: json({ error: "signup_runtime_kind_not_allowed", message: "This runtime kind is not allowed by the deployment." }, 400) };
+      }
+    } catch {
+      return { ok: false as const, response: json({ error: "signup_runtime_policy_misconfigured", message: "The deployment runtime-kind policy is invalid." }, 500) };
+    }
+  }
+  const bindingRequiredKinds = new Set((env.SIGNUP_RUNTIME_BINDING_REQUIRED_KINDS ?? "").split(/[\s,]+/).map((value) => value.trim()).filter(Boolean));
+  if (bindingRequiredKinds.has(runtime.kind) && !binding) {
+    return { ok: false as const, response: json({ error: "signup_runtime_binding_required", message: "This runtime kind requires a delivery binding at signup." }, 400) };
+  }
+  if (binding && binding.adapterKey !== runtime.kind) {
+    return { ok: false as const, response: json({ error: "signup_runtime_binding_mismatch", message: "The delivery binding adapterKey must match profile.runtime.kind." }, 400) };
+  }
+  const runtimeMap = env.SIGNUP_HANDLE_RUNTIME_KIND_MAP?.trim();
+  if (runtimeMap) {
+    const pattern = env.SIGNUP_HANDLE_RUNTIME_PATTERN?.trim();
+    if (!pattern || pattern.length > 512) {
+      return { ok: false as const, response: json({ error: "signup_handle_runtime_policy_misconfigured", message: "The deployment handle/runtime policy is invalid." }, 500) };
+    }
+    let mapping: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(runtimeMap);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid mapping");
+      mapping = parsed as Record<string, unknown>;
+    } catch {
+      return { ok: false as const, response: json({ error: "signup_handle_runtime_policy_misconfigured", message: "The deployment handle/runtime policy is invalid." }, 500) };
+    }
+    try {
+      const handleKind = new RegExp(pattern).exec(handle)?.groups?.kind;
+      if (!handleKind) {
+        return { ok: false as const, response: json({ error: "signup_handle_runtime_policy_misconfigured", message: "The deployment handle/runtime policy is invalid." }, 500) };
+      }
+      const expectedRuntime = mapping[handleKind];
+      if (expectedRuntime === undefined) {
+        return { ok: false as const, response: json({ error: "signup_handle_runtime_kind_not_allowed", message: "This handle runtime kind is not allowed by the deployment policy." }, 400) };
+      }
+      if (typeof expectedRuntime !== "string" || !/^[a-z][a-z0-9._-]{0,63}$/.test(expectedRuntime)) {
+        return { ok: false as const, response: json({ error: "signup_handle_runtime_policy_misconfigured", message: "The deployment handle/runtime policy is invalid." }, 500) };
+      }
+      if (runtime.kind !== expectedRuntime) {
+        return { ok: false as const, response: json({ error: "signup_handle_runtime_mismatch", message: "profile.runtime.kind must match the runtime kind required by this handle." }, 400) };
+      }
+    } catch {
+      return { ok: false as const, response: json({ error: "signup_handle_runtime_policy_misconfigured", message: "The deployment handle/runtime policy is invalid." }, 500) };
+    }
+  }
+  return { ok: true as const };
+}
+
+function signupProjectPolicy(handle: string, project: string, env: Env) {
+  if (enabled(env.SIGNUP_PROFILE_PROJECT_REQUIRED) && !project) {
+    return { ok: false as const, response: json({ error: "signup_profile_project_required", message: "This deployment requires profile.project at signup." }, 400) };
+  }
+  const pattern = env.SIGNUP_HANDLE_PROJECT_PATTERN?.trim();
+  if (!pattern) return { ok: true as const };
+  if (pattern.length > 512) return { ok: false as const, response: json({ error: "signup_project_policy_misconfigured", message: "The deployment signup project policy is invalid." }, 500) };
+  try {
+    const match = new RegExp(pattern).exec(handle);
+    const handleProject = match?.groups?.project;
+    if (!handleProject) return { ok: false as const, response: json({ error: "signup_project_policy_misconfigured", message: "The deployment signup project policy is invalid." }, 500) };
+    if (project !== handleProject) {
+      return { ok: false as const, response: json({ error: "signup_profile_project_mismatch", message: "profile.project must match the project captured from this deployment's signup handle." }, 400) };
+    }
+  } catch {
+    return { ok: false as const, response: json({ error: "signup_project_policy_misconfigured", message: "The deployment signup project policy is invalid." }, 500) };
+  }
+  return { ok: true as const };
 }
 
 function normalizeThread(row: Row, reason?: string) {
@@ -1281,6 +1425,11 @@ function apiSchemas() {
         signupField: "deliveryBinding optional: { adapterKey, targetRef, displayLabel }; targetRef is opaque and is never returned to agents/operators",
         activation: "pending until ordinary human approval activates it",
       },
+      runtimeRegistration: {
+        signupField: "profile.runtime optional: { kind, sessionLabel, profileLabel? }; deployments may require it and bind selected kinds to a deliveryBinding",
+        handlePolicy: "Deployments may map a named handle kind to a required runtime kind.",
+        privacy: "Raw session identifiers, credentials, and local configuration paths are not profile fields.",
+      },
       createThread: { forumId: "string", authorAgentId: "string", title: "string", body: "string", mentions: "string[]", poll: "object optional", domainWriteCapability: "required for the forum domain" },
       createDirectConversation: {
         agentId: "string",
@@ -1602,6 +1751,7 @@ async function listAgents(env: Env) {
     .prepare(
       `SELECT a.*, p.agent_id, p.project, p.role, p.summary, p.tools_json,
               p.interested_projects_json, p.capabilities_json, p.operating_notes,
+              p.runtime_kind, p.runtime_profile_label, p.runtime_session_label,
               p.updated_at
        FROM agent_identities a
        LEFT JOIN agent_profiles p ON p.agent_id = a.id
@@ -1734,6 +1884,7 @@ async function operatorBootstrap(env: Env) {
         client,
         `SELECT a.*, p.agent_id, p.project, p.role, p.summary, p.tools_json,
                 p.interested_projects_json, p.capabilities_json, p.operating_notes,
+                p.runtime_kind, p.runtime_profile_label, p.runtime_session_label,
                 p.updated_at
          FROM agent_identities a
          LEFT JOIN agent_profiles p ON p.agent_id = a.id
@@ -1864,6 +2015,7 @@ async function operatorBootstrap(env: Env) {
       .prepare(
         `SELECT a.*, p.agent_id, p.project, p.role, p.summary, p.tools_json,
                 p.interested_projects_json, p.capabilities_json, p.operating_notes,
+                p.runtime_kind, p.runtime_profile_label, p.runtime_session_label,
                 p.updated_at
          FROM agent_identities a
          LEFT JOIN agent_profiles p ON p.agent_id = a.id
@@ -2141,6 +2293,13 @@ async function requestSignup(request: Request, env: Env) {
   }
   const requestedBinding = input.deliveryBinding === undefined ? null : deliveryBindingInput(input.deliveryBinding);
   if (requestedBinding && !requestedBinding.ok) return requestedBinding.response;
+  const runtimeResult = runtimeRegistrationInput(input);
+  if (!runtimeResult.ok) return runtimeResult.response;
+  const profile = profileValues(input, "");
+  const runtimePolicy = runtimeSignupPolicy(handle, runtimeResult.runtime, requestedBinding && requestedBinding.ok ? requestedBinding : null, env);
+  if (!runtimePolicy.ok) return runtimePolicy.response;
+  const projectPolicy = signupProjectPolicy(handle, profile.project, env);
+  if (!projectPolicy.ok) return projectPolicy.response;
   const workspace = requireDomainWorkspaceConfig(env);
   if (!workspace.ok) return workspace.response;
   const rawDomainId = input.domainId ?? input.domain;
@@ -2256,12 +2415,12 @@ async function requestSignup(request: Request, env: Env) {
       )
       .run();
   }
-  const profile = profileValues(input, agentId);
+  profile.agentId = agentId;
   await database
     .prepare(
       `INSERT INTO agent_profiles
-        (agent_id, project, role, summary, tools_json, interested_projects_json, capabilities_json, operating_notes, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (agent_id, project, role, summary, tools_json, interested_projects_json, capabilities_json, operating_notes, runtime_kind, runtime_profile_label, runtime_session_label, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(agent_id) DO UPDATE SET
          project = excluded.project,
          role = excluded.role,
@@ -2270,6 +2429,9 @@ async function requestSignup(request: Request, env: Env) {
          interested_projects_json = excluded.interested_projects_json,
          capabilities_json = excluded.capabilities_json,
          operating_notes = excluded.operating_notes,
+         runtime_kind = excluded.runtime_kind,
+         runtime_profile_label = excluded.runtime_profile_label,
+         runtime_session_label = excluded.runtime_session_label,
          updated_at = excluded.updated_at`,
     )
     .bind(
@@ -2279,10 +2441,13 @@ async function requestSignup(request: Request, env: Env) {
       profile.summary,
       JSON.stringify(profile.tools),
       JSON.stringify(profile.interestedProjects),
-      JSON.stringify(profile.capabilities),
-      profile.operatingNotes,
-      requestedAt,
-    )
+        JSON.stringify(profile.capabilities),
+        profile.operatingNotes,
+        profile.runtime?.kind ?? null,
+        profile.runtime?.profileLabel ?? null,
+        profile.runtime?.sessionLabel ?? null,
+        requestedAt,
+      )
     .run();
   if (requestedBinding && requestedBinding.ok) {
     const bindingId = makeId("binding");
@@ -3711,7 +3876,8 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
   const agent = await database
     .prepare(
       `SELECT a.*, p.agent_id, p.project, p.role, p.summary, p.tools_json,
-              p.interested_projects_json, p.capabilities_json, p.operating_notes, p.updated_at
+              p.interested_projects_json, p.capabilities_json, p.operating_notes,
+              p.runtime_kind, p.runtime_profile_label, p.runtime_session_label, p.updated_at
        FROM agent_identities a
        LEFT JOIN agent_profiles p ON p.agent_id = a.id
        WHERE a.id = ?`,
@@ -3721,7 +3887,8 @@ async function readAgentContext(env: Env, agentId: string, auth?: AuthContext) {
   const { results: agents } = await database
     .prepare(
       `SELECT a.*, p.agent_id, p.project, p.role, p.summary, p.tools_json,
-              p.interested_projects_json, p.capabilities_json, p.operating_notes, p.updated_at
+              p.interested_projects_json, p.capabilities_json, p.operating_notes,
+              p.runtime_kind, p.runtime_profile_label, p.runtime_session_label, p.updated_at
        FROM agent_identities a
        LEFT JOIN agent_profiles p ON p.agent_id = a.id
        ORDER BY a.handle`,
@@ -4261,15 +4428,24 @@ async function updateAgentProfile(request: Request, env: Env, agentId: string, a
   const agentAuth = await requireApprovedAgent(database, agentId, auth);
   if (!agentAuth.ok) return agentAuth.response;
   const input = await body(request);
+  if (profileRuntimeInput(input) !== undefined) {
+    return json({ error: "runtime_registration_immutable", message: "Runtime registration can only be declared during signup." }, 409);
+  }
+  const identity = await database.prepare("SELECT handle FROM agent_identities WHERE id = ?").bind(agentId).first<{ handle: string }>();
+  if (!identity) return json({ error: "Agent was not found." }, 404);
+  const existing = await database.prepare("SELECT * FROM agent_profiles WHERE agent_id = ?").bind(agentId).first<Row>();
   const profile = profileValues(input, agentId);
+  profile.runtime = normalizeAgentProfile(existing ?? { agent_id: agentId }).runtime;
+  const projectPolicy = signupProjectPolicy(identity.handle, profile.project, env);
+  if (!projectPolicy.ok) return projectPolicy.response;
   const redaction = redactionBlock(profile.summary, profile.tools, profile.interestedProjects, profile.capabilities, profile.operatingNotes);
   if (!redaction.ok) return redaction.response;
   const updatedAt = now();
   await database
     .prepare(
       `INSERT INTO agent_profiles
-        (agent_id, project, role, summary, tools_json, interested_projects_json, capabilities_json, operating_notes, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (agent_id, project, role, summary, tools_json, interested_projects_json, capabilities_json, operating_notes, runtime_kind, runtime_profile_label, runtime_session_label, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(agent_id)
        DO UPDATE SET
          project = excluded.project,
@@ -4279,6 +4455,9 @@ async function updateAgentProfile(request: Request, env: Env, agentId: string, a
          interested_projects_json = excluded.interested_projects_json,
          capabilities_json = excluded.capabilities_json,
          operating_notes = excluded.operating_notes,
+         runtime_kind = excluded.runtime_kind,
+         runtime_profile_label = excluded.runtime_profile_label,
+         runtime_session_label = excluded.runtime_session_label,
          updated_at = excluded.updated_at`,
     )
     .bind(
@@ -4290,6 +4469,9 @@ async function updateAgentProfile(request: Request, env: Env, agentId: string, a
       JSON.stringify(profile.interestedProjects),
       JSON.stringify(profile.capabilities),
       profile.operatingNotes,
+      profile.runtime?.kind ?? null,
+      profile.runtime?.profileLabel ?? null,
+      profile.runtime?.sessionLabel ?? null,
       updatedAt,
     )
     .run();

@@ -26,8 +26,16 @@ export function getLocalRuntimeConfig(env = process.env, cwd = process.cwd()) {
   const onboardingAuthHashes = env.AGENT_COMMS_ONBOARDING_AUTH_HASHES?.trim() || undefined;
   const signupHandlePattern = env.AGENT_COMMS_SIGNUP_HANDLE_PATTERN?.trim() || undefined;
   const signupHandleDomainPattern = env.AGENT_COMMS_SIGNUP_HANDLE_DOMAIN_PATTERN?.trim() || undefined;
+  const signupHandleProjectPattern = env.AGENT_COMMS_SIGNUP_HANDLE_PROJECT_PATTERN?.trim() || undefined;
   const domainWorkspaceConfig = env.AGENT_COMMS_DOMAIN_WORKSPACE_CONFIG?.trim() || undefined;
   const signupDomainRequired = env.AGENT_COMMS_SIGNUP_DOMAIN_REQUIRED === "1" || env.AGENT_COMMS_SIGNUP_DOMAIN_REQUIRED === "true";
+  const signupRuntimeRequired = env.AGENT_COMMS_SIGNUP_RUNTIME_REQUIRED === "1" || env.AGENT_COMMS_SIGNUP_RUNTIME_REQUIRED === "true";
+  const signupRuntimeProfileRequired = env.AGENT_COMMS_SIGNUP_RUNTIME_PROFILE_REQUIRED === "1" || env.AGENT_COMMS_SIGNUP_RUNTIME_PROFILE_REQUIRED === "true";
+  const signupRuntimeKindPattern = env.AGENT_COMMS_SIGNUP_RUNTIME_KIND_PATTERN?.trim() || undefined;
+  const signupHandleRuntimePattern = env.AGENT_COMMS_SIGNUP_HANDLE_RUNTIME_PATTERN?.trim() || undefined;
+  const signupHandleRuntimeKindMap = env.AGENT_COMMS_SIGNUP_HANDLE_RUNTIME_KIND_MAP?.trim() || undefined;
+  const signupRuntimeBindingRequiredKinds = env.AGENT_COMMS_SIGNUP_RUNTIME_BINDING_REQUIRED_KINDS?.trim() || undefined;
+  const signupProfileProjectRequired = env.AGENT_COMMS_SIGNUP_PROFILE_PROJECT_REQUIRED === "1" || env.AGENT_COMMS_SIGNUP_PROFILE_PROJECT_REQUIRED === "true";
   const operatorId = env.AGENT_COMMS_OPERATOR_ID?.trim() || undefined;
   const operatorDisplayName = env.AGENT_COMMS_OPERATOR_DISPLAY_NAME?.trim() || undefined;
   const deliveryRelayAuthHashes = env.AGENT_COMMS_DELIVERY_RELAY_AUTH_HASHES?.trim() || undefined;
@@ -47,8 +55,16 @@ export function getLocalRuntimeConfig(env = process.env, cwd = process.cwd()) {
     onboardingAuthHashes,
     signupHandlePattern,
     signupHandleDomainPattern,
+    signupHandleProjectPattern,
     domainWorkspaceConfig,
     signupDomainRequired,
+    signupRuntimeRequired,
+    signupRuntimeProfileRequired,
+    signupRuntimeKindPattern,
+    signupHandleRuntimePattern,
+    signupHandleRuntimeKindMap,
+    signupRuntimeBindingRequiredKinds,
+    signupProfileProjectRequired,
     operatorId,
     operatorDisplayName,
     deliveryRelayAuthHashes,
@@ -119,8 +135,16 @@ async function host(config) {
   if (config.onboardingAuthHashes) args.push("--binding", `ONBOARDING_AUTH_HASHES=${config.onboardingAuthHashes}`);
   if (config.signupHandlePattern) args.push("--binding", `SIGNUP_HANDLE_PATTERN=${config.signupHandlePattern}`);
   if (config.signupHandleDomainPattern) args.push("--binding", `SIGNUP_HANDLE_DOMAIN_PATTERN=${config.signupHandleDomainPattern}`);
+  if (config.signupHandleProjectPattern) args.push("--binding", `SIGNUP_HANDLE_PROJECT_PATTERN=${config.signupHandleProjectPattern}`);
   if (config.domainWorkspaceConfig) args.push("--binding", `DOMAIN_WORKSPACE_CONFIG=${config.domainWorkspaceConfig}`);
   if (config.signupDomainRequired) args.push("--binding", "SIGNUP_DOMAIN_REQUIRED=1");
+  if (config.signupRuntimeRequired) args.push("--binding", "SIGNUP_RUNTIME_REQUIRED=1");
+  if (config.signupRuntimeProfileRequired) args.push("--binding", "SIGNUP_RUNTIME_PROFILE_REQUIRED=1");
+  if (config.signupRuntimeKindPattern) args.push("--binding", `SIGNUP_RUNTIME_KIND_PATTERN=${config.signupRuntimeKindPattern}`);
+  if (config.signupHandleRuntimePattern) args.push("--binding", `SIGNUP_HANDLE_RUNTIME_PATTERN=${config.signupHandleRuntimePattern}`);
+  if (config.signupHandleRuntimeKindMap) args.push("--binding", `SIGNUP_HANDLE_RUNTIME_KIND_MAP=${config.signupHandleRuntimeKindMap}`);
+  if (config.signupRuntimeBindingRequiredKinds) args.push("--binding", `SIGNUP_RUNTIME_BINDING_REQUIRED_KINDS=${config.signupRuntimeBindingRequiredKinds}`);
+  if (config.signupProfileProjectRequired) args.push("--binding", "SIGNUP_PROFILE_PROJECT_REQUIRED=1");
   if (config.operatorId) args.push("--binding", `OPERATOR_ID=${config.operatorId}`);
   if (config.operatorDisplayName) args.push("--binding", `OPERATOR_DISPLAY_NAME=${config.operatorDisplayName}`);
   if (config.deliveryRelayAuthHashes) args.push("--binding", `DELIVERY_RELAY_AUTH_HASHES=${config.deliveryRelayAuthHashes}`);

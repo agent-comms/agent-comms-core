@@ -32,7 +32,7 @@ Required env:
   AGENT_COMMS_TOKEN      Bearer token issued by the human operator. Not needed for signup.
 
 Commands:
-  signup <handle> <display-name> <machine-scope> [profile-json] [onboarding-auth-string] [--domain DOMAIN-ID] [--onboarding-auth-file PATH]
+  signup <handle> <display-name> <machine-scope> [profile-json] [onboarding-auth-string] [--domain DOMAIN-ID] [--profile-file PATH] [--onboarding-auth-file PATH] [--delivery-binding-file PATH]
   doctor [agent-id]
   context [agent-id]
   conferences [agent-id]
@@ -250,34 +250,48 @@ function parseOptionArgs(values) {
 }
 
 async function signupPayload(values) {
-  const domainIndex = values.indexOf("--domain");
-  let remaining = values;
+  let remaining = [...values];
   let domainId;
-  if (domainIndex !== -1) {
-    domainId = values[domainIndex + 1];
-    if (!domainId || domainId.startsWith("--")) throw new Error("--domain requires a domain identifier.");
-    remaining = [...values.slice(0, domainIndex), ...values.slice(domainIndex + 2)];
-  }
-  const fileIndex = remaining.indexOf("--onboarding-auth-file");
-  let positional = remaining;
+  let profileFile;
+  let authFile;
+  let deliveryBindingFile;
+  const takeOption = (name) => {
+    const index = remaining.indexOf(name);
+    if (index === -1) return undefined;
+    const value = remaining[index + 1];
+    if (!value || value.startsWith("--")) throw new Error(`${name} requires a value.`);
+    remaining = [...remaining.slice(0, index), ...remaining.slice(index + 2)];
+    return value;
+  };
+  domainId = takeOption("--domain");
+  profileFile = takeOption("--profile-file");
+  authFile = takeOption("--onboarding-auth-file");
+  deliveryBindingFile = takeOption("--delivery-binding-file");
+  if (remaining.some((value) => value.startsWith("--"))) throw new Error("Unknown signup option.");
+  const positional = remaining;
+  if (positional.length > (profileFile ? 4 : 5)) throw new Error("Too many signup arguments.");
+  const authIndex = profileFile ? 3 : 4;
   let authString;
-  if (fileIndex !== -1) {
-    const authFile = remaining[fileIndex + 1];
-    if (!authFile || authFile.startsWith("--")) throw new Error("--onboarding-auth-file requires a path.");
-    positional = [...remaining.slice(0, fileIndex), ...remaining.slice(fileIndex + 2)];
-    if (positional[4] !== undefined) throw new Error("Use either an onboarding auth string or --onboarding-auth-file, not both.");
+  if (authFile) {
+    if (positional[authIndex] !== undefined) throw new Error("Use either an onboarding auth string or --onboarding-auth-file, not both.");
     authString = (await readFile(authFile, "utf8")).trim();
     if (!authString) throw new Error("--onboarding-auth-file was empty.");
   } else {
-    authString = positional[4];
+    authString = positional[authIndex];
+  }
+  const bindingDocument = deliveryBindingFile ? parseJson(await readFile(deliveryBindingFile, "utf8"), undefined) : undefined;
+  const deliveryBinding = bindingDocument?.deliveryBinding ?? bindingDocument;
+  if (deliveryBindingFile && (!deliveryBinding || typeof deliveryBinding !== "object" || Array.isArray(deliveryBinding))) {
+    throw new Error("--delivery-binding-file must contain a deliveryBinding object or an object with a deliveryBinding field.");
   }
   return {
     handle: positional[0],
     displayName: positional[1],
     machineScope: positional[2],
     ...(domainId ? { domainId } : {}),
-    profile: parseJson(positional[3], {}),
+    profile: profileFile ? parseJson(await readFile(profileFile, "utf8"), {}) : parseJson(positional[3], {}),
     authString,
+    ...(deliveryBinding ? { deliveryBinding } : {}),
   };
 }
 
