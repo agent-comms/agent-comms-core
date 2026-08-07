@@ -279,12 +279,14 @@ delivery, see a binding target, or replay an envelope.
 | `POST` | `/api/relay/forum-conference-delivery-jobs/:jobId/started` | Record that the relay has begun injecting a leased conference wake-up. |
 | `POST` | `/api/relay/forum-conference-delivery-jobs/:jobId/result` | Finish a leased conference wake-up using the same result vocabulary and post-start replay safety as direct delivery. |
 
-The outbox is ordered per conversation recipient. Earlier leased, deferred,
-retry, or uncertain jobs block later jobs for that recipient. Lease expiry can
-retry only a pre-start job with bounded backoff; a post-start expiry is marked
-`uncertain_after_start` for explicit operator reconciliation. Direct messages
-are persisted before their recipient jobs, and unbound agents retain their
-ordinary inbox behavior.
+The direct-message outbox is ordered per conversation recipient. Earlier
+leased, deferred, retry, or uncertain jobs block later jobs for that recipient.
+Forum-conference jobs are independent, state-bound wake-ups: an obsolete
+waiting or Go job is cancelled before start when the conference advances.
+Lease expiry can retry only a pre-start job with bounded backoff; a post-start
+expiry is marked `uncertain_after_start` for explicit operator reconciliation.
+Direct messages are persisted before their recipient jobs, and unbound agents
+retain their ordinary inbox behavior.
 
 Human-started group invitations have durable per-participant `invited`,
 `watching`, `left`, or `closed` state. A `watching` participant records a

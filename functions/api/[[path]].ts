@@ -5087,14 +5087,16 @@ async function postForumConferenceSignal(
   );
   if (!event) return json({ error: "The forum conference state changed before this control post was accepted. Refresh and try again." }, 409);
   const reply = await completeForumConferenceControlEvent(db.db, current.session, event);
-  if (action === "go") {
+  const updated = await forumConferenceSession(db.db, sessionId);
+  const currentStatus = updated?.session.status;
+  if (action === "go" && currentStatus === "active") {
     await cancelForumConferenceDeliveryJobs(db.db, sessionId, ["conference_waiting"], "conference_started");
     await atomicWrites(db.db, await forumConferenceDeliveryWrites(db.db, {
       sessionId,
       sourceKind: "conference_go",
       sourceControlEventId: String(event.id),
     }));
-  } else {
+  } else if (action === "stop" && currentStatus === "stopped") {
     await cancelForumConferenceDeliveryJobs(db.db, sessionId, ["conference_waiting", "conference_go"], "conference_stopped");
     await atomicWrites(db.db, await forumConferenceDeliveryWrites(db.db, {
       sessionId,
@@ -5102,7 +5104,6 @@ async function postForumConferenceSignal(
       sourceControlEventId: String(event.id),
     }));
   }
-  const updated = await forumConferenceSession(db.db, sessionId);
   return json({
     session: normalizeForumConferenceSession(updated!.session, updated!.participants, updated!.controlEvents),
     reply: withOperatorDisplayName(normalizeReply(reply ?? {}), auth.operatorDisplayName ?? operatorIdentity(env).displayName),

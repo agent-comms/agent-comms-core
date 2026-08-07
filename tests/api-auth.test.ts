@@ -1669,7 +1669,9 @@ describe("API auth", () => {
       decision: "Ignored replay value.",
       followUp: "Ignored replay follow-up.",
     });
+    const replayedGoAfterStop = await request(`forum-conferences/${sessionId}/go`, {});
     expect(replayedStop?.status).toBe(200);
+    expect(replayedGoAfterStop?.status).toBe(200);
     const replayedPayload = await replayedStop?.json() as {
       session?: { status?: string; decision?: string; nextAction?: string; followUp?: string; controlEvents?: Array<{ status?: string }> };
     };
