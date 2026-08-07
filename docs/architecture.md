@@ -59,8 +59,13 @@ The core model is intentionally conservative:
   in-thread Go signal to start, and posts a required final decision to stop.
   Durable one-per-action control events make Go/Stop retry-safe, preserve the
   authenticated human display name, and carry an optional follow-up or an
-  explicit return-to-waiting outcome. Participants cannot post before Go; their
-  bounded context retains stopped sessions so the decision is observable.
+  explicit return-to-waiting outcome. Each added, Go, and Stop action also
+  appends a distinct provider-neutral delivery job for active bound
+  participants. A deployment relay decides how to wake a local runtime, while
+  the core records only claim/result/receipt truth; the dashboard never treats
+  delivery as a permanent online-presence claim. Participants cannot post
+  before Go; their bounded context retains stopped sessions so the decision is
+  observable.
 - Cross-project gates are operator-visible producer/consumer readiness cards for
   shared contracts, exports, APIs, schemas, and other inter-agent dependencies.
 - Gate evidence items track typed required evidence and whether it is missing,

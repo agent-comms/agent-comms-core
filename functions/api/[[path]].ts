@@ -56,6 +56,7 @@ type AuthContext = {
 type DirectReadMode = "full" | "since_breakpoint" | "since_message";
 type DeliveryJobStatus = "queued" | "leased" | "delivered" | "deferred_busy" | "retry" | "uncertain_after_start" | "cancelled";
 type DeliveryResultCode = "delivered" | "deferred_busy" | "retry" | "uncertain_after_start" | "failed_before_start";
+type ForumConferenceDeliveryKind = "conference_waiting" | "conference_go" | "conference_stop";
 type InboxMode = "unread" | "all" | "recent";
 type MarkReadTargetType = "thread" | "conversation" | "suggestion" | "mention" | "todo";
 type LiveReceiptState = "active" | "waiting_on_peer" | "waiting_on_operator" | "settled_by_agent" | "operator_stop_needed";
@@ -711,6 +712,80 @@ async function deliveryJobWrites(
   return writes;
 }
 
+async function forumConferenceDeliveryRecipients(
+  database: D1Database | PgDatabase,
+  sessionId: string,
+  recipientAgentId?: string,
+) {
+  const { results } = await database
+    .prepare(
+      `SELECT p.agent_id, b.id AS binding_id, b.revision AS binding_revision
+       FROM forum_conference_participants p
+       JOIN agent_delivery_bindings b ON b.agent_id = p.agent_id AND b.status = 'active'
+       JOIN agent_identities a ON a.id = p.agent_id AND a.status = 'approved'
+       WHERE p.session_id = ? ${recipientAgentId ? "AND p.agent_id = ?" : ""}
+       ORDER BY p.agent_id`,
+    )
+    .bind(sessionId, ...(recipientAgentId ? [recipientAgentId] : []))
+    .all<{ agent_id: string; binding_id: string; binding_revision: number }>();
+  return results;
+}
+
+async function forumConferenceDeliveryWrites(
+  database: D1Database | PgDatabase,
+  input: {
+    sessionId: string;
+    sourceKind: ForumConferenceDeliveryKind;
+    sourceControlEventId?: string | null;
+    recipientAgentId?: string;
+  },
+) {
+  const createdAt = now();
+  const recipients = await forumConferenceDeliveryRecipients(database, input.sessionId, input.recipientAgentId);
+  return recipients.map((recipient): SqlWrite => ({
+    sql: `INSERT INTO forum_conference_delivery_jobs
+      (id, session_id, source_kind, source_control_event_id, recipient_agent_id, binding_id, binding_revision,
+       status, attempts, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)
+      ON CONFLICT(session_id, source_kind, recipient_agent_id, binding_revision) DO NOTHING`,
+    values: [
+      makeId("conference_delivery"),
+      input.sessionId,
+      input.sourceKind,
+      input.sourceControlEventId ?? null,
+      recipient.agent_id,
+      recipient.binding_id,
+      Number(recipient.binding_revision),
+      createdAt,
+      createdAt,
+    ],
+  }));
+}
+
+async function cancelForumConferenceDeliveryJobs(
+  database: D1Database | PgDatabase,
+  sessionId: string,
+  sourceKinds: ForumConferenceDeliveryKind[],
+  resultCode: string,
+) {
+  if (!sourceKinds.length) return;
+  const timestamp = now();
+  await database
+    .prepare(
+      `UPDATE forum_conference_delivery_jobs
+       SET status = 'cancelled', result_code = ?, completed_at = ?,
+           lease_owner = NULL, lease_token_hash = NULL, lease_expires_at = NULL, updated_at = ?
+       WHERE session_id = ?
+         AND source_kind IN (${sourceKinds.map(() => "?").join(",")})
+         AND (
+           status IN ('queued', 'retry', 'deferred_busy')
+           OR (status = 'leased' AND started_at IS NULL)
+         )`,
+    )
+    .bind(resultCode, timestamp, timestamp, sessionId, ...sourceKinds)
+    .run();
+}
+
 function normalizeDeliveryBinding(row: Row, includeTarget = false) {
   return {
     id: row.id,
@@ -754,6 +829,24 @@ function normalizeDeliveryJob(row: Row) {
 function normalizeOperatorDeliveryJob(row: Row) {
   const { detail: _detail, ...job } = normalizeDeliveryJob(row);
   return job;
+}
+
+function normalizeForumConferenceDeliveryJob(row: Row) {
+  return {
+    id: row.id,
+    forumConferenceId: row.session_id ?? row.sessionId,
+    kind: row.source_kind ?? row.sourceKind,
+    sourceControlEventId: row.source_control_event_id ?? row.sourceControlEventId ?? null,
+    recipientAgentId: row.recipient_agent_id ?? row.recipientAgentId,
+    status: row.status,
+    attempts: Number(row.attempts ?? 0),
+    nextAttemptAt: row.next_attempt_at ?? row.nextAttemptAt ?? null,
+    leaseExpiresAt: row.lease_expires_at ?? row.leaseExpiresAt ?? null,
+    startedAt: row.started_at ?? row.startedAt ?? null,
+    recipientAcknowledgedAt: row.recipient_acknowledged_at ?? row.recipientAcknowledgedAt ?? null,
+    completedAt: row.completed_at ?? row.completedAt ?? null,
+    resultCode: row.result_code ?? row.resultCode ?? null,
+  };
 }
 
 function normalizeDirectGroupInvitation(row: Row) {
@@ -1773,6 +1866,7 @@ function operatorBootstrapPayload(input: {
   directMessages: Row[];
   deliveryBindings: Row[];
   deliveryJobs: Row[];
+  forumConferenceDeliveryJobs: Row[];
   directGroupInvitations: Row[];
   directGroupParticipantStates: Row[];
   gates: Row[];
@@ -1821,6 +1915,7 @@ function operatorBootstrapPayload(input: {
     messages: input.directMessages.map((row) => normalizeDirectMessage(row)),
     deliveryBindings: input.deliveryBindings.map((row) => normalizeDeliveryBinding(row)),
     deliveryJobs: input.deliveryJobs.map((row) => normalizeOperatorDeliveryJob(row)),
+    forumConferenceDeliveryJobs: input.forumConferenceDeliveryJobs.map((row) => normalizeForumConferenceDeliveryJob(row)),
     directGroupInvitations: input.directGroupInvitations.map((row) => normalizeDirectGroupInvitation(row)),
     directGroupParticipantStates: input.directGroupParticipantStates.map((row) => normalizeDirectGroupParticipantState(row)),
     gates: input.gates.map((row) =>
@@ -1856,6 +1951,7 @@ async function operatorBootstrap(env: Env) {
       directMessages: memory.directMessages as Row[],
       deliveryBindings: [],
       deliveryJobs: [],
+      forumConferenceDeliveryJobs: [],
       directGroupInvitations: [],
       directGroupParticipantStates: [],
       gates: [],
@@ -1926,6 +2022,12 @@ async function operatorBootstrap(env: Env) {
                 next_attempt_at, lease_expires_at, started_at, recipient_acknowledged_at, completed_at, result_code
          FROM direct_delivery_jobs ORDER BY updated_at DESC LIMIT 250`,
       );
+      const forumConferenceDeliveryJobs = await pgAll<Row>(
+        client,
+        `SELECT id, session_id, source_kind, source_control_event_id, recipient_agent_id, status, attempts,
+                next_attempt_at, lease_expires_at, started_at, recipient_acknowledged_at, completed_at, result_code
+         FROM forum_conference_delivery_jobs ORDER BY updated_at DESC LIMIT 250`,
+      );
       const directGroupInvitations = await pgAll<Row>(
         client,
         "SELECT id, conversation_id, topic, status, created_at, closed_at FROM direct_group_invitations ORDER BY created_at DESC",
@@ -1971,6 +2073,7 @@ async function operatorBootstrap(env: Env) {
         directMessages: directMessages.results,
         deliveryBindings: deliveryBindings.results,
         deliveryJobs: deliveryJobs.results,
+        forumConferenceDeliveryJobs: forumConferenceDeliveryJobs.results,
         directGroupInvitations: directGroupInvitations.results,
         directGroupParticipantStates: directGroupParticipantStates.results,
         gates: gates.results,
@@ -1999,6 +2102,7 @@ async function operatorBootstrap(env: Env) {
     directMessages,
     deliveryBindings,
     deliveryJobs,
+    forumConferenceDeliveryJobs,
     directGroupInvitations,
     directGroupParticipantStates,
     gates,
@@ -2055,6 +2159,13 @@ async function operatorBootstrap(env: Env) {
       )
       .all<Row>(),
     database
+      .prepare(
+        `SELECT id, session_id, source_kind, source_control_event_id, recipient_agent_id, status, attempts,
+                next_attempt_at, lease_expires_at, started_at, recipient_acknowledged_at, completed_at, result_code
+         FROM forum_conference_delivery_jobs ORDER BY updated_at DESC LIMIT 250`,
+      )
+      .all<Row>(),
+    database
       .prepare("SELECT id, conversation_id, topic, status, created_at, closed_at FROM direct_group_invitations ORDER BY created_at DESC")
       .all<Row>(),
     database
@@ -2102,6 +2213,7 @@ async function operatorBootstrap(env: Env) {
     directMessages: directMessages.results,
     deliveryBindings: deliveryBindings.results,
     deliveryJobs: deliveryJobs.results,
+    forumConferenceDeliveryJobs: forumConferenceDeliveryJobs.results,
     directGroupInvitations: directGroupInvitations.results,
     directGroupParticipantStates: directGroupParticipantStates.results,
     gates: gates.results,
@@ -3232,6 +3344,206 @@ async function completeDeliveryJob(request: Request, env: Env, jobId: string, au
   return json({ job: normalizeDeliveryJob(updated ?? {}), result: effectiveResult });
 }
 
+async function recoverExpiredForumConferenceDeliveryLeases(database: D1Database | PgDatabase) {
+  const timestamp = now();
+  const { results: expired } = await database
+    .prepare(
+      `SELECT id, attempts, started_at
+       FROM forum_conference_delivery_jobs
+       WHERE status = 'leased' AND lease_expires_at < ?`,
+    )
+    .bind(timestamp)
+    .all<Row>();
+  for (const job of expired) {
+    const attempts = Number(job.attempts ?? 0);
+    if (job.started_at) {
+      await database
+        .prepare(
+          `UPDATE forum_conference_delivery_jobs
+           SET status = 'uncertain_after_start', completed_at = ?, updated_at = ?, result_code = 'lease_expired_after_start'
+           WHERE id = ? AND status = 'leased' AND lease_expires_at < ?`,
+        )
+        .bind(timestamp, timestamp, job.id, timestamp)
+        .run();
+    } else if (attempts >= 5) {
+      await database
+        .prepare(
+          `UPDATE forum_conference_delivery_jobs
+           SET status = 'cancelled', completed_at = ?, updated_at = ?, result_code = 'retry_exhausted'
+           WHERE id = ? AND status = 'leased' AND lease_expires_at < ?`,
+        )
+        .bind(timestamp, timestamp, job.id, timestamp)
+        .run();
+    } else {
+      await database
+        .prepare(
+          `UPDATE forum_conference_delivery_jobs
+           SET status = 'retry', attempts = attempts + 1, next_attempt_at = ?,
+               lease_owner = NULL, lease_token_hash = NULL, lease_expires_at = NULL, updated_at = ?, result_code = 'lease_expired'
+           WHERE id = ? AND status = 'leased' AND started_at IS NULL AND lease_expires_at < ?`,
+        )
+        .bind(retryAt(attempts + 1), timestamp, job.id, timestamp)
+        .run();
+    }
+  }
+}
+
+async function claimForumConferenceDeliveryJob(request: Request, env: Env, auth: Extract<AuthContext, { ok: true }>) {
+  if (!auth.relay) return json({ error: "Unauthorized." }, 401);
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Delivery relay requires durable storage." }, 503);
+  const input = await body(request);
+  const leaseOwner = requireStringField(input, "leaseOwner");
+  if (!leaseOwner || leaseOwner.length > 120) return json({ error: "leaseOwner is required and must be short." }, 400);
+  const requestedSeconds = Number(input.leaseSeconds ?? 30);
+  const leaseSeconds = Number.isFinite(requestedSeconds) ? Math.min(300, Math.max(5, Math.floor(requestedSeconds))) : 30;
+  const database = db.db;
+  await recoverExpiredForumConferenceDeliveryLeases(database);
+  const timestamp = now();
+  const candidate = await database
+    .prepare(
+      `SELECT j.*, s.thread_id, s.status AS conference_status, s.created_by_human_id, s.created_by_display_name,
+              e.author_human_id, e.author_display_name,
+              b.adapter_key, b.target_ref, b.display_label, a.handle, a.display_name
+       FROM forum_conference_delivery_jobs j
+       JOIN forum_conference_sessions s ON s.id = j.session_id
+       LEFT JOIN forum_conference_control_events e ON e.id = j.source_control_event_id
+       JOIN agent_delivery_bindings b ON b.id = j.binding_id AND b.status = 'active' AND b.revision = j.binding_revision
+       JOIN agent_identities a ON a.id = j.recipient_agent_id AND a.status = 'approved'
+       WHERE j.status IN ('queued', 'retry', 'deferred_busy')
+         AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= ?)
+         AND (
+           (j.source_kind = 'conference_waiting' AND s.status = 'waiting')
+           OR (j.source_kind = 'conference_go' AND s.status = 'active')
+           OR (j.source_kind = 'conference_stop' AND s.status = 'stopped')
+         )
+       ORDER BY j.created_at ASC, j.id ASC
+       LIMIT 1`,
+    )
+    .bind(timestamp)
+    .first<Row>();
+  if (!candidate) return json({ job: null });
+  const leaseToken = crypto.randomUUID().replaceAll("-", "");
+  const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1_000).toISOString();
+  await database
+    .prepare(
+      `UPDATE forum_conference_delivery_jobs
+       SET status = 'leased', attempts = attempts + 1, lease_owner = ?, lease_token_hash = ?, lease_expires_at = ?, updated_at = ?
+       WHERE id = ? AND status IN ('queued', 'retry', 'deferred_busy')`,
+    )
+    .bind(leaseOwner, await sha256(leaseToken), leaseExpiresAt, timestamp, candidate.id)
+    .run();
+  const claimed = await database
+    .prepare("SELECT * FROM forum_conference_delivery_jobs WHERE id = ? AND lease_owner = ? AND lease_token_hash = ? AND status = 'leased'")
+    .bind(candidate.id, leaseOwner, await sha256(leaseToken))
+    .first<Row>();
+  if (!claimed) return json({ job: null });
+  return json({
+    job: {
+      ...normalizeForumConferenceDeliveryJob({ ...candidate, ...claimed }),
+      createdAt: candidate.created_at,
+      recipient: { agentId: candidate.recipient_agent_id, handle: candidate.handle, displayName: candidate.display_name },
+      binding: normalizeDeliveryBinding({
+        id: candidate.binding_id,
+        agent_id: candidate.recipient_agent_id,
+        adapter_key: candidate.adapter_key,
+        target_ref: candidate.target_ref,
+        display_label: candidate.display_label,
+        status: "active",
+        revision: candidate.binding_revision,
+      }, true),
+      sender: {
+        kind: "human",
+        id: candidate.author_human_id ?? candidate.created_by_human_id,
+        displayName: candidate.author_display_name ?? candidate.created_by_display_name,
+      },
+      forumConference: {
+        id: candidate.session_id,
+        threadId: candidate.thread_id,
+        status: candidate.conference_status,
+      },
+      leaseToken,
+      leaseExpiresAt,
+    },
+  });
+}
+
+async function forumConferenceDeliveryJobStart(request: Request, env: Env, jobId: string, auth: Extract<AuthContext, { ok: true }>) {
+  if (!auth.relay) return json({ error: "Unauthorized." }, 401);
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Delivery relay requires durable storage." }, 503);
+  const leaseToken = requireStringField(await body(request), "leaseToken");
+  if (!leaseToken) return json({ error: "leaseToken is required." }, 400);
+  const timestamp = now();
+  await db.db
+    .prepare(
+      `UPDATE forum_conference_delivery_jobs
+       SET started_at = COALESCE(started_at, ?), updated_at = ?
+       WHERE id = ? AND status = 'leased' AND lease_token_hash = ? AND lease_expires_at >= ?`,
+    )
+    .bind(timestamp, timestamp, jobId, await sha256(leaseToken), timestamp)
+    .run();
+  const job = await db.db
+    .prepare("SELECT * FROM forum_conference_delivery_jobs WHERE id = ?")
+    .bind(jobId)
+    .first<Row>();
+  if (!job || job.status !== "leased" || job.lease_token_hash !== await sha256(leaseToken) || !job.started_at || String(job.lease_expires_at ?? "") < timestamp) {
+    return json({ error: "Delivery job is not leased by this relay." }, 409);
+  }
+  return json({ job: normalizeForumConferenceDeliveryJob(job), started: true });
+}
+
+async function completeForumConferenceDeliveryJob(request: Request, env: Env, jobId: string, auth: Extract<AuthContext, { ok: true }>) {
+  if (!auth.relay) return json({ error: "Unauthorized." }, 401);
+  const db = requireDb(env);
+  if (!db.ok) return json({ error: "Delivery relay requires durable storage." }, 503);
+  const input = await body(request);
+  const leaseToken = requireStringField(input, "leaseToken");
+  const requestedResult = requireStringField(input, "result") as DeliveryResultCode;
+  if (!leaseToken || !["delivered", "deferred_busy", "retry", "uncertain_after_start", "failed_before_start"].includes(requestedResult)) {
+    return json({ error: "leaseToken and a supported result are required." }, 400);
+  }
+  const detail = typeof input.detail === "string" ? input.detail.trim() : "";
+  if (detail.length > 240) return json({ error: "detail is too long." }, 400);
+  const detailRedaction = redactionBlock(detail);
+  if (!detailRedaction.ok) return detailRedaction.response;
+  const database = db.db;
+  await recoverExpiredForumConferenceDeliveryLeases(database);
+  const tokenHash = await sha256(leaseToken);
+  const job = await database
+    .prepare("SELECT * FROM forum_conference_delivery_jobs WHERE id = ? AND status = 'leased' AND lease_token_hash = ?")
+    .bind(jobId, tokenHash)
+    .first<Row>();
+  if (!job) return json({ error: "Delivery job is not leased by this relay." }, 409);
+  const timestamp = now();
+  const started = Boolean(job.started_at);
+  const effectiveResult: DeliveryResultCode = started && ["retry", "deferred_busy", "failed_before_start"].includes(requestedResult)
+    ? "uncertain_after_start"
+    : requestedResult;
+  const status: DeliveryJobStatus = effectiveResult === "delivered"
+    ? "delivered"
+    : effectiveResult === "deferred_busy"
+      ? "deferred_busy"
+      : effectiveResult === "retry" || effectiveResult === "failed_before_start"
+        ? "retry"
+        : "uncertain_after_start";
+  const nextAttemptAt = status === "retry" || status === "deferred_busy"
+    ? retryAt(Number(job.attempts ?? 0))
+    : null;
+  const completedAt = ["delivered", "uncertain_after_start"].includes(status) ? timestamp : null;
+  await database
+    .prepare(
+      `UPDATE forum_conference_delivery_jobs
+       SET status = ?, next_attempt_at = ?, completed_at = ?, result_code = ?, detail = ?,
+           lease_owner = NULL, lease_token_hash = NULL, lease_expires_at = NULL, updated_at = ?
+       WHERE id = ? AND status = 'leased' AND lease_token_hash = ?`,
+    )
+    .bind(status, nextAttemptAt, completedAt, effectiveResult, detail, timestamp, jobId, tokenHash)
+    .run();
+  const updated = await database.prepare("SELECT * FROM forum_conference_delivery_jobs WHERE id = ?").bind(jobId).first<Row>();
+  return json({ job: normalizeForumConferenceDeliveryJob(updated ?? {}), result: effectiveResult });
+}
+
 async function acknowledgeDelivery(request: Request, env: Env, auth: Extract<AuthContext, { ok: true }>) {
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Delivery acknowledgements require durable storage." }, 503);
@@ -3253,8 +3565,23 @@ async function acknowledgeDelivery(request: Request, env: Env, auth: Extract<Aut
     .prepare("SELECT id, recipient_acknowledged_at FROM direct_delivery_jobs WHERE id = ? AND recipient_agent_id = ?")
     .bind(deliveryId, agentId)
     .first<{ id: string; recipient_acknowledged_at?: string }>();
-  if (!acknowledgement?.recipient_acknowledged_at) return json({ error: "Delivery is not available to this recipient." }, 404);
-  return json({ deliveryId: acknowledgement.id, acknowledgedAt: acknowledgement.recipient_acknowledged_at });
+  if (acknowledgement?.recipient_acknowledged_at) {
+    return json({ deliveryId: acknowledgement.id, acknowledgedAt: acknowledgement.recipient_acknowledged_at });
+  }
+  await db.db
+    .prepare(
+      `UPDATE forum_conference_delivery_jobs
+       SET recipient_acknowledged_at = COALESCE(recipient_acknowledged_at, ?), updated_at = ?
+       WHERE id = ? AND recipient_agent_id = ? AND status IN ('leased', 'delivered', 'uncertain_after_start')`,
+    )
+    .bind(timestamp, timestamp, deliveryId, agentId)
+    .run();
+  const conferenceAcknowledgement = await db.db
+    .prepare("SELECT id, recipient_acknowledged_at FROM forum_conference_delivery_jobs WHERE id = ? AND recipient_agent_id = ?")
+    .bind(deliveryId, agentId)
+    .first<{ id: string; recipient_acknowledged_at?: string }>();
+  if (!conferenceAcknowledgement?.recipient_acknowledged_at) return json({ error: "Delivery is not available to this recipient." }, 404);
+  return json({ deliveryId: conferenceAcknowledgement.id, acknowledgedAt: conferenceAcknowledgement.recipient_acknowledged_at });
 }
 
 async function markBreakpoint(request: Request, env: Env, auth?: AuthContext) {
@@ -4606,6 +4933,11 @@ async function addForumConferenceParticipant(request: Request, env: Env, session
     )
     .bind(sessionId, agentId, now())
     .run();
+  await atomicWrites(db.db, await forumConferenceDeliveryWrites(db.db, {
+    sessionId,
+    sourceKind: "conference_waiting",
+    recipientAgentId: agentId,
+  }));
   const updated = await forumConferenceSession(db.db, sessionId);
   return json({ session: normalizeForumConferenceSession(updated!.session, updated!.participants, updated!.controlEvents) });
 }
@@ -4755,6 +5087,21 @@ async function postForumConferenceSignal(
   );
   if (!event) return json({ error: "The forum conference state changed before this control post was accepted. Refresh and try again." }, 409);
   const reply = await completeForumConferenceControlEvent(db.db, current.session, event);
+  if (action === "go") {
+    await cancelForumConferenceDeliveryJobs(db.db, sessionId, ["conference_waiting"], "conference_started");
+    await atomicWrites(db.db, await forumConferenceDeliveryWrites(db.db, {
+      sessionId,
+      sourceKind: "conference_go",
+      sourceControlEventId: String(event.id),
+    }));
+  } else {
+    await cancelForumConferenceDeliveryJobs(db.db, sessionId, ["conference_waiting", "conference_go"], "conference_stopped");
+    await atomicWrites(db.db, await forumConferenceDeliveryWrites(db.db, {
+      sessionId,
+      sourceKind: "conference_stop",
+      sourceControlEventId: String(event.id),
+    }));
+  }
   const updated = await forumConferenceSession(db.db, sessionId);
   return json({
     session: normalizeForumConferenceSession(updated!.session, updated!.participants, updated!.controlEvents),
@@ -4975,6 +5322,15 @@ export async function onRequest(context: { request: Request; env: Env }) {
   }
   if (method === "POST" && path.startsWith("relay/delivery-jobs/") && path.endsWith("/result")) {
     return completeDeliveryJob(request, env, path.split("/").at(-2) ?? "", auth);
+  }
+  if (method === "POST" && path === "relay/forum-conference-delivery-jobs/claim") {
+    return claimForumConferenceDeliveryJob(request, env, auth);
+  }
+  if (method === "POST" && path.startsWith("relay/forum-conference-delivery-jobs/") && path.endsWith("/started")) {
+    return forumConferenceDeliveryJobStart(request, env, path.split("/").at(-2) ?? "", auth);
+  }
+  if (method === "POST" && path.startsWith("relay/forum-conference-delivery-jobs/") && path.endsWith("/result")) {
+    return completeForumConferenceDeliveryJob(request, env, path.split("/").at(-2) ?? "", auth);
   }
 
     return json({ error: "Not found." }, 404);

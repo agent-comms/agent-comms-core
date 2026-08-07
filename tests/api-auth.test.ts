@@ -299,9 +299,27 @@ type MockForumConferenceEvent = {
   completed_at?: string;
 };
 
+type MockForumConferenceDeliveryJob = {
+  id: string;
+  session_id: string;
+  source_kind: "conference_waiting" | "conference_go" | "conference_stop";
+  source_control_event_id?: string | null;
+  recipient_agent_id: string;
+  binding_id: string;
+  binding_revision: number;
+  status: string;
+  attempts: number;
+  created_at: string;
+  updated_at: string;
+  result_code?: string;
+  completed_at?: string;
+};
+
 class MockForumConferenceDb {
   sessions: MockForumConferenceSession[] = [];
   participants: Array<{ session_id: string; agent_id: string; joined_at: string }> = [];
+  bindings: Array<{ id: string; agent_id: string; revision: number; status: "active" | "disabled" }> = [];
+  deliveryJobs: MockForumConferenceDeliveryJob[] = [];
   events: MockForumConferenceEvent[] = [];
   replies: Array<Record<string, unknown>> = [];
 
@@ -358,6 +376,20 @@ class MockForumConferenceStatement {
   }
 
   async all<T = unknown>(): Promise<{ results: T[] }> {
+    if (this.query.includes("FROM forum_conference_participants p") && this.query.includes("JOIN agent_delivery_bindings")) {
+      const [sessionId, requestedAgentId] = this.values.map(String);
+      return {
+        results: this.db.participants
+          .filter((participant) => participant.session_id === sessionId && (!requestedAgentId || participant.agent_id === requestedAgentId))
+          .flatMap((participant) => this.db.bindings
+            .filter((binding) => binding.agent_id === participant.agent_id && binding.status === "active")
+            .map((binding) => ({
+              agent_id: participant.agent_id,
+              binding_id: binding.id,
+              binding_revision: binding.revision,
+            }))) as T[],
+      };
+    }
     if (this.query.includes("FROM forum_conference_participants")) {
       return { results: this.db.participants.filter((participant) => participant.session_id === String(this.values[0])) as T[] };
     }
@@ -384,6 +416,44 @@ class MockForumConferenceStatement {
       const [sessionId, agentId, joinedAt] = this.values.map(String);
       if (!this.db.participants.some((participant) => participant.session_id === sessionId && participant.agent_id === agentId)) {
         this.db.participants.push({ session_id: sessionId, agent_id: agentId, joined_at: joinedAt });
+      }
+    }
+    if (this.query.includes("INSERT INTO forum_conference_delivery_jobs")) {
+      const [id, sessionId, sourceKind, sourceControlEventId, recipientAgentId, bindingId, bindingRevision, createdAt, updatedAt] = this.values;
+      if (!this.db.deliveryJobs.some((job) =>
+        job.session_id === String(sessionId) &&
+        job.source_kind === String(sourceKind) &&
+        job.recipient_agent_id === String(recipientAgentId) &&
+        job.binding_revision === Number(bindingRevision),
+      )) {
+        this.db.deliveryJobs.push({
+          id: String(id),
+          session_id: String(sessionId),
+          source_kind: String(sourceKind) as MockForumConferenceDeliveryJob["source_kind"],
+          source_control_event_id: sourceControlEventId === null ? null : String(sourceControlEventId),
+          recipient_agent_id: String(recipientAgentId),
+          binding_id: String(bindingId),
+          binding_revision: Number(bindingRevision),
+          status: "queued",
+          attempts: 0,
+          created_at: String(createdAt),
+          updated_at: String(updatedAt),
+        });
+      }
+    }
+    if (this.query.includes("UPDATE forum_conference_delivery_jobs") && this.query.includes("SET status = 'cancelled'")) {
+      const [resultCode, completedAt, updatedAt, sessionId, ...sourceKinds] = this.values;
+      for (const job of this.db.deliveryJobs) {
+        if (
+          job.session_id === String(sessionId) &&
+          sourceKinds.map(String).includes(job.source_kind) &&
+          ["queued", "retry", "deferred_busy"].includes(job.status)
+        ) {
+          job.status = "cancelled";
+          job.result_code = String(resultCode);
+          job.completed_at = String(completedAt);
+          job.updated_at = String(updatedAt);
+        }
       }
     }
     if (this.query.includes("INSERT INTO forum_conference_control_events")) {
@@ -511,6 +581,16 @@ describe("API auth", () => {
                     attempts: 1,
                     detail: "relay-only diagnostic",
                   }]
+                : query.includes("FROM forum_conference_delivery_jobs")
+                  ? [{
+                      id: "conference_delivery_1",
+                      session_id: "conference_1",
+                      source_kind: "conference_go",
+                      recipient_agent_id: "agent_a",
+                      status: "delivered",
+                      attempts: 1,
+                      detail: "conference relay-only diagnostic",
+                    }]
                 : [],
           }),
           run: async () => ({}),
@@ -534,14 +614,24 @@ describe("API auth", () => {
       operator?: { capabilities?: { directGroups?: { create?: boolean } } };
       deliveryBindings?: Array<Record<string, unknown>>;
       deliveryJobs?: Array<Record<string, unknown>>;
+      forumConferenceDeliveryJobs?: Array<Record<string, unknown>>;
     };
     expect(payload.operator?.capabilities?.directGroups?.create).toBe(false);
     expect(payload.deliveryBindings?.[0]).toMatchObject({ id: "binding_1", agentId: "agent_a", status: "active" });
     expect(payload.deliveryBindings?.[0]).not.toHaveProperty("targetRef");
     expect(payload.deliveryJobs?.[0]).toMatchObject({ id: "job_1", recipientAgentId: "agent_a", status: "delivered" });
     expect(payload.deliveryJobs?.[0]).not.toHaveProperty("detail");
+    expect(payload.forumConferenceDeliveryJobs?.[0]).toMatchObject({
+      id: "conference_delivery_1",
+      forumConferenceId: "conference_1",
+      kind: "conference_go",
+      recipientAgentId: "agent_a",
+      status: "delivered",
+    });
+    expect(payload.forumConferenceDeliveryJobs?.[0]).not.toHaveProperty("detail");
     expect(JSON.stringify(payload)).not.toContain("relay-only-target");
     expect(JSON.stringify(payload)).not.toContain("relay-only diagnostic");
+    expect(JSON.stringify(payload)).not.toContain("conference relay-only diagnostic");
   });
 
   it("allows unauthenticated signup requests as pending-only onboarding", async () => {
@@ -1542,6 +1632,7 @@ describe("API auth", () => {
 
   it("persists named Go and Stop control events exactly once across repeated operator posts", async () => {
     const db = new MockForumConferenceDb();
+    db.bindings.push({ id: "binding_agent_a", agent_id: "agent_a", revision: 1, status: "active" });
     const env = {
       DB: db,
       OPERATOR_API_TOKEN: "operator-token",
@@ -1596,6 +1687,11 @@ describe("API auth", () => {
       followUp: "Agent A implements the agreed change.",
     });
     expect(replayedPayload.session?.controlEvents).toHaveLength(2);
+    expect(db.deliveryJobs.map((job) => ({ kind: job.source_kind, status: job.status, result: job.result_code }))).toEqual([
+      { kind: "conference_waiting", status: "cancelled", result: "conference_started" },
+      { kind: "conference_go", status: "cancelled", result: "conference_stopped" },
+      { kind: "conference_stop", status: "queued", result: undefined },
+    ]);
   });
 
   it("blocks a waiting conference participant from posting before the human Go signal", async () => {

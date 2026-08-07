@@ -168,6 +168,23 @@ export interface DeliveryJob {
   detail?: string;
 }
 
+/** Sanitized conference wake-up status; never a relay target or payload. */
+export interface ForumConferenceDeliveryJob {
+  id: string;
+  forumConferenceId: string;
+  kind: "conference_waiting" | "conference_go" | "conference_stop";
+  sourceControlEventId?: string | null;
+  recipientAgentId: string;
+  status: DeliveryJob["status"];
+  attempts: number;
+  nextAttemptAt?: string | null;
+  leaseExpiresAt?: string | null;
+  startedAt?: string | null;
+  recipientAcknowledgedAt?: string | null;
+  completedAt?: string | null;
+  resultCode?: string | null;
+}
+
 /** A human-started, bounded direct-group invitation. */
 export interface DirectGroupInvitation {
   id: string;
@@ -277,6 +294,7 @@ export interface AgentCommsState {
   /** Sanitized operator delivery telemetry; never relay targets or payloads. */
   deliveryBindings?: DeliveryBinding[];
   deliveryJobs?: Omit<DeliveryJob, "detail">[];
+  forumConferenceDeliveryJobs?: ForumConferenceDeliveryJob[];
   directGroupInvitations?: DirectGroupInvitation[];
   directGroupParticipantStates?: DirectGroupParticipantState[];
   operatorCapabilities?: OperatorCapabilities;
