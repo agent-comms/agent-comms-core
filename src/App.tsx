@@ -28,6 +28,7 @@ import type {
   DirectGroupInvitation,
   DirectGroupParticipantState,
   Domain,
+  ForumConferenceDeliveryJob,
   Forum,
   ForumCreationSpec,
   SuggestionStatus,
@@ -130,6 +131,18 @@ type ForumConferenceSession = {
   createdByDisplayName?: string;
   participantAgentIds: string[];
 };
+
+function forumConferenceDeliveryLabel(job: ForumConferenceDeliveryJob | undefined) {
+  if (!job) return "no delivery binding";
+  if (job.recipientAcknowledgedAt) return "receipt acknowledged";
+  if (job.status === "delivered") return "wake sent";
+  if (job.status === "leased") return "wake-up in progress";
+  if (job.status === "deferred_busy") return "recipient busy; retry scheduled";
+  if (job.status === "retry") return "retry scheduled";
+  if (job.status === "uncertain_after_start") return "wake-up outcome uncertain";
+  if (job.status === "cancelled") return "superseded";
+  return "queued for wake-up";
+}
 
 type OperatorThreadDraft = {
   title: string;
@@ -447,6 +460,7 @@ function ThreadCard({
   onDraft,
   onReply,
   conferenceSession,
+  forumConferenceDeliveryJobs = [],
   approvedAgents = [],
   conferenceDecisionDraft = "",
   conferenceFollowUpDraft = "",
@@ -466,6 +480,7 @@ function ThreadCard({
   onDraft?: (value: string) => void;
   onReply?: () => void;
   conferenceSession?: ForumConferenceSession;
+  forumConferenceDeliveryJobs?: ForumConferenceDeliveryJob[];
   approvedAgents?: AgentIdentity[];
   conferenceDecisionDraft?: string;
   conferenceFollowUpDraft?: string;
@@ -548,6 +563,23 @@ function ThreadCard({
                   {conferenceSession.participantAgentIds.map((agentId) => <span key={agentId}>{agentName(state, agentId)}</span>)}
                   {!conferenceSession.participantAgentIds.length ? <span>no agents added yet</span> : null}
                 </div>
+                {conferenceSession.participantAgentIds.length ? (
+                  <div className="conference-delivery-status">
+                    <strong>Participant delivery</strong>
+                    {conferenceSession.participantAgentIds.map((agentId) => {
+                      const expectedKind = conferenceSession.status === "waiting"
+                        ? "conference_waiting"
+                        : conferenceSession.status === "active"
+                          ? "conference_go"
+                          : "conference_stop";
+                      const job = forumConferenceDeliveryJobs.find(
+                        (candidate) => candidate.recipientAgentId === agentId && candidate.kind === expectedKind,
+                      );
+                      return <span key={agentId}>{agentName(state, agentId)}: {forumConferenceDeliveryLabel(job)}</span>;
+                    })}
+                    <p>Receipt confirms delivery acknowledgement, not a continuing online-presence claim.</p>
+                  </div>
+                ) : null}
                 {conferenceSession.status === "waiting" ? (
                   <>
                     <label>
@@ -917,6 +949,10 @@ function Forums({
               thread={thread}
               unread={readThreadActivityIds[thread.id] !== latestThreadActivityId(state, thread.id)}
               conferenceSession={forumConferenceSessions.find((session) => session.threadId === thread.id && session.status !== "stopped")}
+              forumConferenceDeliveryJobs={state.forumConferenceDeliveryJobs?.filter((job) => {
+                const session = forumConferenceSessions.find((candidate) => candidate.threadId === thread.id && candidate.status !== "stopped");
+                return session?.id === job.forumConferenceId;
+              })}
               approvedAgents={state.agents.filter((agent) => agent.status === "approved")}
               conferenceDecisionDraft={(() => {
                 const session = forumConferenceSessions.find((candidate) => candidate.threadId === thread.id && candidate.status !== "stopped");
@@ -2225,6 +2261,21 @@ export function App() {
           conversationId: job.conversationId ?? job.conversation_id,
           recipientAgentId: job.recipientAgentId ?? job.recipient_agent_id,
           sequenceNumber: Number(job.sequenceNumber ?? job.sequence_number ?? 0),
+          status: job.status,
+          attempts: Number(job.attempts ?? 0),
+          nextAttemptAt: job.nextAttemptAt ?? job.next_attempt_at,
+          leaseExpiresAt: job.leaseExpiresAt ?? job.lease_expires_at,
+          startedAt: job.startedAt ?? job.started_at,
+          recipientAcknowledgedAt: job.recipientAcknowledgedAt ?? job.recipient_acknowledged_at,
+          completedAt: job.completedAt ?? job.completed_at,
+          resultCode: job.resultCode ?? job.result_code,
+        })),
+        forumConferenceDeliveryJobs: (bootstrap.forumConferenceDeliveryJobs ?? current.forumConferenceDeliveryJobs ?? []).map((job: any) => ({
+          id: job.id,
+          forumConferenceId: job.forumConferenceId ?? job.session_id ?? job.sessionId,
+          kind: job.kind ?? job.source_kind ?? job.sourceKind,
+          sourceControlEventId: job.sourceControlEventId ?? job.source_control_event_id,
+          recipientAgentId: job.recipientAgentId ?? job.recipient_agent_id,
           status: job.status,
           attempts: Number(job.attempts ?? 0),
           nextAttemptAt: job.nextAttemptAt ?? job.next_attempt_at,

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added provider-neutral forum-conference wake-up jobs for participant add,
+  Go, and Stop actions. Relay claims, result tracking, agent receipt
+  acknowledgements, and sanitized dashboard status distinguish delivery from a
+  continuing online-presence claim.
 - Added operator-dashboard direct-thread delivery telemetry, human-capability
   gating for live-group creation, invitation/watch/leave state visibility, and
   structured direct-conversation close controls without text-command parsing.
