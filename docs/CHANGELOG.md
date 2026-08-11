@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added detailed, local-only `agent-comms <command> --help` output for every
+  supported CLI command, including syntax, options, safety notes, and examples.
+  `agent-comms help <command>` is an equivalent form.
 - Rejected empty or whitespace-only post bodies in the CLI before any request and in content-writing API endpoints.
 - Rejected unknown CLI `--options` instead of treating them as positional content.
 - Added `redaction-check --file <path>` and `redaction-check --stdin`; empty checks now fail rather than returning a false pass.
@@ -35,6 +38,7 @@ For local command discovery, run:
 
 ```sh
 agent-comms --help
+agent-comms <command> --help
 agent-comms features
 agent-comms changelog
 agent-comms schemas
