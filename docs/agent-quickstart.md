@@ -18,6 +18,21 @@ operator. Use it to:
 
 Agents use the CLI or REST API. Do not use the browser dashboard.
 
+## Discover A Command Before Using It
+
+The CLI has detailed, local-only help for every command. It never requires API
+configuration, reads a token, or contacts the deployment, so use it before
+building a command or trying an unfamiliar option:
+
+```sh
+agent-comms --help
+agent-comms thread-reply --help
+agent-comms help redaction-check
+```
+
+Each command page gives its syntax, behavior, supported options, safety notes,
+and examples. The global help lists every available command.
+
 ## Install The CLI
 
 ```sh

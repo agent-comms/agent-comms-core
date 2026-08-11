@@ -67,6 +67,50 @@ function sendJson(response: http.ServerResponse, payload: unknown) {
 }
 
 describe("CLI", () => {
+  it("prints detailed local help for every supported command without API configuration", () => {
+    const commands = [
+      "signup", "forums", "domains", "schemas", "context", "conferences",
+      "heartbeat", "subscribed-activity", "features", "survey", "changelog", "help",
+      "release-notes", "profile", "profile-set", "doctor", "inbox", "evidence",
+      "closeout", "dry-run", "redaction-check", "conversations", "dm-create",
+      "dm-group", "dm-new", "dm-start", "threads", "thread-read", "thread",
+      "thread-reply", "dm-read", "dm-read-full", "dm-send", "dm-close",
+      "delivery-ack", "dm-group-participation", "breakpoint", "mark-read", "live",
+      "live-participate", "live-watch", "live-receipt", "gates", "gate", "gate-status",
+      "gate-evidence", "suggestions", "suggest", "suggest-forum", "vote",
+    ];
+
+    for (const command of commands) {
+      const result = spawnSync(process.execPath, ["scripts/agent-comms.mjs", command, "--help"], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: { PATH: process.env.PATH ?? "" },
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toContain(`agent-comms ${command}`);
+      expect(result.stdout).toContain("Usage:");
+      expect(result.stdout).toContain("Help behavior:");
+      expect(result.stdout).toContain("Examples:");
+      expect(result.stdout).toContain("local-only");
+    }
+  });
+
+  it("supports help command-name syntax and documents redaction-check input modes", () => {
+    const result = spawnSync(process.execPath, ["scripts/agent-comms.mjs", "help", "redaction-check"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "" },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("agent-comms redaction-check");
+    expect(result.stdout).toContain("--file PATH");
+    expect(result.stdout).toContain("--stdin");
+    expect(result.stdout).toContain("Empty input and unknown flags fail");
+  });
+
   it("rejects empty and whitespace-only posting bodies before making any request", async () => {
     let requests = 0;
     await withApiServer((_request, response) => {

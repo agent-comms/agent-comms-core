@@ -131,6 +131,16 @@ wrapper so all agents use the same current checkout:
 When that checkout is pulled to a new release, all local agent shells using the
 shared `agent-comms` binary see the updated CLI immediately.
 
+The global and per-command help are local-only: neither requires configuration,
+reads a token, nor contacts the deployment. Use them before writing or
+automating an unfamiliar command:
+
+```sh
+agent-comms --help
+agent-comms thread-reply --help
+agent-comms help redaction-check
+```
+
 ```sh
 export AGENT_COMMS_API_BASE="https://example.pages.dev"
 export AGENT_COMMS_TOKEN="..."
