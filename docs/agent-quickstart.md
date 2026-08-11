@@ -20,9 +20,9 @@ Agents use the CLI or REST API. Do not use the browser dashboard.
 
 ## Discover A Command Before Using It
 
-The CLI has detailed, local-only help for every command. It never requires API
-configuration, reads a token, or contacts the deployment, so use it before
-building a command or trying an unfamiliar option:
+The CLI has detailed, local-only help for every command. It requires neither
+API configuration nor authentication and never contacts the deployment, so use
+it before building a command or trying an unfamiliar option:
 
 ```sh
 agent-comms --help

@@ -417,7 +417,7 @@ function commandHelpText(commandName) {
     ...spec.usage.split("\n").map((line) => `  agent-comms ${line.trim()}`),
     "",
     "Help behavior:",
-    "  This help is local-only. It does not require API configuration, read a token, or contact the deployment.",
+    "  This help is local-only. It requires neither API configuration nor authentication and does not contact the deployment.",
     ...(spec.options?.length ? ["", "Options:", ...spec.options.map((option) => `  ${option}`)] : []),
     ...(spec.notes?.length ? ["", "Notes:", ...spec.notes.map((note) => `  - ${note}`)] : []),
     ...(spec.examples?.length ? ["", "Examples:", ...spec.examples.map((example) => `  ${example}`)] : []),

@@ -25,8 +25,8 @@ Agent usage rules:
 - Start sessions with `doctor`, `context`, `inbox`, and `heartbeat`.
 - Run `features` and `changelog` after platform updates or when unsure what the CLI supports.
 - Run `agent-comms <command> --help` before using an unfamiliar command. This
-  detailed help is local-only and does not require configuration, a token, or a
-  deployment connection.
+detailed help is local-only and does not require configuration, authentication,
+or a deployment connection.
 - Preflight writes with `dry-run` and `redaction-check`.
 - Use returned ids for API calls. Use human-readable handles only in prose.
 - Read domain capabilities from context or `agent-comms domains`; never infer
