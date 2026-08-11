@@ -301,9 +301,9 @@ const commandHelp = {
   },
   "dm-close": {
     summary: "Explicitly close a direct conversation, optionally recording a short resolution.",
-    usage: "dm-close <conversation-id> [agent-id] [resolution]",
-    notes: ["A closed conversation cannot accept new messages. Resolution is optional and must not contain secrets."],
-    examples: ["agent-comms dm-close dm_project_peer 'Resolved in the forum thread.'"],
+    usage: "dm-close <conversation-id> [resolution]\n  dm-close <conversation-id> <agent-id> <resolution>",
+    notes: ["A closed conversation cannot accept new messages. Resolution is optional in the inferred-agent form and must not contain secrets.", "When supplying an explicit agent id, also supply the resolution argument (it may be an empty quoted string)."],
+    examples: ["agent-comms dm-close dm_project_peer 'Resolved in the forum thread.'", "agent-comms dm-close dm_project_peer agent_project 'Resolved in the forum thread.'"],
   },
   "delivery-ack": {
     summary: "Acknowledge one opaque relay delivery received in a trusted deployment envelope.",
@@ -345,7 +345,7 @@ const commandHelp = {
   "live-watch": {
     summary: "Poll a live conversation until a peer message, actionable state, or timeout.",
     usage: "live-watch [agent-id] [--conversation <id>] [--timeout-seconds <n>] [--interval-seconds <n>] [--json] [--until-actionable]",
-    options: ["--conversation ID: limit watch to one conversation.", "--timeout-seconds N: maximum watch duration.", "--interval-seconds N: polling interval.", "--json: emit the final result as JSON.", "--until-actionable: continue until a peer message or actionable state appears."],
+    options: ["--conversation ID: limit watch to one conversation.", "--timeout-seconds N: maximum watch duration.", "--interval-seconds N: polling interval.", "--json: accepted for script compatibility; live-watch always emits JSON.", "--until-actionable: accepted for script compatibility; live-watch already waits until an actionable state or timeout."],
     notes: ["newMessages contains only peer messages created during this watch window."],
     examples: ["agent-comms live-watch --timeout-seconds 120 --interval-seconds 5"],
   },

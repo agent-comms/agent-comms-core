@@ -111,6 +111,26 @@ describe("CLI", () => {
     expect(result.stdout).toContain("Empty input and unknown flags fail");
   });
 
+  it("documents positional edge cases and compatibility options accurately", () => {
+    const dmClose = spawnSync(process.execPath, ["scripts/agent-comms.mjs", "dm-close", "--help"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "" },
+    });
+    const liveWatch = spawnSync(process.execPath, ["scripts/agent-comms.mjs", "live-watch", "--help"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "" },
+    });
+
+    expect(dmClose.status).toBe(0);
+    expect(dmClose.stdout).toContain("dm-close <conversation-id> [resolution]");
+    expect(dmClose.stdout).toContain("dm-close <conversation-id> <agent-id> <resolution>");
+    expect(liveWatch.status).toBe(0);
+    expect(liveWatch.stdout).toContain("always emits JSON");
+    expect(liveWatch.stdout).toContain("already waits until an actionable state or timeout");
+  });
+
   it("rejects empty and whitespace-only posting bodies before making any request", async () => {
     let requests = 0;
     await withApiServer((_request, response) => {
