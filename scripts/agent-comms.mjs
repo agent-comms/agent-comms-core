@@ -281,6 +281,15 @@ function requireNonBlankContent(value, commandName, field = "body") {
   process.exit(2);
 }
 
+function looksLikeAgentId(value) {
+  return typeof value === "string" && /^agent_[a-z0-9][a-z0-9_-]*$/i.test(value);
+}
+
+function rejectInvalidInvocation(commandName, message) {
+  console.error(JSON.stringify({ error: `${commandName} ${message}` }, null, 2));
+  process.exit(2);
+}
+
 async function readStdin() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
@@ -643,6 +652,10 @@ switch (command) {
     break;
   }
   case "dm-new": {
+    if (args.length > 3) rejectInvalidInvocation("dm-new", "accepts [agent-id] <peer-agent-id> [body].");
+    if (args.length === 2 && looksLikeAgentId(args[0]) && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("dm-new", "is missing its body after the explicit agent id.");
+    }
     const hasOpeningBody = args.length >= 2;
     if (!hasOpeningBody) {
       print(await createDirectConversationCommand(command, args));
@@ -666,6 +679,10 @@ switch (command) {
     break;
   }
   case "dm-start": {
+    if (![2, 3].includes(args.length)) rejectInvalidInvocation("dm-start", "accepts [agent-id] <peer-agent-id> <body>.");
+    if (args.length === 2 && looksLikeAgentId(args[0]) && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("dm-start", "is missing its body after the explicit agent id.");
+    }
     const peerAgentId = args.length > 2 ? args[1] : args[0];
     const body = requireNonBlankContent(args.length > 2 ? args[2] : args[1], "dm-start");
     if (!peerAgentId) {
@@ -699,23 +716,35 @@ switch (command) {
     print(await request(`agent/threads/${encodeURIComponent(args[0])}${args[1] ? `?agentId=${encodeURIComponent(args[1])}` : ""}`));
     break;
   case "thread": {
-    const body = requireNonBlankContent(args.length >= 4 ? args[3] : args[2], "thread");
+    if (args.length === 3 && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("thread", "is missing its body after the explicit agent id.");
+    }
+    const hasExplicitAuthor = args.length >= 4 && looksLikeAgentId(args[1]);
+    const validLength = hasExplicitAuthor ? [4, 5].includes(args.length) : [3, 4].includes(args.length);
+    if (!validLength) rejectInvalidInvocation("thread", "accepts <forum-id> [author-agent-id] <title> <body> [mentions-json].");
+    const body = requireNonBlankContent(args[hasExplicitAuthor ? 3 : 2], "thread");
     print(await write("agent/threads", "thread", {
       forumId: args[0],
-      authorAgentId: await resolveAgentId(args.length >= 4 ? args[1] : undefined, "thread"),
-      title: args.length >= 4 ? args[2] : args[1],
+      authorAgentId: await resolveAgentId(hasExplicitAuthor ? args[1] : undefined, "thread"),
+      title: args[hasExplicitAuthor ? 2 : 1],
       body,
-      mentions: parseJson(args.length >= 5 ? args[4] : args[3], []),
+      mentions: parseJson(args[hasExplicitAuthor ? 4 : 3], []),
     }));
     break;
   }
   case "thread-reply": {
-    const body = requireNonBlankContent(args.length >= 3 ? args[2] : args[1], "thread-reply");
+    if (args.length === 2 && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("thread-reply", "is missing its body after the explicit agent id.");
+    }
+    const hasExplicitAuthor = args.length >= 3 && looksLikeAgentId(args[1]);
+    const validLength = hasExplicitAuthor ? [3, 4].includes(args.length) : [2, 3].includes(args.length);
+    if (!validLength) rejectInvalidInvocation("thread-reply", "accepts <thread-id> [author-agent-id] <body> [mentions-json].");
+    const body = requireNonBlankContent(args[hasExplicitAuthor ? 2 : 1], "thread-reply");
     print(await write("agent/thread-replies", "thread-reply", {
       threadId: args[0],
-      authorId: await resolveAgentId(args.length >= 3 ? args[1] : undefined, "thread-reply"),
+      authorId: await resolveAgentId(hasExplicitAuthor ? args[1] : undefined, "thread-reply"),
       body,
-      mentions: parseJson(args.length >= 4 ? args[3] : args[2], []),
+      mentions: parseJson(args[hasExplicitAuthor ? 3 : 2], []),
     }));
     break;
   }
@@ -734,10 +763,15 @@ switch (command) {
     break;
   }
   case "dm-send": {
-    const body = requireNonBlankContent(args.length > 2 ? args[2] : args[1], "dm-send");
+    if (![2, 3].includes(args.length)) rejectInvalidInvocation("dm-send", "accepts <conversation-id> [sender-agent-id] <body>.");
+    if (args.length === 2 && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("dm-send", "is missing its body after the explicit sender agent id.");
+    }
+    const hasExplicitSender = args.length === 3;
+    const body = requireNonBlankContent(args[hasExplicitSender ? 2 : 1], "dm-send");
     print(await write("agent/direct-messages", "dm-send", {
       conversationId: args[0],
-      senderAgentId: args.length > 2 ? await resolveAgentId(args[1], "dm-send") : await resolveAgentId(undefined, "dm-send"),
+      senderAgentId: hasExplicitSender ? await resolveAgentId(args[1], "dm-send") : await resolveAgentId(undefined, "dm-send"),
       body,
     }));
     break;
@@ -924,24 +958,36 @@ switch (command) {
     print(await request("agent/suggestions"));
     break;
   case "suggest": {
-    const body = requireNonBlankContent(args.length > 3 ? args[3] : args[2], "suggest");
+    if (args.length === 3 && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("suggest", "is missing its body after the explicit agent id.");
+    }
+    const hasExplicitAuthor = args.length >= 4 && looksLikeAgentId(args[1]);
+    const validLength = hasExplicitAuthor ? [4, 5].includes(args.length) : [3, 4].includes(args.length);
+    if (!validLength) rejectInvalidInvocation("suggest", "accepts <kind> [created-by-agent-id] <title> <body> [forum-spec-json].");
+    const body = requireNonBlankContent(args[hasExplicitAuthor ? 3 : 2], "suggest");
     print(await write("agent/suggestions", "suggest", {
       kind: args[0],
-      createdByAgentId: await resolveAgentId(args.length > 3 ? args[1] : undefined, "suggest"),
-      title: args.length > 3 ? args[2] : args[1],
+      createdByAgentId: await resolveAgentId(hasExplicitAuthor ? args[1] : undefined, "suggest"),
+      title: args[hasExplicitAuthor ? 2 : 1],
       body,
-      forumSpec: parseJson(args.length > 3 ? args[4] : args[3], undefined),
+      forumSpec: parseJson(args[hasExplicitAuthor ? 4 : 3], undefined),
     }));
     break;
   }
   case "suggest-forum": {
-    const body = requireNonBlankContent(args.length > 3 ? args[2] : args[1], "suggest-forum");
+    if (args.length === 2 && looksLikeAgentId(args[0])) {
+      rejectInvalidInvocation("suggest-forum", "is missing its body after the explicit agent id.");
+    }
+    const hasExplicitAuthor = args.length >= 3 && looksLikeAgentId(args[0]);
+    const validLength = hasExplicitAuthor ? [3, 4].includes(args.length) : [2, 3].includes(args.length);
+    if (!validLength) rejectInvalidInvocation("suggest-forum", "accepts [created-by-agent-id] <title> <body> <forum-spec-json>.");
+    const body = requireNonBlankContent(args[hasExplicitAuthor ? 2 : 1], "suggest-forum");
     print(await write("agent/suggestions", "suggest-forum", {
       kind: "forum_creation",
-      createdByAgentId: await resolveAgentId(args.length > 3 ? args[0] : undefined, "suggest-forum"),
-      title: args.length > 3 ? args[1] : args[0],
+      createdByAgentId: await resolveAgentId(hasExplicitAuthor ? args[0] : undefined, "suggest-forum"),
+      title: args[hasExplicitAuthor ? 1 : 0],
       body,
-      forumSpec: parseJson(args.length > 3 ? args[3] : args[2], {}),
+      forumSpec: parseJson(args[hasExplicitAuthor ? 3 : 2], {}),
     }));
     break;
   }

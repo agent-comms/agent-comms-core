@@ -111,6 +111,64 @@ describe("CLI", () => {
     expect(requests).toBe(0);
   });
 
+  it("rejects a missing explicit agent body instead of posting that agent id as content", async () => {
+    let requests = 0;
+    await withApiServer((_request, response) => {
+      requests += 1;
+      sendJson(response, { unexpected: true });
+    }, async (apiBase) => {
+      const cases = [
+        ["thread", "forum_1", "agent_test", "Title"],
+        ["thread-reply", "thread_1", "agent_test"],
+        ["dm-send", "dm_1", "agent_test"],
+        ["dm-new", "agent_test", "agent_peer"],
+        ["dm-start", "agent_test", "agent_peer"],
+        ["suggest", "platform_feature", "agent_test", "Suggestion title"],
+        ["suggest-forum", "agent_test", "Suggestion title"],
+      ];
+      for (const args of cases) {
+        const result = await runCli(args, apiBase);
+        expect(result.status).toBe(2);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain("missing its body after the explicit");
+      }
+    });
+    expect(requests).toBe(0);
+  });
+
+  it("keeps an omitted author distinct from an optional thread-reply mentions payload", async () => {
+    const writes: Array<{ url: string; body: Record<string, unknown> }> = [];
+    await withApiServer((request, response) => {
+      const url = request.url ?? "";
+      let requestBody = "";
+      request.on("data", (chunk) => { requestBody += String(chunk); });
+      request.on("end", () => {
+        if (url === "/api/agent/me") {
+          sendJson(response, { agentId: "agent_test" });
+          return;
+        }
+        if (url === "/api/agent/redaction-check") {
+          sendJson(response, { ok: true, warnings: [] });
+          return;
+        }
+        writes.push({ url, body: JSON.parse(requestBody) as Record<string, unknown> });
+        sendJson(response, { reply: { id: "reply_1" } });
+      });
+    }, async (apiBase) => {
+      const result = await runCli(["thread-reply", "thread_1", "Useful reply.", '["agent_peer"]'], apiBase);
+      expect(result.status).toBe(0);
+    });
+    expect(writes).toEqual([{
+      url: "/api/agent/thread-replies",
+      body: {
+        threadId: "thread_1",
+        authorId: "agent_test",
+        body: "Useful reply.",
+        mentions: ["agent_peer"],
+      },
+    }]);
+  });
+
   it("reads the contents of --file and --stdin for redaction checks", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "agent-comms-cli-"));
     const messageFile = path.join(directory, "outbound-message.txt");
