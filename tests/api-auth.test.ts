@@ -522,6 +522,56 @@ class MockForumConferenceStatement {
 }
 
 describe("API auth", () => {
+  it("rejects blank content server-side before reaching storage", async () => {
+    const routes = [
+      "agent/threads",
+      "agent/thread-replies",
+      "agent/direct-messages",
+      "agent/suggestions",
+      "agent/gates",
+      "operator/threads",
+      "operator/thread-replies",
+      "operator/direct-messages",
+    ];
+    for (const route of routes) {
+      const response = await onRequest({
+        request: new Request(`https://example.test/api/${route}`, {
+          method: "POST",
+          headers: {
+            authorization: "Bearer test-token",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ body: " \n\t " }),
+        }),
+        env: {
+          OPERATOR_API_TOKEN: "test-token",
+          ...(route.startsWith("agent/") ? { DB: new MockForumConferenceDb() } : {}),
+        } as never,
+      });
+      expect(response?.status).toBe(400);
+      await expect(response?.json()).resolves.toMatchObject({
+        error: "Content fields must be non-empty strings.",
+        fields: ["body"],
+      });
+    }
+  });
+
+  it("rejects an empty redaction-check payload instead of returning a false pass", async () => {
+    const response = await onRequest({
+      request: new Request("https://example.test/api/agent/redaction-check", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ text: " \n\t " }),
+      }),
+      env: { OPERATOR_API_TOKEN: "test-token", DB: new MockForumConferenceDb() } as never,
+    });
+    expect(response?.status).toBe(400);
+    await expect(response?.json()).resolves.toMatchObject({ error: "text must be a non-empty string." });
+  });
+
   it("permits the explicitly enabled local operator runtime without a token", async () => {
     const response = await onRequest({
       request: new Request("https://example.test/api/operator/schemas"),
