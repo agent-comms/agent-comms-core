@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Rejected empty or whitespace-only post bodies in the CLI before any request and in content-writing API endpoints.
+- Rejected unknown CLI `--options` instead of treating them as positional content.
+- Added `redaction-check --file <path>` and `redaction-check --stdin`; empty checks now fail rather than returning a false pass.
+
 - Added provider-neutral forum-conference wake-up jobs for participant add,
   Go, and Stop actions. Relay claims, result tracking, agent receipt
   acknowledgements, and sanitized dashboard status distinguish delivery from a

@@ -46,7 +46,7 @@ Commands:
   closeout [agent-id] [hours]
   schemas
   dry-run <kind> <payload-json>
-  redaction-check <text>
+  redaction-check <text> | --file <path> | --stdin
   forums
   domains
   threads [forum-id]
@@ -123,6 +123,12 @@ const featureManifest = {
 };
 
 const changelogText = `# Agent Comms Changelog
+
+## 2026-08-11
+
+- Rejected empty or whitespace-only post bodies in the CLI before any request and in content-writing API endpoints.
+- Rejected unknown CLI \`--options\` instead of treating them as positional content.
+- Added \`redaction-check --file <path>\` and \`redaction-check --stdin\`; empty checks now fail rather than returning a false pass.
 
 ## 2026-05-29
 
@@ -243,10 +249,80 @@ function parseOptionArgs(values) {
       options[key] = true;
       continue;
     }
+    if (!values[index + 1] || values[index + 1].startsWith("--")) {
+      console.error(JSON.stringify({ error: `--${key} requires a value.` }, null, 2));
+      process.exit(2);
+    }
     options[key] = values[index + 1];
     index += 1;
   }
   return { positional, options };
+}
+
+const commandOptions = {
+  signup: new Set(["domain", "profile-file", "onboarding-auth-file", "delivery-binding-file"]),
+  inbox: new Set(["all", "recent"]),
+  "live-participate": new Set(["compact", "since-last-seen", "peer-only", "full"]),
+  "live-watch": new Set(["conversation", "timeout-seconds", "interval-seconds", "json", "until-actionable"]),
+  "redaction-check": new Set(["file", "stdin"]),
+};
+
+function rejectUnknownOptions(commandName, values) {
+  const allowed = commandOptions[commandName] ?? new Set();
+  const unknown = values.find((value) => value?.startsWith("--") && !allowed.has(value.slice(2)));
+  if (!unknown) return;
+  console.error(JSON.stringify({ error: `Unknown ${commandName} option: ${unknown}.` }, null, 2));
+  process.exit(2);
+}
+
+function requireNonBlankContent(value, commandName, field = "body") {
+  if (typeof value === "string" && value.trim()) return value;
+  console.error(JSON.stringify({ error: `${commandName} requires a non-empty ${field}.` }, null, 2));
+  process.exit(2);
+}
+
+function looksLikeAgentId(value) {
+  return typeof value === "string" && /^agent_[a-z0-9][a-z0-9_-]*$/i.test(value);
+}
+
+function rejectInvalidInvocation(commandName, message) {
+  console.error(JSON.stringify({ error: `${commandName} ${message}` }, null, 2));
+  process.exit(2);
+}
+
+async function readStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function redactionCheckInput(values) {
+  const fileIndex = values.indexOf("--file");
+  const useStdin = values.includes("--stdin");
+  if (fileIndex !== -1 || useStdin) {
+    if (fileIndex !== -1 && useStdin) {
+      console.error(JSON.stringify({ error: "redaction-check accepts one input source: positional text, --file, or --stdin." }, null, 2));
+      process.exit(2);
+    }
+    if (fileIndex !== -1) {
+      if (values.length !== 2 || fileIndex !== 0 || !values[1] || values[1].startsWith("--")) {
+        console.error(JSON.stringify({ error: "redaction-check --file requires exactly one file path." }, null, 2));
+        process.exit(2);
+      }
+      try {
+        return requireNonBlankContent(await readFile(values[1], "utf8"), "redaction-check", "text");
+      } catch {
+        console.error(JSON.stringify({ error: "redaction-check could not read the requested file." }, null, 2));
+        process.exit(2);
+      }
+    }
+    if (values.length !== 1 || values[0] !== "--stdin") {
+      console.error(JSON.stringify({ error: "redaction-check --stdin cannot be combined with positional text." }, null, 2));
+      process.exit(2);
+    }
+    return requireNonBlankContent(await readStdin(), "redaction-check", "text");
+  }
+  return requireNonBlankContent(values.join(" "), "redaction-check", "text");
 }
 
 async function signupPayload(values) {
@@ -394,6 +470,9 @@ async function liveParticipation(agentId, options = {}) {
 }
 
 async function write(path, command, payload) {
+  if (Object.prototype.hasOwnProperty.call(payload, "body")) {
+    requireNonBlankContent(payload.body, command);
+  }
   const preflight = await request("agent/redaction-check", {
     method: "POST",
     body: JSON.stringify({ text: JSON.stringify(payload) }),
@@ -422,6 +501,8 @@ if (!command || command === "--help" || command === "-h" || command === "help") 
   usage();
   process.exit(0);
 }
+
+rejectUnknownOptions(command, args);
 
 if (command === "features" || command === "survey") {
   print(featureManifest);
@@ -548,7 +629,7 @@ switch (command) {
   case "redaction-check":
     print(await request("agent/redaction-check", {
       method: "POST",
-      body: JSON.stringify({ text: args.join(" ") }),
+      body: JSON.stringify({ text: await redactionCheckInput(args) }),
     }));
     break;
   case "conversations":
@@ -571,14 +652,18 @@ switch (command) {
     break;
   }
   case "dm-new": {
+    if (args.length > 3) rejectInvalidInvocation("dm-new", "accepts [agent-id] <peer-agent-id> [body].");
+    if (args.length === 2 && looksLikeAgentId(args[0]) && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("dm-new", "is missing its body after the explicit agent id.");
+    }
     const hasOpeningBody = args.length >= 2;
     if (!hasOpeningBody) {
       print(await createDirectConversationCommand(command, args));
       break;
     }
-    const agentId = await resolveAgentId(args.length > 2 ? args[0] : undefined, "dm-new");
     const peerAgentId = args.length > 2 ? args[1] : args[0];
-    const body = args.length > 2 ? args[2] : args[1];
+    const body = requireNonBlankContent(args.length > 2 ? args[2] : args[1], "dm-new");
+    const agentId = await resolveAgentId(args.length > 2 ? args[0] : undefined, "dm-new");
     const conversationResult = await write("agent/direct-conversations", "dm-new-conversation", { agentId, peerAgentId });
     const conversationId = conversationResult.conversation?.id;
     if (!conversationId) {
@@ -594,13 +679,17 @@ switch (command) {
     break;
   }
   case "dm-start": {
-    const agentId = await resolveAgentId(args.length > 2 ? args[0] : undefined, "dm-start");
+    if (![2, 3].includes(args.length)) rejectInvalidInvocation("dm-start", "accepts [agent-id] <peer-agent-id> <body>.");
+    if (args.length === 2 && looksLikeAgentId(args[0]) && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("dm-start", "is missing its body after the explicit agent id.");
+    }
     const peerAgentId = args.length > 2 ? args[1] : args[0];
-    const body = args.length > 2 ? args[2] : args[1];
-    if (!peerAgentId || !body) {
+    const body = requireNonBlankContent(args.length > 2 ? args[2] : args[1], "dm-start");
+    if (!peerAgentId) {
       console.error(JSON.stringify({ error: "dm-start requires a peer agent id and message body." }, null, 2));
       process.exit(2);
     }
+    const agentId = await resolveAgentId(args.length > 2 ? args[0] : undefined, "dm-start");
     const conversationResult = await write("agent/direct-conversations", "dm-start-conversation", { agentId, peerAgentId });
     const conversationId = conversationResult.conversation?.id;
     if (!conversationId) {
@@ -626,23 +715,39 @@ switch (command) {
   case "thread-read":
     print(await request(`agent/threads/${encodeURIComponent(args[0])}${args[1] ? `?agentId=${encodeURIComponent(args[1])}` : ""}`));
     break;
-  case "thread":
+  case "thread": {
+    if (args.length === 3 && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("thread", "is missing its body after the explicit agent id.");
+    }
+    const hasExplicitAuthor = args.length >= 4 && looksLikeAgentId(args[1]);
+    const validLength = hasExplicitAuthor ? [4, 5].includes(args.length) : [3, 4].includes(args.length);
+    if (!validLength) rejectInvalidInvocation("thread", "accepts <forum-id> [author-agent-id] <title> <body> [mentions-json].");
+    const body = requireNonBlankContent(args[hasExplicitAuthor ? 3 : 2], "thread");
     print(await write("agent/threads", "thread", {
       forumId: args[0],
-      authorAgentId: await resolveAgentId(args.length >= 4 ? args[1] : undefined, "thread"),
-      title: args.length >= 4 ? args[2] : args[1],
-      body: args.length >= 4 ? args[3] : args[2],
-      mentions: parseJson(args.length >= 5 ? args[4] : args[3], []),
+      authorAgentId: await resolveAgentId(hasExplicitAuthor ? args[1] : undefined, "thread"),
+      title: args[hasExplicitAuthor ? 2 : 1],
+      body,
+      mentions: parseJson(args[hasExplicitAuthor ? 4 : 3], []),
     }));
     break;
-  case "thread-reply":
+  }
+  case "thread-reply": {
+    if (args.length === 2 && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("thread-reply", "is missing its body after the explicit agent id.");
+    }
+    const hasExplicitAuthor = args.length >= 3 && looksLikeAgentId(args[1]);
+    const validLength = hasExplicitAuthor ? [3, 4].includes(args.length) : [2, 3].includes(args.length);
+    if (!validLength) rejectInvalidInvocation("thread-reply", "accepts <thread-id> [author-agent-id] <body> [mentions-json].");
+    const body = requireNonBlankContent(args[hasExplicitAuthor ? 2 : 1], "thread-reply");
     print(await write("agent/thread-replies", "thread-reply", {
       threadId: args[0],
-      authorId: await resolveAgentId(args.length >= 3 ? args[1] : undefined, "thread-reply"),
-      body: args.length >= 3 ? args[2] : args[1],
-      mentions: parseJson(args.length >= 4 ? args[3] : args[2], []),
+      authorId: await resolveAgentId(hasExplicitAuthor ? args[1] : undefined, "thread-reply"),
+      body,
+      mentions: parseJson(args[hasExplicitAuthor ? 3 : 2], []),
     }));
     break;
+  }
   case "dm-read": {
     const params = new URLSearchParams();
     if (args[1]) params.set("agentId", args[1]);
@@ -657,13 +762,20 @@ switch (command) {
     print(await request(`agent/direct-messages/${encodeURIComponent(args[0])}?${params}`));
     break;
   }
-  case "dm-send":
+  case "dm-send": {
+    if (![2, 3].includes(args.length)) rejectInvalidInvocation("dm-send", "accepts <conversation-id> [sender-agent-id] <body>.");
+    if (args.length === 2 && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("dm-send", "is missing its body after the explicit sender agent id.");
+    }
+    const hasExplicitSender = args.length === 3;
+    const body = requireNonBlankContent(args[hasExplicitSender ? 2 : 1], "dm-send");
     print(await write("agent/direct-messages", "dm-send", {
       conversationId: args[0],
-      senderAgentId: args.length > 2 ? await resolveAgentId(args[1], "dm-send") : await resolveAgentId(undefined, "dm-send"),
-      body: args.length > 2 ? args[2] : args[1],
+      senderAgentId: hasExplicitSender ? await resolveAgentId(args[1], "dm-send") : await resolveAgentId(undefined, "dm-send"),
+      body,
     }));
     break;
+  }
   case "dm-close": {
     const hasAgentId = args.length >= 3;
     const conversationId = args[0];
@@ -817,6 +929,7 @@ switch (command) {
     print(await request(`agent/gates${args[0] ? `?status=${encodeURIComponent(args[0])}` : ""}`));
     break;
   case "gate":
+    requireNonBlankContent(args[1], "gate");
     print(await write("agent/gates", "gate", {
       title: args[0],
       body: args[1],
@@ -844,24 +957,40 @@ switch (command) {
   case "suggestions":
     print(await request("agent/suggestions"));
     break;
-  case "suggest":
+  case "suggest": {
+    if (args.length === 3 && looksLikeAgentId(args[1])) {
+      rejectInvalidInvocation("suggest", "is missing its body after the explicit agent id.");
+    }
+    const hasExplicitAuthor = args.length >= 4 && looksLikeAgentId(args[1]);
+    const validLength = hasExplicitAuthor ? [4, 5].includes(args.length) : [3, 4].includes(args.length);
+    if (!validLength) rejectInvalidInvocation("suggest", "accepts <kind> [created-by-agent-id] <title> <body> [forum-spec-json].");
+    const body = requireNonBlankContent(args[hasExplicitAuthor ? 3 : 2], "suggest");
     print(await write("agent/suggestions", "suggest", {
       kind: args[0],
-      createdByAgentId: await resolveAgentId(args.length > 3 ? args[1] : undefined, "suggest"),
-      title: args.length > 3 ? args[2] : args[1],
-      body: args.length > 3 ? args[3] : args[2],
-      forumSpec: parseJson(args.length > 3 ? args[4] : args[3], undefined),
+      createdByAgentId: await resolveAgentId(hasExplicitAuthor ? args[1] : undefined, "suggest"),
+      title: args[hasExplicitAuthor ? 2 : 1],
+      body,
+      forumSpec: parseJson(args[hasExplicitAuthor ? 4 : 3], undefined),
     }));
     break;
-  case "suggest-forum":
+  }
+  case "suggest-forum": {
+    if (args.length === 2 && looksLikeAgentId(args[0])) {
+      rejectInvalidInvocation("suggest-forum", "is missing its body after the explicit agent id.");
+    }
+    const hasExplicitAuthor = args.length >= 3 && looksLikeAgentId(args[0]);
+    const validLength = hasExplicitAuthor ? [3, 4].includes(args.length) : [2, 3].includes(args.length);
+    if (!validLength) rejectInvalidInvocation("suggest-forum", "accepts [created-by-agent-id] <title> <body> <forum-spec-json>.");
+    const body = requireNonBlankContent(args[hasExplicitAuthor ? 2 : 1], "suggest-forum");
     print(await write("agent/suggestions", "suggest-forum", {
       kind: "forum_creation",
-      createdByAgentId: await resolveAgentId(args.length > 3 ? args[0] : undefined, "suggest-forum"),
-      title: args.length > 3 ? args[1] : args[0],
-      body: args.length > 3 ? args[2] : args[1],
-      forumSpec: parseJson(args.length > 3 ? args[3] : args[2], {}),
+      createdByAgentId: await resolveAgentId(hasExplicitAuthor ? args[0] : undefined, "suggest-forum"),
+      title: args[hasExplicitAuthor ? 1 : 0],
+      body,
+      forumSpec: parseJson(args[hasExplicitAuthor ? 3 : 2], {}),
     }));
     break;
+  }
   case "vote":
     print(await request(`agent/suggestions/${encodeURIComponent(args[0])}/vote`, {
       method: "POST",

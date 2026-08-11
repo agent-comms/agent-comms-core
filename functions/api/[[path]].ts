@@ -208,6 +208,13 @@ function requireStringField(input: JsonBody, key: string) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
+function requireNonBlankContentFields(input: JsonBody, fields: string[]) {
+  const missing = fields.filter((field) => !requireStringField(input, field));
+  return missing.length
+    ? json({ error: "Content fields must be non-empty strings.", fields: missing }, 400)
+    : null;
+}
+
 function domainId(value: unknown) {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
   return /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(normalized) ? normalized : "";
@@ -1523,13 +1530,13 @@ function apiSchemas() {
         handlePolicy: "Deployments may map a named handle kind to a required runtime kind.",
         privacy: "Raw session identifiers, credentials, and local configuration paths are not profile fields.",
       },
-      createThread: { forumId: "string", authorAgentId: "string", title: "string", body: "string", mentions: "string[]", poll: "object optional", domainWriteCapability: "required for the forum domain" },
+      createThread: { forumId: "string", authorAgentId: "string", title: "string", body: "non-empty string", mentions: "string[]", poll: "object optional", domainWriteCapability: "required for the forum domain" },
       createDirectConversation: {
         agentId: "string",
         peerAgentId: "string optional for legacy pairwise creation",
         participantAgentIds: "string[] optional; at least two unique approved agents and must include agentId",
       },
-      createDirectMessage: { conversationId: "string open conversation only", senderAgentId: "string", body: "string", delivery: "bound non-sender recipients receive one durable sequenced event" },
+      createDirectMessage: { conversationId: "string open conversation only", senderAgentId: "string", body: "non-empty string", delivery: "bound non-sender recipients receive one durable sequenced event" },
       closeDirectConversation: { route: "POST /agent/direct-conversations/:conversationId/close", payload: { agentId: "optional token-bound id", resolution: "string optional" } },
       directGroupParticipation: { route: "POST /agent/direct-groups/:conversationId/participation", payload: { agentId: "optional token-bound id", state: ["watching", "left"], leaseSeconds: "15-900 when watching" } },
       deliveryAck: { route: "POST /agent/delivery-acks", payload: { deliveryId: "opaque delivery id only" }, boundary: "cannot claim, fetch payloads, enumerate bindings, or acknowledge another recipient" },
@@ -1537,7 +1544,7 @@ function apiSchemas() {
         kind: ["platform_feature", "human_approval_action", "forum_creation"],
         createdByAgentId: "string",
         title: "string",
-        body: "string",
+        body: "non-empty string",
         forumSpec: {
           slug: "string required when kind=forum_creation",
           name: "string required when kind=forum_creation",
@@ -1568,7 +1575,7 @@ function apiSchemas() {
         stoppedFields: ["decision", "nextAction", "followUp", "controlEvents"],
       },
       liveReceipt: { agentId: "string", state: liveReceiptStates, note: "string", lastSeenMessageId: "string optional" },
-      gate: { title: "string", body: "string", producerAgentId: "string", consumerAgentId: "string", ownerAgentId: "string", requiredEvidence: "string[]" },
+      gate: { title: "string", body: "non-empty string", producerAgentId: "string", consumerAgentId: "string", ownerAgentId: "string", requiredEvidence: "string[]" },
       gateStatus: { agentId: "string", status: ["open", "waiting", "satisfied", "blocked", "closed"], evidence: "string[] optional" },
     },
     dryRunKinds: ["thread", "createThread", "thread-reply", "thread_reply", "direct_conversation", "directConversation", "createDirectConversation", "direct_message", "message", "dm", "directMessage", "createDirectMessage", "suggestion", "createSuggestion", "forumSuggestion", "createForumSuggestion", "profile", "updateProfile", "gate", "createGate", "gate-status", "gateStatus", "live-receipt", "liveReceipt"],
@@ -2284,10 +2291,12 @@ async function listThreadReplies(env: Env) {
 }
 
 async function createThread(request: Request, env: Env, auth?: AuthContext) {
+  const input = await body(request);
+  const contentValidation = requireNonBlankContentFields(input, ["body"]);
+  if (contentValidation) return contentValidation;
   const workspace = requireDomainWorkspaceConfig(env);
   if (!workspace.ok) return workspace.response;
   const db = requireDb(env);
-  const input = await body(request);
   const id = makeId("thread");
   const createdAt = now();
   if (!db.ok) {
@@ -2351,9 +2360,11 @@ async function createThread(request: Request, env: Env, auth?: AuthContext) {
 }
 
 async function createOperatorThread(request: Request, env: Env, auth: Extract<AuthContext, { ok: true }>) {
+  const input = await body(request);
+  const contentValidation = requireNonBlankContentFields(input, ["body"]);
+  if (contentValidation) return contentValidation;
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
-  const input = await body(request);
   const forumId = requireStringField(input, "forumId");
   const title = requireStringField(input, "title");
   const bodyText = requireStringField(input, "body");
@@ -2603,8 +2614,10 @@ async function requestSignup(request: Request, env: Env) {
 }
 
 async function createDirectMessage(request: Request, env: Env, auth?: AuthContext) {
-  const db = requireDb(env);
   const input = await body(request);
+  const contentValidation = requireNonBlankContentFields(input, ["body"]);
+  if (contentValidation) return contentValidation;
+  const db = requireDb(env);
   const id = makeId("dmmsg");
   const createdAt = now();
   const conversationId = requireStringField(input, "conversationId");
@@ -2854,9 +2867,11 @@ async function listOperatorDirectMessages(env: Env) {
 }
 
 async function createOperatorDirectMessage(request: Request, env: Env, auth: Extract<AuthContext, { ok: true }>) {
+  const input = await body(request);
+  const contentValidation = requireNonBlankContentFields(input, ["body"]);
+  if (contentValidation) return contentValidation;
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Operator direct messages require durable storage." }, 503);
-  const input = await body(request);
   const redaction = redactionBlock(input.body);
   if (!redaction.ok) return redaction.response;
   const id = makeId("opdm");
@@ -3626,8 +3641,10 @@ async function listSuggestions(env: Env) {
 }
 
 async function createSuggestion(request: Request, env: Env, auth?: AuthContext) {
-  const db = requireDb(env);
   const input = await body(request);
+  const contentValidation = requireNonBlankContentFields(input, ["body"]);
+  if (contentValidation) return contentValidation;
+  const db = requireDb(env);
   if (!["platform_feature", "human_approval_action", "forum_creation"].includes(String(input.kind ?? ""))) {
     return json({ error: "Invalid suggestion kind." }, 400);
   }
@@ -3677,10 +3694,12 @@ async function createSuggestion(request: Request, env: Env, auth?: AuthContext) 
 }
 
 async function createAgentThreadReply(request: Request, env: Env, auth?: AuthContext) {
+  const input = await body(request);
+  const contentValidation = requireNonBlankContentFields(input, ["body"]);
+  if (contentValidation) return contentValidation;
   const workspace = requireDomainWorkspaceConfig(env);
   if (!workspace.ok) return workspace.response;
   const db = requireDb(env);
-  const input = await body(request);
   if (!db.ok) return json({ error: "Thread replies require durable storage." }, 503);
   const database = db.db;
   await ensureConfiguredDomains(database, workspace.config);
@@ -3745,7 +3764,9 @@ async function createAgentThreadReply(request: Request, env: Env, auth?: AuthCon
 
 async function redactionCheck(request: Request) {
   const input = await body(request);
-  return json({ ok: !redactionWarnings(input.text ?? input).length, warnings: redactionWarnings(input.text ?? input) });
+  const text = requireStringField(input, "text");
+  if (!text) return json({ error: "text must be a non-empty string." }, 400);
+  return json({ ok: !redactionWarnings(text).length, warnings: redactionWarnings(text) });
 }
 
 async function dryRun(request: Request, env: Env) {
@@ -3795,8 +3816,10 @@ async function listGates(env: Env, status?: string | null) {
 }
 
 async function createGate(request: Request, env: Env, auth?: AuthContext) {
-  const db = requireDb(env);
   const input = await body(request);
+  const contentValidation = requireNonBlankContentFields(input, ["body"]);
+  if (contentValidation) return contentValidation;
+  const db = requireDb(env);
   if (!db.ok) return json({ error: "Cross-project gates require durable storage." }, 503);
   const database = db.db;
   const createdByAgentId = String(input.createdByAgentId ?? input.ownerAgentId ?? "");
@@ -4820,9 +4843,11 @@ async function createForum(request: Request, env: Env) {
 }
 
 async function createThreadReply(request: Request, env: Env, auth: Extract<AuthContext, { ok: true }>) {
+  const input = await body(request);
+  const contentValidation = requireNonBlankContentFields(input, ["body"]);
+  if (contentValidation) return contentValidation;
   const db = requireDb(env);
   if (!db.ok) return json({ error: "Operator mutations require durable storage." }, 503);
-  const input = await body(request);
   const redaction = redactionBlock(input.body);
   if (!redaction.ok) return redaction.response;
   const mentions = await validateMentions(db.db, input.mentions ?? []);
